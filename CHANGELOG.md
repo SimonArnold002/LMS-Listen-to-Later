@@ -1,5 +1,14 @@
 # Changelog
 
+## 0.1.1 — Add-menu fixes
+
+### Fixed
+- **"Add album to Listen to Later" missing from track/album menus.** The track capture path had two defects that made it die silently on local tracks (so no menu item rendered): it dereferenced `$remoteMeta` when it was `undef` (local tracks have no remote metadata), and it treated `file://` library URLs as remote/streaming. Now `$remoteMeta` is always a hashref and remote-vs-local is decided from the track's own flag.
+- Hardened info-provider registration: each `registerInfoProvider` call now `require`s its menu module and is wrapped in `eval`, so a not-yet-loaded module can't abort the whole plugin.
+
+### Added
+- `warn`-level diagnostics around provider registration and the add handlers (temporary, to confirm wiring on the live server).
+
 ## 0.1.0 — Initial build
 
 First working version of **Listen to Later**, a Lyrion Music Server plugin that saves albums from any source into a curated list and tracks what you've played.
