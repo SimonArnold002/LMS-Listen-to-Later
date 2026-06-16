@@ -1,0 +1,98 @@
+PLUGIN_LTL
+	EN	Listen to Later
+
+PLUGIN_LTL_DESC
+	EN	Save albums from your library or any streaming service to a Listen to Later list, then have them move to a Played section once you've heard them.
+
+PLUGIN_LTL_ADD
+	EN	Add album to Listen to Later
+
+PLUGIN_LTL_ADDED
+	EN	Added to Listen to Later
+
+PLUGIN_LTL_ALREADY
+	EN	Already in Listen to Later
+
+PLUGIN_LTL_ERROR
+	EN	Could not save album
+
+PLUGIN_LTL_LISTEN_LATER
+	EN	Listen to Later
+
+PLUGIN_LTL_PLAYED
+	EN	Played
+
+PLUGIN_LTL_SETTINGS
+	EN	Plugin Settings
+
+PLUGIN_LTL_EMPTY
+	EN	Nothing here yet
+
+PLUGIN_LTL_UNKNOWN_ALBUM
+	EN	Unknown Album
+
+PLUGIN_LTL_PLAY_ALBUM
+	EN	Play album
+
+PLUGIN_LTL_REMOVE
+	EN	Remove from list
+
+PLUGIN_LTL_REMOVED
+	EN	Removed
+
+PLUGIN_LTL_MOVE_PLAYED
+	EN	Move to Played
+
+PLUGIN_LTL_MOVE_LATER
+	EN	Move to Listen to Later
+
+PLUGIN_LTL_MOVED
+	EN	Moved
+
+PLUGIN_LTL_NO_MATCH
+	EN	Could not find this album to play
+
+PLUGIN_LTL_SECTION_LIST
+	EN	List Settings
+
+PLUGIN_LTL_SECTION_PLAYED
+	EN	Played Settings
+
+PLUGIN_LTL_DEFAULT_SORT
+	EN	Default sort order
+
+PLUGIN_LTL_DEFAULT_SORT_DESC
+	EN	How the Listen to Later and Played lists are ordered.
+
+PLUGIN_LTL_SORT_ADDED
+	EN	Recently added
+
+PLUGIN_LTL_SORT_ARTIST
+	EN	Artist
+
+PLUGIN_LTL_SORT_ALBUM
+	EN	Album
+
+PLUGIN_LTL_SORT_YEAR
+	EN	Year
+
+PLUGIN_LTL_SORT_PLAYED
+	EN	Recently played
+
+PLUGIN_LTL_WATCH_OUTSIDE
+	EN	Automatically move albums to Played
+
+PLUGIN_LTL_WATCH_OUTSIDE_DESC
+	EN	When on, a saved album moves to Played once you have listened to most of it, whether you played it from this list or anywhere else. Turn off to only move albums manually.
+
+PLUGIN_LTL_THRESHOLD
+	EN	Played threshold
+
+PLUGIN_LTL_THRESHOLD_DESC
+	EN	How much of a library album must be played before it moves to Played (percent of its tracks). Default 60.
+
+PLUGIN_LTL_STREAM_MIN
+	EN	Streaming track count
+
+PLUGIN_LTL_STREAM_MIN_DESC
+	EN	Streaming albums have no reliable track total, so they move to Played after this many distinct tracks have played. Default 4.

@@ -1,0 +1,29 @@
+[% PROCESS settings/header.html %]
+
+<h2>[% 'PLUGIN_LTL_SECTION_LIST' | string %]</h2>
+
+[% WRAPPER setting title="PLUGIN_LTL_DEFAULT_SORT" desc="PLUGIN_LTL_DEFAULT_SORT_DESC" %]
+<div>
+  <label><input type="radio" name="pref_sort" value="added"  [% IF prefs.sort == 'added'  %]checked="checked"[% END %]> [% 'PLUGIN_LTL_SORT_ADDED'  | string %]</label><br>
+  <label><input type="radio" name="pref_sort" value="artist" [% IF prefs.sort == 'artist' %]checked="checked"[% END %]> [% 'PLUGIN_LTL_SORT_ARTIST' | string %]</label><br>
+  <label><input type="radio" name="pref_sort" value="album"  [% IF prefs.sort == 'album'  %]checked="checked"[% END %]> [% 'PLUGIN_LTL_SORT_ALBUM'  | string %]</label><br>
+  <label><input type="radio" name="pref_sort" value="year"   [% IF prefs.sort == 'year'   %]checked="checked"[% END %]> [% 'PLUGIN_LTL_SORT_YEAR'   | string %]</label><br>
+  <label><input type="radio" name="pref_sort" value="played" [% IF prefs.sort == 'played' %]checked="checked"[% END %]> [% 'PLUGIN_LTL_SORT_PLAYED' | string %]</label>
+</div>
+[% END %]
+
+<h2>[% 'PLUGIN_LTL_SECTION_PLAYED' | string %]</h2>
+
+[% WRAPPER setting title="PLUGIN_LTL_WATCH_OUTSIDE" desc="PLUGIN_LTL_WATCH_OUTSIDE_DESC" %]
+<input type="checkbox" name="pref_watch_outside" value="1" [% IF prefs.watch_outside %]checked="checked"[% END %]>
+[% END %]
+
+[% WRAPPER setting title="PLUGIN_LTL_THRESHOLD" desc="PLUGIN_LTL_THRESHOLD_DESC" %]
+<input type="number" name="pref_played_threshold" value="[% prefs.played_threshold %]" min="10" max="100" size="4"> %
+[% END %]
+
+[% WRAPPER setting title="PLUGIN_LTL_STREAM_MIN" desc="PLUGIN_LTL_STREAM_MIN_DESC" %]
+<input type="number" name="pref_streaming_min_tracks" value="[% prefs.streaming_min_tracks %]" min="1" max="50" size="4">
+[% END %]
+
+[% PROCESS settings/footer.html %]
