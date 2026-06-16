@@ -51,6 +51,12 @@ sub initPlugin {
     eval { Plugins::ListenToLater::DB::dbh(); 1 }
         or $log->error("Listen to Later DB init failed: $@");
 
+    # CLI commands: [needClient, isQuery, hasTags, func]
+    Slim::Control::Request::addDispatch(['listentolater', 'add'],         [0, 0, 1, \&_addCommand]);
+    Slim::Control::Request::addDispatch(['listentolater', 'contextmenu'], [0, 1, 1, \&_contextMenuQuery]);
+    Slim::Control::Request::addDispatch(['listentolater', 'remove'],      [0, 0, 1, \&_removeCommand]);
+    Slim::Control::Request::addDispatch(['listentolater', 'move'],        [0, 0, 1, \&_moveCommand]);
+
     _registerInfoProviders();
 
     require Plugins::ListenToLater::Played;
@@ -75,18 +81,25 @@ sub _registerInfoProviders {
     # register call below dies and aborts the whole plugin, so guard each.
     eval {
         require Slim::Menu::TrackInfo;
-        Slim::Menu::TrackInfo->registerInfoProvider(listentolater => {
-            func => \&_trackInfoHandler,
-        });
+        # NB: registerInfoProvider is ($class, $name, %details) — pass a FLAT
+        # list, NOT a hashref. A hashref makes %details=(HASH=>undef) so `func`
+        # is lost and the provider is silently skipped.
+        Slim::Menu::TrackInfo->registerInfoProvider( listentolater => (
+            menuMode => 1,
+            before   => 'artwork',   # sit with the play actions, not buried in "More"
+            func     => \&_trackInfoHandler,
+        ) );
         $log->warn('LTL: registered TrackInfo provider');
         1;
     } or $log->error("LTL: TrackInfo provider registration failed: $@");
 
     eval {
         require Slim::Menu::AlbumInfo;
-        Slim::Menu::AlbumInfo->registerInfoProvider(listentolater => {
-            func => \&_albumInfoHandler,
-        });
+        Slim::Menu::AlbumInfo->registerInfoProvider( listentolater => (
+            menuMode => 1,
+            before   => 'contributors',   # after the play cluster, not in "More"
+            func     => \&_albumInfoHandler,
+        ) );
         $log->warn('LTL: registered AlbumInfo provider');
         1;
     } or $log->error("LTL: AlbumInfo provider registration failed: $@");
@@ -120,27 +133,145 @@ sub _albumInfoHandler {
     return _addItem($client, $rec);
 }
 
-# The shared menu item: a drill that performs the add and confirms briefly.
+# The shared menu item. Modelled on the built-in `playitem`: a jive ACTION item
+# (not a `url` drill — that rendered as a blank page) that fires the registered
+# `listentolater add` command. The album is carried as flat string params; the
+# command rebuilds the replayable ref from them.
 sub _addItem {
     my ($client, $rec) = @_;
+
+    my $ref     = $rec->{ref} || {};
+    my $albumid = $ref->{album_id}
+        || ($ref->{passthrough} && $ref->{passthrough}{album_id})
+        || '';
+
+    my $go = {
+        player     => 0,
+        cmd        => [ 'listentolater', 'add' ],
+        params     => {
+            source  => $rec->{source}      // 'library',
+            artist  => $rec->{artist}      // '',
+            album   => $rec->{album_title} // '',
+            year    => $rec->{year}        // '',
+            artwork => $rec->{artwork}     // '',
+            albumid => $albumid,
+            svc     => $ref->{_svc}        // '',
+        },
+        nextWindow => 'parent',
+    };
+
     return {
-        type  => 'link',
-        name  => cstring($client, 'PLUGIN_LTL_ADD'),
-        image => ICON,
-        url   => sub {
-            my ($c, $cb) = @_;
-            my ($id, $already) = eval { Plugins::ListenToLater::DB::add($rec) };
-            if ($@) {
-                $log->error("add failed: $@");
-                return $cb->({ items => [{ name => cstring($c, 'PLUGIN_LTL_ERROR'), type => 'text' }] });
-            }
-            $cb->({ items => [{
-                name        => cstring($c, $already ? 'PLUGIN_LTL_ALREADY' : 'PLUGIN_LTL_ADDED'),
-                type        => 'text',
-                showBriefly => 1,
-            }] });
+        type => 'text',
+        name => cstring($client, 'PLUGIN_LTL_ADD'),
+        jive => {
+            actions => { go => $go, play => $go, add => $go },
+            style   => 'item',
         },
     };
+}
+
+# CLI command behind the menu item: write the album to the DB and confirm.
+sub _addCommand {
+    my $request = shift;
+
+    my $source  = $request->getParam('source') || 'library';
+    my $albumid = $request->getParam('albumid');
+    my $svc     = $request->getParam('svc');
+
+    my $ref;
+    if ($source eq 'library') {
+        $ref = { album_id => $albumid };
+    }
+    elsif (defined $albumid && length $albumid) {
+        $ref = { _svc => $svc, album_id => $albumid, passthrough => { album_id => $albumid } };
+    }
+    else {
+        $ref = { _svc => $svc };
+    }
+
+    my $rec = {
+        source      => $source,
+        artist      => $request->getParam('artist'),
+        album_title => $request->getParam('album'),
+        year        => ($request->getParam('year')    || undef),
+        artwork     => ($request->getParam('artwork')  || undef),
+        ref_kind    => ($source eq 'library' ? 'album_id' : ($albumid ? 'passthrough' : 'search')),
+        ref         => $ref,
+    };
+
+    my ($id, $already) = eval { Plugins::ListenToLater::DB::add($rec) };
+    if ($@) {
+        $log->error("LTL: add command failed: $@");
+    }
+    else {
+        $log->warn("LTL: add command -> id=" . ($id // '?') . " already=" . ($already // 0)
+            . " ($rec->{source} / " . ($rec->{album_title} // '?') . ")");
+    }
+
+    if (my $client = $request->client) {
+        my $msg = cstring($client, $already ? 'PLUGIN_LTL_ALREADY' : 'PLUGIN_LTL_ADDED');
+        eval { $client->showBriefly({ line => [ cstring($client, 'PLUGIN_LTL'), $msg ] }, { duration => 2 }); };
+    }
+
+    $request->addResult('count', 1);
+    $request->setStatusDone;
+}
+
+# The "…" → More context menu for an album row: Remove + Move. Each entry is a
+# `do` action (runs the command without drilling) that pops back and refreshes
+# the list (nextWindow => grandparent).
+sub _contextMenuQuery {
+    my $request = shift;
+
+    my $id     = $request->getParam('id');
+    my $client = $request->client;
+    my $rec    = eval { Plugins::ListenToLater::DB::get($id) };
+
+    my $status  = ($rec && $rec->{status}) ? $rec->{status} : 'later';
+    my $target  = $status eq 'later' ? 'played' : 'later';
+    my $moveStr = $status eq 'later' ? 'PLUGIN_LTL_MOVE_PLAYED' : 'PLUGIN_LTL_MOVE_LATER';
+
+    my @entries = (
+        {
+            text    => cstring($client, 'PLUGIN_LTL_REMOVE'),
+            cmd     => [ 'listentolater', 'remove' ],
+            params  => { id => $id },
+        },
+        {
+            text    => cstring($client, $moveStr),
+            cmd     => [ 'listentolater', 'move' ],
+            params  => { id => $id, status => $target },
+        },
+    );
+
+    my $i = 0;
+    for my $e (@entries) {
+        $request->addResultLoop('item_loop', $i, 'text', $e->{text});
+        $request->addResultLoop('item_loop', $i, 'actions', {
+            do => { player => 0, cmd => $e->{cmd}, params => $e->{params} },
+        });
+        $request->addResultLoop('item_loop', $i, 'nextWindow', 'grandparent');
+        $i++;
+    }
+
+    $request->addResult('offset', 0);
+    $request->addResult('count', $i);
+    $request->setStatusDone;
+}
+
+sub _removeCommand {
+    my $request = shift;
+    my $id = $request->getParam('id');
+    eval { Plugins::ListenToLater::DB::remove($id); 1 } or $log->error("LTL: remove failed: $@");
+    $request->setStatusDone;
+}
+
+sub _moveCommand {
+    my $request = shift;
+    my $id     = $request->getParam('id');
+    my $status = $request->getParam('status') || 'later';
+    eval { Plugins::ListenToLater::DB::setStatus($id, $status); 1 } or $log->error("LTL: move failed: $@");
+    $request->setStatusDone;
 }
 
 sub getDisplayName { 'PLUGIN_LTL' }

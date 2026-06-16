@@ -153,6 +153,51 @@ sub buildPlayableItems {
     return _searchService($client, $source, $rec, $cb);
 }
 
+# Resolve a stored record to a flat list of playable track items (type => audio),
+# so an album row can be played/drilled directly. $cb->( \@trackItems ).
+sub resolveTracks {
+    my ($client, $rec, $cb) = @_;
+
+    my $source = $rec->{source} || 'library';
+
+    if ($source eq 'library') {
+        return $cb->(_libraryTrackItems($rec->{ref}{album_id}));
+    }
+
+    # Streaming: get the album node, then invoke the service's own coderef to turn
+    # it into tracks.
+    buildPlayableItems($client, $rec, sub {
+        my $items = shift || [];
+        my ($node) = grep { ($_->{type} || '') eq 'playlist' && ref $_->{url} eq 'CODE' } @$items;
+
+        unless ($node) {
+            return $cb->([{ name => cstring($client, 'PLUGIN_LTL_NO_MATCH'), type => 'text' }]);
+        }
+
+        my $pt = (ref $node->{passthrough} eq 'ARRAY') ? $node->{passthrough}[0] : {};
+        eval {
+            $node->{url}->($client, sub {
+                my $res = shift;
+                $cb->(($res && $res->{items}) || []);
+            }, {}, $pt);
+            1;
+        } or $cb->([{ name => cstring($client, 'PLUGIN_LTL_NO_MATCH'), type => 'text' }]);
+    });
+}
+
+sub _libraryTrackItems {
+    my ($albumId) = @_;
+    return [] unless $albumId;
+
+    my @items;
+    my $rs = Slim::Schema->search('Track', { 'album.id' => $albumId },
+        { join => 'album', order_by => 'me.disc, me.tracknum' });
+    while (my $t = $rs->next) {
+        push @items, { name => $t->title, type => 'audio', url => $t->url };
+    }
+    return \@items;
+}
+
 sub _libraryPlayable {
     my ($rec) = @_;
     my $albumId = $rec->{ref}{album_id};

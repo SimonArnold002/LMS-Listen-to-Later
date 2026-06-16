@@ -1,5 +1,39 @@
 # Changelog
 
+## 0.1.6 — Grid toggle on Material 6.4.x (header icons)
+
+### Fixed
+- **The list/grid toggle now actually appears (the 0.1.5 change wasn't enough on Material 6.4.x).** Material 6.4's grid check counts *every* item without an image as disqualifying — it has no exception for header rows (newer Material does). Our section headers had no image, so they silently disabled the toggle. Headers now carry the plugin icon, so every row has an image and the grid/thumbnail view is offered while the headers still render as dividers.
+
+## 0.1.5 — Grid/list view toggle restored
+
+### Fixed
+- **The list/grid (thumbnail) view toggle now works while keeping the section headers.** Material disables that toggle for any page containing a `type:"text"` item; the empty-section "Nothing here yet" placeholder was that item. It's removed — an empty section just shows its "(0)" header — so albums can now be shown as a thumbnail grid with the Listen to Later / Played headers as dividers, or as a list. (`type:"header"` rows don't affect the toggle.)
+
+## 0.1.4 — Single-page album view
+
+### Changed
+- **The plugin now opens straight onto the list.** One page shows Plugin Settings at the top, then a Material **header** "Listen to Later (N)" with its albums, then a "Played (N)" header with its albums — no more drilling into separate sections.
+- **Albums play from the main page.** Each album is a playable row (like other LMS album views): play / play next / add to queue from its "…", and tap to open the tracklist.
+- **Remove / Move moved into the "…" context menu.** They're no longer rows you tap into; they live under the album's ellipsis (More → Remove / Move) and refresh the list in place.
+
+### Added
+- `listentolater contextmenu` (the per-album Remove/Move menu) and `listentolater remove` / `listentolater move` commands.
+
+## 0.1.3 — Real action item + placement
+
+### Fixed
+- **Clicking "Add" no longer opens a blank page.** The menu item was an OPML `url` drill; it's now a proper jive **action** that fires a registered `listentolater add` command (modelled on the built-in `playitem`), so it adds the album in place and pops back with a brief confirmation.
+- **Placement:** the entry is registered with `menuMode` and positioned with the play actions (`before => 'artwork'` for tracks, `before => 'contributors'` for albums) so it's less likely to be buried under Material's "More" group.
+
+### Added
+- `listentolater add` CLI command (carries the album as flat params and rebuilds the replayable ref).
+
+## 0.1.2 — The actual fix: provider registration
+
+### Fixed
+- **"Add album to Listen to Later" now appears in the track/album "…" menus.** Root cause (present since the first build): `registerInfoProvider` takes a *flat* `($name, %details)` list, but we passed a **hashref** — so `func` was lost and LMS silently registered an inert provider that was skipped when the menu was built. No error was logged because the menu builder only skips providers whose `func` is undefined. Now registered with a flat list, matching every built-in provider. This is why none of the earlier capture fixes changed anything.
+
 ## 0.1.1 — Add-menu fixes
 
 ### Fixed

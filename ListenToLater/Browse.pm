@@ -1,9 +1,12 @@
 package Plugins::ListenToLater::Browse;
 
-# The browsable list. Top level: Listen to Later (N) / Played (N) / Settings.
-# Each section lists saved albums; an album row drills into a small submenu
-# (Play album / Remove / Move) so the manage actions work in Material and the
-# classic skin alike. Sort order comes from the `sort` pref.
+# Single-page content view. On entry the user sees, in one list:
+#   • Plugin Settings (top)
+#   • a Material header "Listen to Later (N)" + its albums
+#   • a Material header "Played (N)" + its albums
+# Each album row is directly playable (type => 'playlist'); Remove/Move live in
+# the row's "…" context menu via itemActions => info → the contextmenu query
+# (see Plugin::_contextMenuQuery). Sort order comes from the `sort` pref.
 
 use strict;
 use warnings;
@@ -21,61 +24,82 @@ my $log   = logger('plugin.listentolater');
 my $prefs = preferences('plugin.listentolater');
 
 # ---------------------------------------------------------------------------
-# Top level
+# Top level — the whole list on one page
 # ---------------------------------------------------------------------------
 sub topLevel {
     my ($client, $callback, $args) = @_;
 
-    my $later  = Plugins::ListenToLater::DB::count('later');
-    my $played = Plugins::ListenToLater::DB::count('played');
+    my $wantHeaders = _wantHeaders(_featuresOf($args));
 
-    my @items = (
-        {
-            name  => cstring($client, 'PLUGIN_LTL_LISTEN_LATER') . " ($later)",
-            type  => 'link',
-            url   => sub { _renderList($_[0], $_[1], 'later') },
-            image => ICON,
-        },
-        {
-            name  => cstring($client, 'PLUGIN_LTL_PLAYED') . " ($played)",
-            type  => 'link',
-            url   => sub { _renderList($_[0], $_[1], 'played') },
-            image => ICON,
-        },
-        {
-            name    => cstring($client, 'PLUGIN_LTL_SETTINGS'),
-            type    => 'link',
-            weblink => '/plugins/ListenToLater/settings.html',
-            image   => ICON,
-        },
-    );
+    my @items;
+
+    push @items, {
+        name    => cstring($client, 'PLUGIN_LTL_SETTINGS'),
+        type    => 'link',
+        weblink => '/plugins/ListenToLater/settings.html',
+        image   => ICON,
+    };
+
+    push @items, _section($client, 'later',  'PLUGIN_LTL_LISTEN_LATER', $wantHeaders);
+    push @items, _section($client, 'played', 'PLUGIN_LTL_PLAYED',       $wantHeaders);
 
     $callback->({ items => \@items });
 }
 
-# ---------------------------------------------------------------------------
-# A section list
-# ---------------------------------------------------------------------------
-sub _renderList {
-    my ($client, $callback, $status) = @_;
+sub _section {
+    my ($client, $status, $titleStr, $wantHeaders) = @_;
 
-    my $sort = $prefs->get('sort') || 'added';
-    my $rows = Plugins::ListenToLater::DB::list($status, $sort);
+    my $rows  = Plugins::ListenToLater::DB::list($status, $prefs->get('sort') || 'added');
+    my $count = scalar @$rows;
 
-    my @items = map { _albumRow($client, $_, $status) } @$rows;
+    my @items = ( _header($client, $status, $titleStr, $count, $wantHeaders) );
 
-    unless (@items) {
-        push @items, {
-            name => cstring($client, 'PLUGIN_LTL_EMPTY'),
-            type => 'text',
-        };
+    # NB: deliberately NO "empty" text row here. Material disables the grid/list
+    # view toggle for the whole page if any item is type => 'text' (browse-resp.js:
+    # `types.has("text")`), whereas type => 'header' is fine. An empty section just
+    # shows its "(0)" header. (The header count conveys emptiness.)
+    push @items, map { _albumRow($client, $_) } @$rows;
+
+    return @items;
+}
+
+# A section header. Material renders type => 'header' bold/accented, but forces a
+# drill action onto it, so (per the sibling plugin's finding) give it a url that
+# re-lists just this section — the header / its "More" then shows that section
+# rather than an empty page. Non-header clients get plain text.
+sub _header {
+    my ($client, $status, $titleStr, $count, $wantHeaders) = @_;
+
+    my $name = cstring($client, $titleStr) . " ($count)";
+    # Give the header an image. Material 6.4.x has no header guard in its grid
+    # check (browse-resp.js: `if (i.image) haveWithIcons; else haveWithoutIcons`
+    # runs for headers too), so an image-less header sets haveWithoutIcons and
+    # disables the whole page's grid/list toggle. With an icon, every item has an
+    # image → grid stays available, and the header still renders as a divider.
+    my $h = { name => $name, type => $wantHeaders ? 'header' : 'text', image => ICON };
+
+    if ($wantHeaders) {
+        $h->{url}         = sub { _renderSection($_[0], $_[1], $status) };
+        $h->{passthrough} = [ {} ];
     }
 
+    return $h;
+}
+
+sub _renderSection {
+    my ($client, $callback, $status) = @_;
+    my $rows = Plugins::ListenToLater::DB::list($status, $prefs->get('sort') || 'added');
+    my @items = @$rows
+        ? map { _albumRow($client, $_) } @$rows
+        : ({ name => cstring($client, 'PLUGIN_LTL_EMPTY'), type => 'text' });
     $callback->({ items => \@items });
 }
 
+# A directly-playable album row. type => 'playlist' + a url coderef that resolves
+# the album's tracks gives Material the play button and Play/Play Next/Add in the
+# "…". itemActions→info adds the "More" context entry → our Remove/Move menu.
 sub _albumRow {
-    my ($client, $rec, $status) = @_;
+    my ($client, $rec) = @_;
 
     my $name = '';
     $name .= $rec->{artist} . " \x{2013} " if $rec->{artist};
@@ -83,64 +107,45 @@ sub _albumRow {
     $name .= " ($rec->{year})" if $rec->{year};
 
     return {
-        name  => $name,
-        line2 => ucfirst($rec->{source} || ''),
-        image => $rec->{artwork} || ICON,
-        type  => 'link',
-        url   => sub { _albumMenu($_[0], $_[1], $rec, $status) },
+        name        => $name,
+        line2       => ucfirst($rec->{source} || ''),
+        image       => $rec->{artwork} || ICON,
+        type        => 'playlist',
+        url         => \&_albumTracks,
+        passthrough => [ { id => $rec->{id} } ],
+        itemActions => {
+            info => {
+                command     => [ 'listentolater', 'contextmenu' ],
+                fixedParams => { id => $rec->{id} },
+            },
+        },
     };
 }
 
-# ---------------------------------------------------------------------------
-# Per-album submenu: Play / Remove / Move
-# ---------------------------------------------------------------------------
-sub _albumMenu {
-    my ($client, $callback, $rec, $status) = @_;
+# Resolve the tracks for an album row (drill-in and play both call this).
+sub _albumTracks {
+    my ($client, $callback, $args, $pt) = @_;
 
-    Plugins::ListenToLater::Sources::buildPlayableItems($client, $rec, sub {
-        my $playItems = shift || [];
+    my $rec = Plugins::ListenToLater::DB::get($pt->{id});
+    unless ($rec) {
+        return $callback->({ items => [{ name => cstring($client, 'PLUGIN_LTL_EMPTY'), type => 'text' }] });
+    }
 
-        my @items;
-        for my $p (@$playItems) {
-            # Single resolved album → label it "Play album"; multiple search
-            # candidates keep their own (album) names so they're distinguishable.
-            if (@$playItems == 1 && ($p->{type} || '') ne 'text') {
-                $p->{name} = cstring($client, 'PLUGIN_LTL_PLAY_ALBUM');
-            }
-            push @items, $p;
-        }
-
-        push @items, {
-            name => cstring($client, 'PLUGIN_LTL_REMOVE'),
-            type => 'link',
-            url  => sub {
-                my ($c, $cb) = @_;
-                Plugins::ListenToLater::DB::remove($rec->{id});
-                $cb->({ items => [{
-                    name => cstring($c, 'PLUGIN_LTL_REMOVED'),
-                    type => 'text', showBriefly => 1,
-                }] });
-            },
-        };
-
-        my $target  = $status eq 'later' ? 'played' : 'later';
-        my $moveStr = $status eq 'later' ? 'PLUGIN_LTL_MOVE_PLAYED' : 'PLUGIN_LTL_MOVE_LATER';
-
-        push @items, {
-            name => cstring($client, $moveStr),
-            type => 'link',
-            url  => sub {
-                my ($c, $cb) = @_;
-                Plugins::ListenToLater::DB::setStatus($rec->{id}, $target);
-                $cb->({ items => [{
-                    name => cstring($c, 'PLUGIN_LTL_MOVED'),
-                    type => 'text', showBriefly => 1,
-                }] });
-            },
-        };
-
-        $callback->({ items => \@items });
+    Plugins::ListenToLater::Sources::resolveTracks($client, $rec, sub {
+        my $tracks = shift || [];
+        $callback->({ items => $tracks });
     });
+}
+
+# ---------------------------------------------------------------------------
+sub _featuresOf {
+    my ($args) = @_;
+    return (ref $args->{params} eq 'HASH') ? ($args->{params}{features} // '') : '';
+}
+
+sub _wantHeaders {
+    my ($features) = @_;
+    return (defined $features && $features =~ /h/) ? 1 : 0;
 }
 
 1;
