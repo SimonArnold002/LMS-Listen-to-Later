@@ -96,3 +96,12 @@ PLUGIN_LTL_STREAM_MIN
 
 PLUGIN_LTL_STREAM_MIN_DESC
 	EN	Streaming albums have no reliable track total, so they move to Played after this many distinct tracks have played. Default 4.
+
+PLUGIN_LTL_SECTION_MATERIAL
+	EN	Material Skin
+
+PLUGIN_LTL_MATERIAL_ACTION
+	EN	Add to Material context menus
+
+PLUGIN_LTL_MATERIAL_ACTION_DESC
+	EN	Adds an "Add to Listen to Later" entry to Material Skin's album, track and playlist context menus (including streaming services like Qobuz, whose own menus can't otherwise be extended). Writes to Material's actions.json. Takes effect after the next restart.

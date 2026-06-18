@@ -1,5 +1,73 @@
 # Changelog
 
+## 0.1.15 — Remove/Move refresh the list in place
+
+### Fixed
+- **Remove/Move from a row's "…" → More no longer jump to the home screen.** They used `nextWindow => 'grandparent'` (two levels up); now `'parent'`, which on a Material "More" menu triggers an in-place list refresh (`refreshList`) so the list updates where you are. Plugin-only change — no Material reinstall needed if you already have the 0.1.14 bundle.
+
+## 0.1.14 — Don't offer "Add" inside our own view (patched Material test)
+
+### Changed
+- **"Add to Listen to Later" no longer appears on items inside the plugin's own list.** Re-adding an album already in the list is pointless and would bounce a *Played* album back to *Listen to Later*. The patched Material now lets an app define a custom-action category for its **own** view (e.g. `listentolater-album`); if defined — even empty — it takes precedence over the generic `online-*` category. The plugin writes empty `listentolater-album`/`-track`/`-artist` categories, so its own rows show no "Add".
+- Remove/Move stay in each row's "…" → **More** menu (that context menu is the only place that reliably carries our internal album id, which a custom action can't read).
+
+## 0.1.13 — Streaming album rows: real capture + service from the view (patched Material test)
+
+### Changed
+- The custom action now works on **service album rows while browsing** (e.g. Qobuz New Releases) when paired with the patched Material build. Those rows carry no `favorites_url`/`metadata` — only a playable `item_id` and a two-line `title`/`subtitle` — so Material can't classify them as albums. The patched Material instead keys off **playability** and exposes the row's title/subtitle as `$ALBUMNAME`/`$ARTISTNAME`, and bakes the **browsing service id** (the Material view's `command`, e.g. `qobuz`) into the action as `svc:`.
+- `addctx` now: strips a trailing `(YYYY)` from the **artist** line (streaming rows put the year there) and a trailing format qualifier (`(Hi-Res…)`, `(Explicit)`, …) from the **album**; and resolves the source from the explicit `svc` param first (no guessing), falling back to the cover host, then the default streaming service.
+- Added `Sources::sourceFromImage` (cover-host → service) as a fallback only.
+
+## 0.1.12 — Online-item custom-action categories (for patched Material test)
+
+### Changed
+- Replaced the non-working `qobuz`/`bandcamp` custom-action categories with `online-album` / `online-track` / `online-artist`, using the variables that actually populate for streaming items (`$TITLE`, `$FAVURL`, `$IMAGE`). These only do anything on a Material build that wires custom actions for online items (see `docs/material-online-custom-actions-proposal.md`); they're harmless otherwise.
+
+## 0.1.11 — Fix local source + artwork from custom action
+
+### Fixed
+- **A local album added via the main-menu action was tagged "Qobuz" with no artwork.** Material passes the album title with the year appended (e.g. "Night Train (1963)") and leaves artist/year/cover empty, so the old title match failed and it fell through to the default streaming source. Now a numeric album id that resolves in the library is trusted as the authoritative "local" signal, and the real title / artist / year / **artwork** are taken from the library album object. The year suffix is also stripped from streaming names.
+- Passes `$IMAGE` through so streaming adds keep their cover too.
+
+### Known
+- The custom action still does not appear on streaming services' per-item "…" menus (Qobuz/Bandcamp/Tidal) — Material doesn't apply custom actions to online items there. Adding a streaming album is via **Now Playing** (play it, then "…" on the track → Add album), or possibly a per-app toolbar action inside a Qobuz album.
+
+## 0.1.10 — Working "Add" in the main menu (not buried in More)
+
+### Fixed
+- **The main-menu "Add to Listen to Later" now works.** The command itself (`addctx`) was verified good; the failure was purely the leftover **0.1.7-format** entry that the de-dupe didn't catch. The writer now strips every old/legacy entry of ours from all categories before writing the correct flat-array entry, so only the working one remains.
+
+### Changed
+- Re-added the custom action to the **local** categories (album / album-track / track / playlist) — restoring the preferred placement next to "Add to Favourites" — alongside the `qobuz`/`bandcamp` categories. (The AlbumInfo/TrackInfo "More" entries still exist too; de-duplicating those is a follow-up.)
+
+> After installing, do one Material reload so the client drops its cached copy of the old broken action.
+
+## 0.1.9 — De-dupe custom action; scope to streaming
+
+### Fixed
+- **The duplicate/broken "Add to Listen to Later" on local albums is gone.** The de-dupe now recognises the old (0.1.7) action format and the legacy entries, and strips our action from *every* category before re-writing, so the broken leftover that showed in the main menu and errored is removed. Existing user-defined custom actions are preserved.
+
+### Changed
+- The Material custom action is now scoped to the **`qobuz` / `bandcamp`** categories only. Local albums/tracks are already served by the AlbumInfo/TrackInfo providers, so the custom action no longer duplicates them there. (Material doesn't apply the library `album`/`track` categories to online items anyway.)
+
+## 0.1.8 — Fix custom-action format; source from play URL
+
+### Fixed
+- **Tapping "Add to Listen to Later" on a local album did nothing.** Material's `lmscommand` custom action must be a flat array (`["listentolater","addctx","name:$ALBUMNAME",…]`); it was written as a `{command,params}` object (that's the `lmsbrowse` shape), so an empty command was dispatched. Now a flat array — local adds work.
+
+### Changed
+- The action now passes `$FAVURL` (the item's play URL, e.g. `qobuz://…`), and `addctx` uses it to identify the source: a streaming URL → that service; `file://`/numeric library id → local library; otherwise the default streaming service. Unpopulated Material variables (which arrive as the literal `$NAME` token) are ignored.
+- Added per-app `qobuz`/`bandcamp` custom-action categories as well, since Material doesn't apply the library `album`/`track` categories to online items — this is the attempt to surface the entry on Qobuz pages.
+
+## 0.1.7 — Qobuz / streaming add via Material context menus
+
+### Added
+- **"Add to Listen to Later" in Material's context menus, including Qobuz.** Streaming services own their own browse "…" menus, so the TrackInfo/AlbumInfo providers can't appear there. Instead the plugin now registers a Material **custom action** (merged safely into `prefs/material-skin/actions.json`, preserving any existing user actions) on the album / track / playlist menus. New `listentolater addctx` command receives the item's metadata, decides whether it's a local-library album (reliable id) or a streaming album (replayed via the service's search), and adds it. Toggle under Settings → Material Skin (on by default; takes effect after a restart).
+- Verified live: a Qobuz album added by artist+album alone resolves back to its real tracks via Qobuz search, so streaming albums play correctly from the list.
+
+### Note
+- This build logs (at `warn`) the exact variables Material passes for each item, to confirm what's available for online items.
+
 ## 0.1.6 — Grid toggle on Material 6.4.x (header icons)
 
 ### Fixed

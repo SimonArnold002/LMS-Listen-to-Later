@@ -12,12 +12,19 @@ package Plugins::ListenToLater::Plugin;
 use strict;
 use base qw(Slim::Plugin::OPMLBased);
 
+use JSON::XS ();
+use File::Path ();
+use File::Spec ();
+
 use Slim::Utils::Log;
 use Slim::Utils::Prefs;
+use Slim::Utils::PluginManager;
 use Slim::Utils::Strings qw(cstring);
 
 use Plugins::ListenToLater::DB;
 use Plugins::ListenToLater::Sources;
+
+my $JSON = JSON::XS->new->utf8->canonical->pretty;
 
 use constant ICON => 'plugins/ListenToLater/html/images/ListenToLaterIcon_svg.png';
 
@@ -34,6 +41,7 @@ $prefs->init({
     played_threshold     => 60,        # % of library album tracks → Played
     streaming_min_tracks => 4,         # distinct streaming tracks → Played (no total available)
     watch_outside        => 1,         # mark Played from plays started outside the plugin
+    material_action      => 1,         # add an "Add to Listen to Later" entry to Material's context menus
 });
 
 sub initPlugin {
@@ -53,6 +61,7 @@ sub initPlugin {
 
     # CLI commands: [needClient, isQuery, hasTags, func]
     Slim::Control::Request::addDispatch(['listentolater', 'add'],         [0, 0, 1, \&_addCommand]);
+    Slim::Control::Request::addDispatch(['listentolater', 'addctx'],      [0, 0, 1, \&_addCtxCommand]);
     Slim::Control::Request::addDispatch(['listentolater', 'contextmenu'], [0, 1, 1, \&_contextMenuQuery]);
     Slim::Control::Request::addDispatch(['listentolater', 'remove'],      [0, 0, 1, \&_removeCommand]);
     Slim::Control::Request::addDispatch(['listentolater', 'move'],        [0, 0, 1, \&_moveCommand]);
@@ -71,6 +80,120 @@ sub initPlugin {
     );
 
     return;
+}
+
+# Runs after all plugins have initialised — Material is then loadable. We add an
+# "Add to Listen to Later" entry to Material's context menus via its custom-action
+# file, so it sits in the MAIN menu (next to Add to Favourites) rather than buried
+# in the providers' "More" submenu. Local item categories get it directly; the
+# per-app qobuz/bandcamp categories carry it onto streaming pages.
+sub postinitPlugin {
+    my $class = shift;
+
+    if ( $prefs->get('material_action')
+      && Slim::Utils::PluginManager->isEnabled('Plugins::MaterialSkin::Plugin') ) {
+        eval { _writeMaterialActions(); 1 }
+            or $log->error("LTL: failed to write Material custom actions: $@");
+    }
+
+    return;
+}
+
+# ---------------------------------------------------------------------------
+# Material custom actions (prefs/material-skin/actions.json)
+# ---------------------------------------------------------------------------
+sub _materialActionsFile {
+    my $dir = File::Spec->catdir(Slim::Utils::Prefs::dir(), 'material-skin');
+    return File::Spec->catfile($dir, 'actions.json');
+}
+
+sub _writeMaterialActions {
+    my $file = _materialActionsFile();
+    my $dir  = File::Spec->catdir(Slim::Utils::Prefs::dir(), 'material-skin');
+    File::Path::make_path($dir) unless -d $dir;
+
+    my $data = {};
+    if (-e $file) {
+        local $/;
+        if (open my $fh, '<:raw', $file) {
+            my $raw = <$fh>;
+            close $fh;
+            $data = eval { JSON::XS->new->utf8->decode($raw) } || {};
+            $data = {} unless ref $data eq 'HASH';
+        }
+    }
+
+    # `lmscommand` must be a FLAT array (verb + tag params); Material substitutes the
+    # $VARS from the item and runs it fire-and-forget. $FAVURL carries the item's play
+    # URL (qobuz://… etc.), which tells addctx the source. Unpopulated $VARS arrive as
+    # the literal token ("$ALBUMNAME") — addctx ignores those.
+    my $albumCmd = [ 'listentolater', 'addctx',
+        'name:$ALBUMNAME', 'artist:$ARTISTNAME', 'albumid:$ALBUMID', 'year:$YEAR',
+        'favurl:$FAVURL', 'image:$IMAGE' ];
+    my $trackCmd = [ 'listentolater', 'addctx',
+        'name:$ALBUMNAME', 'artist:$ARTISTNAME', 'albumid:$ALBUMID', 'year:$YEAR',
+        'trackname:$TRACKNAME', 'trackid:$TRACKID', 'favurl:$FAVURL', 'image:$IMAGE' ];
+
+    # Online (streaming) items don't expose $ALBUMNAME/$ARTISTNAME/$ALBUMID, but they
+    # DO expose $TITLE (name), $FAVURL (qobuz://album:… — the source + id), and $IMAGE.
+    # These `online-*` categories only do anything on a Material build that wires up
+    # custom actions for online items (see docs/material-online-custom-actions-proposal).
+    my $onlineCmd = [ 'listentolater', 'addctx',
+        'name:$TITLE', 'artist:$ARTISTNAME', 'favurl:$FAVURL', 'image:$IMAGE' ];
+
+    my %cats = (
+        'album'          => $albumCmd,
+        'album-track'    => $trackCmd,
+        'track'          => $trackCmd,
+        'playlist'       => $albumCmd,
+        'playlist-track' => $trackCmd,
+        'online-album'   => $onlineCmd,
+        'online-track'   => $onlineCmd,
+        'online-artist'  => $onlineCmd,
+    );
+
+    # First strip OUR entries from EVERY existing category (clears legacy 0.1.7 hash
+    # entries and any stale local ones); then add the current entry where we want it.
+    for my $cat (keys %$data) {
+        next unless ref $data->{$cat} eq 'ARRAY';
+        $data->{$cat} = [ grep { !_isOurAction($_) } @{ $data->{$cat} } ];
+    }
+
+    for my $cat (keys %cats) {
+        push @{ $data->{$cat} ||= [] }, {
+            title      => 'Add to Listen to Later',
+            icon       => 'playlist_add',
+            lmscommand => $cats{$cat},
+        };
+    }
+
+    # Suppress the generic streaming "Add" inside our OWN plugin view. Defining these
+    # (empty) categories tells the patched Material to use them instead of "online-*"
+    # for the listentolater app's own items — so an album already in the list isn't
+    # offered "Add to Listen to Later" again (re-adding would bounce a Played album
+    # back to Listen to Later). Remove/Move stay in each row's "…" → More menu, which
+    # is the only place that reliably carries our internal album id.
+    $data->{$_} = [] for qw(listentolater-album listentolater-track listentolater-artist);
+
+    open my $fh, '>:raw', $file or die "open $file: $!";
+    print $fh $JSON->encode($data);
+    close $fh;
+
+    $log->warn("LTL: wrote Material custom actions to $file");
+    return;
+}
+
+sub _isOurAction {
+    my ($entry) = @_;
+    return 0 unless ref $entry eq 'HASH';
+    my $lc = $entry->{lmscommand};
+    # current format: a flat array
+    return 1 if ref $lc eq 'ARRAY' && ($lc->[0] // '') eq 'listentolater';
+    # legacy 0.1.7 format: { command => [...] }
+    return 1 if ref $lc eq 'HASH' && ref $lc->{command} eq 'ARRAY' && ($lc->{command}[0] // '') eq 'listentolater';
+    # fallback: our title
+    return 1 if ($entry->{title} // '') eq 'Add to Listen to Later';
+    return 0;
 }
 
 # ---------------------------------------------------------------------------
@@ -218,8 +341,8 @@ sub _addCommand {
 }
 
 # The "…" → More context menu for an album row: Remove + Move. Each entry is a
-# `do` action (runs the command without drilling) that pops back and refreshes
-# the list (nextWindow => grandparent).
+# `do` action (runs the command without drilling) that refreshes the list in
+# place (nextWindow => parent on a More menu).
 sub _contextMenuQuery {
     my $request = shift;
 
@@ -250,13 +373,126 @@ sub _contextMenuQuery {
         $request->addResultLoop('item_loop', $i, 'actions', {
             do => { player => 0, cmd => $e->{cmd}, params => $e->{params} },
         });
-        $request->addResultLoop('item_loop', $i, 'nextWindow', 'grandparent');
+        # 'parent' on a "More" menu action makes Material refresh the list in place
+        # (browse-functions.js: isMoreMenu && nextWindow=="parent" -> refreshList),
+        # so Remove/Move update the list without jumping back to the home screen.
+        $request->addResultLoop('item_loop', $i, 'nextWindow', 'parent');
         $i++;
     }
 
     $request->addResult('offset', 0);
     $request->addResult('count', $i);
     $request->setStatusDone;
+}
+
+# Add triggered by a Material custom action. The variables Material substitutes
+# for online (Qobuz/Bandcamp) items are uncertain, so log everything we receive,
+# then add best-effort: if the album id resolves to a matching local library
+# album it's stored as a library album (reliable replay); otherwise it's treated
+# as a streaming album (replayed via the service's search — proven to work).
+sub _addCtxCommand {
+    my $request = shift;
+
+    # Unpopulated Material $VARS arrive as the literal token (e.g. "$ALBUMNAME") —
+    # treat those as undef.
+    my %p = map {
+        my $v = $request->getParam($_);
+        $v = undef if defined $v && $v =~ /^\$[A-Z]/;
+        ($_ => $v)
+    } qw(name artist albumid trackname trackid year favurl image svc);
+
+    $log->warn('LTL: addctx params -> '
+        . join(', ', map { "$_=" . (defined $p{$_} ? $p{$_} : '(undef)') } qw(name artist albumid year trackname trackid favurl image svc)));
+
+    my $artist  = $p{artist};
+    my $artwork = $p{image};
+    my $year    = $p{year};
+    my $album   = $p{name};
+    # Material appends " (YYYY)" to album display titles — strip it for a clean
+    # album name (and use it as the year if none was passed).
+    if (defined $album && $album =~ s/\s*\((\d{4})\)\s*$//) {
+        $year ||= $1;
+    }
+    # Streaming browse rows often carry the year on the artist line ("Artist (2026)")
+    # and a quality/format qualifier on the album ("Album (Hi-Res)"); clean both so the
+    # stored name/artist are searchable.
+    if (defined $artist && $artist =~ s/\s*\((\d{4})\)\s*$//) {
+        $year ||= $1;
+    }
+    if (defined $album) {
+        $album =~ s/\s*\((?:Hi-Res[^)]*|Explicit|Mono|Stereo)\)\s*$//i;
+    }
+    unless (defined $album && length $album) {
+        $log->warn('LTL: addctx had no album name — nothing added');
+        return $request->setStatusDone;
+    }
+
+    # A streaming play URL (qobuz://…, bandcamp://…) names the source. file:// / db:
+    # / empty are local. A numeric album id that resolves in the library is the
+    # authoritative "this is a local album" signal — trust it over the (year-suffixed,
+    # often empty) display fields, and take the real metadata from the album object.
+    my $favScheme = ($p{favurl} && $p{favurl} =~ m|^(\w+)://|) ? lc($1) : '';
+    my $streaming = ($favScheme && $favScheme ne 'file') ? $favScheme : '';
+
+    my $libAlbum;
+    if (!$streaming && defined $p{albumid} && $p{albumid} =~ /^\d+$/) {
+        $libAlbum = eval { Slim::Schema->find('Album', $p{albumid}) };
+    }
+
+    my ($source, $ref);
+    if ($libAlbum) {
+        $source  = 'library';
+        $ref     = { album_id => $p{albumid} };
+        $album   = $libAlbum->title;
+        $artist  = (eval { $libAlbum->contributor ? $libAlbum->contributor->name : undef }) // $artist;
+        $year  ||= (eval { $libAlbum->year } || undef);
+        $artwork = (eval { $libAlbum->artwork ? 'music/' . $libAlbum->artwork . '/cover' : undef }) // $artwork;
+    }
+    elsif ($streaming) {
+        $source = Plugins::ListenToLater::Sources::sourceFromUrl($p{favurl});
+        $ref    = { _svc => $source };
+    }
+    else {
+        # Streaming album rows carry no favorites_url; the browsing service id is
+        # passed explicitly as svc (a Material view belongs to one service). Fall back
+        # to the cover host, then the default streaming service.
+        my $svc = ($p{svc} && $p{svc} =~ /^[a-z0-9]+$/i) ? lc $p{svc} : '';
+        $source = $svc
+                  || Plugins::ListenToLater::Sources::sourceFromImage($artwork)
+                  || _defaultStreamingSource();
+        $ref    = { _svc => $source };
+    }
+
+    my $rec = {
+        source      => $source,
+        artist      => $artist,
+        album_title => $album,
+        year        => ($year && $year =~ /(\d{4})/) ? $1 : undef,
+        artwork     => $artwork,
+        ref_kind    => ($source eq 'library' ? 'album_id' : 'search'),
+        ref         => $ref,
+    };
+
+    my ($id, $already) = eval { Plugins::ListenToLater::DB::add($rec) };
+    if ($@) {
+        $log->error("LTL: addctx add failed: $@");
+    }
+    else {
+        $log->warn("LTL: addctx -> $source / " . ($album // '?') . " (id=" . ($id // '?') . ", already=" . ($already // 0) . ")");
+    }
+
+    if (my $client = $request->client) {
+        my $msg = cstring($client, $already ? 'PLUGIN_LTL_ALREADY' : 'PLUGIN_LTL_ADDED');
+        eval { $client->showBriefly({ line => [ cstring($client, 'PLUGIN_LTL'), $msg ] }, { duration => 2 }); };
+    }
+
+    $request->setStatusDone;
+}
+
+sub _defaultStreamingSource {
+    return 'qobuz'    if Slim::Utils::PluginManager->isEnabled('Plugins::Qobuz::Plugin');
+    return 'bandcamp' if Slim::Utils::PluginManager->isEnabled('Plugins::Bandcamp::Plugin');
+    return 'qobuz';
 }
 
 sub _removeCommand {

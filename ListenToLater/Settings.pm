@@ -19,7 +19,7 @@ sub page {
 
 sub prefs {
     return ($prefs, qw(
-        sort played_threshold streaming_min_tracks watch_outside
+        sort played_threshold streaming_min_tracks watch_outside material_action
     ));
 }
 

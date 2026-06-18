@@ -38,6 +38,20 @@ sub sourceFromUrl {
     return $SCHEME{$scheme} || $scheme;   # unknown streaming scheme kept as-is
 }
 
+# Best-effort service detection from an artwork/cover URL. Streaming browse rows
+# (e.g. Qobuz New Releases albums) carry a cover but no favorites_url; the LMS
+# image proxy embeds the original host (…/imageproxy/https%3A%2F%2Fstatic.qobuz.com%2F…),
+# so the service can be inferred from it.
+sub sourceFromImage {
+    my ($img) = @_;
+    return '' unless $img;
+    return 'qobuz'    if $img =~ /qobuz\.com/i;
+    return 'tidal'    if $img =~ /tidal/i;
+    return 'bandcamp' if $img =~ /bcbits\.com|bandcamp/i;
+    return 'spotify'  if $img =~ /spotify|scdn\.co/i;
+    return '';
+}
+
 # ---------------------------------------------------------------------------
 # Capture from a TrackInfo context (works for local AND remote tracks)
 #   args mirror a TrackInfo provider: ($client, $url, $track, $remoteMeta)
