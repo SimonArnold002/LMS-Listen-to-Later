@@ -162,7 +162,15 @@ sub _albumTracks {
 
     Plugins::ListenLater::Sources::resolveTracks($client, $rec, sub {
         my $tracks = shift || [];
-        $callback->({ items => $tracks });
+        # Some services prepend non-playable helper items (e.g. Bandcamp's
+        # "Download album from …" text + the page weblink). Keep them out of the
+        # drill view / play queue. Fall back to the raw list if filtering empties
+        # it (e.g. the single "no match" text row) so the view is never blank.
+        my @playable = grep {
+            ref $_ eq 'HASH' && !$_->{weblink} && (($_->{type} // '') ne 'text')
+        } @$tracks;
+        @playable = @$tracks unless @playable;
+        $callback->({ items => \@playable });
     });
 }
 

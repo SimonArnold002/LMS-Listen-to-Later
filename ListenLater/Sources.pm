@@ -294,7 +294,8 @@ sub _searchService {
     my $album  = $rec->{album_title} // '';
     my $query  = _norm("$artist $album");
 
-    if ($source eq 'qobuz' && Plugins::Qobuz::Plugin->can('getAPIHandler')) {
+    if ($source eq 'qobuz' && Plugins::Qobuz::Plugin->can('getAPIHandler')
+                          && Plugins::Qobuz::Plugin->can('_albumItem')) {
         my $api = Plugins::Qobuz::Plugin::getAPIHandler($client);
         return $cb->(_noMatch($client)) unless $api;
         $api->search(sub {

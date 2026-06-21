@@ -1,5 +1,14 @@
 # Changelog
 
+## 0.1.26 — Code-review fixes
+
+### Fixed
+- **Settings validation actually applies now.** The clamps on Played threshold / streaming track count / retention days were being overwritten by the base settings handler (which re-saves the raw form values), so out-of-range or non-numeric entries could be stored — a bad value could make albums get marked Played far too early. The form values are now sanitised before the base handler saves them.
+- **Material `actions.json` is written atomically** (temp file + rename) instead of truncating-in-place. A crash mid-write could otherwise corrupt that file, which is shared with Material and every other plugin's custom actions.
+- **"Buy on Bandcamp" can no longer hang.** If the album lookup stalls (e.g. a network stall with no error), the request now completes after 15s with the Bandcamp search fallback instead of spinning forever.
+- **Bandcamp albums play cleanly.** The Bandcamp plugin prepends a "Download album from …" text line + page link to its track list; those non-playable items are now kept out of the drill view and play queue (still used for the Buy link).
+- Guarded the Qobuz `_albumItem` call so a future Qobuz change can't crash the album-search fallback.
+
 ## 0.1.25 — Renamed: Listen Later / Wish List
 
 ### Changed
@@ -31,7 +40,7 @@
 ## 0.1.22 — New "Wish List" list
 
 ### Added
-- **A third list, "Wish List".** Alongside Listen Later and Played, you can now keep a wishlist of albums wish list. It appears as its own section in the plugin view (between Listen Later and Played).
+- **A third list, "Wish List".** Alongside Listen Later and Played, you can now keep a wishlist of albums to buy. It appears as its own section in the plugin view (between Listen Later and Played).
 - **"Add to Wish List" context-menu action.** Every place that offers "Add to Listen Later" — Material's album/track/playlist menus (including streaming services) and the local library "…" menus — now also offers **Add to Wish List**, which saves the album straight into the Wish List list.
 - **Move to/from Wish List.** Each album row's "… → More" menu now lists a "Move to …" entry for whichever two lists it isn't currently in (Listen Later / Wish List / Played), plus Remove.
 

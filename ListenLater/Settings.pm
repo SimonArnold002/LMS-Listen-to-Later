@@ -28,21 +28,25 @@ sub handler {
     my ($class, $client, $params, $callback, @args) = @_;
 
     if ($params->{saveSettings}) {
-        my $thr = $params->{pref_played_threshold} // 60;
-        $thr = 60  unless $thr =~ /^\d+$/;
+        # Sanitise the raw form values IN PLACE. SUPER::handler saves every pref in
+        # prefs() straight from $params->{pref_*}, and it runs after us — so setting
+        # the prefs directly here would just be overwritten. Clamp the params instead
+        # and let the base class store the clean values.
+        my $thr = $params->{pref_played_threshold};
+        $thr = 60  unless defined $thr && $thr =~ /^\d+$/;
         $thr = 10  if $thr < 10;
         $thr = 100 if $thr > 100;
-        $prefs->set('played_threshold', $thr + 0);
+        $params->{pref_played_threshold} = $thr + 0;
 
-        my $min = $params->{pref_streaming_min_tracks} // 4;
-        $min = 4 unless $min =~ /^\d+$/;
+        my $min = $params->{pref_streaming_min_tracks};
+        $min = 4 unless defined $min && $min =~ /^\d+$/;
         $min = 1 if $min < 1;
-        $prefs->set('streaming_min_tracks', $min + 0);
+        $params->{pref_streaming_min_tracks} = $min + 0;
 
-        my $ret = $params->{pref_played_retention_days} // 7;
-        $ret = 7 unless $ret =~ /^\d+$/;   # 0 = keep forever
+        my $ret = $params->{pref_played_retention_days};
+        $ret = 7 unless defined $ret && $ret =~ /^\d+$/;   # 0 = keep forever
         $ret = 3650 if $ret > 3650;
-        $prefs->set('played_retention_days', $ret + 0);
+        $params->{pref_played_retention_days} = $ret + 0;
 
         $log->info('Listen Later settings saved');
     }

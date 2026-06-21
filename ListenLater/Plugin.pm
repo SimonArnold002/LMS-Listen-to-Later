@@ -247,9 +247,14 @@ sub _writeMaterialActions {
         LLHome-album LLHome-track LLHome-artist
     );
 
-    open my $fh, '>:raw', $file or die "open $file: $!";
-    print $fh $JSON->encode($data);
-    close $fh;
+    # Write atomically: actions.json is SHARED with Material and every other
+    # plugin/user custom action, so a truncated write (crash mid-write) would
+    # corrupt all of them. Write a temp file then rename() over the original.
+    my $tmp = "$file.tmp.$$";
+    open my $fh, '>:raw', $tmp or die "open $tmp: $!";
+    print $fh $JSON->encode($data) or do { close $fh; unlink $tmp; die "write $tmp: $!" };
+    close $fh                      or do {            unlink $tmp; die "close $tmp: $!" };
+    rename($tmp, $file)            or do {            unlink $tmp; die "rename $tmp -> $file: $!" };
 
     $log->warn("LL: wrote Material custom actions to $file");
     return;
@@ -532,8 +537,13 @@ sub _buyCommand {
         return $request->setStatusDone;
     }
 
+    # Guard so the request completes exactly once, whether from the resolve
+    # callback or the timeout below.
+    my $done = 0;
     my $emit = sub {
         my ($url) = @_;
+        return if $done;
+        $done = 1;
         $request->addResultLoop('item_loop', 0, 'text', cstring($client, 'PLUGIN_LL_BUY_OPEN'));
         $request->addResultLoop('item_loop', 0, 'weblink', $url);
         $request->addResult('offset', 0);
@@ -545,7 +555,24 @@ sub _buyCommand {
     my $cached = (ref $rec->{ref} eq 'HASH') ? $rec->{ref}{buy_url} : undef;
     return $emit->($cached) if $cached;
 
+    # Fallback used if the exact page can't be resolved OR the resolve stalls: a
+    # Bandcamp album search for "artist album" still lands the user on Bandcamp to
+    # buy it. Not cached — so a later open can still resolve the real page.
+    require URI::Escape;
+    my $q = URI::Escape::uri_escape_utf8(
+        join(' ', grep { defined && length } ($rec->{artist}, $rec->{album_title})));
+    my $searchUrl = "https://bandcamp.com/search?item_type=a&q=$q";
+
     $request->setStatusProcessing;
+
+    # Bandcamp's async search may never call back (network stall, no error path);
+    # guarantee completion so the Material query doesn't spin forever.
+    Slim::Utils::Timers::setTimer(undef, time() + 15, sub {
+        return if $done;
+        $log->warn("LL: buy resolve timed out (rec $id) — using search URL");
+        $emit->($searchUrl);
+    });
+
     Plugins::ListenLater::Sources::bandcampBuyUrl($client, $rec, sub {
         my $url = shift;
         if ($url) {
@@ -553,12 +580,7 @@ sub _buyCommand {
                 or $log->error("LL: cache buy_url failed: $@");
         }
         else {
-            # No exact page — a Bandcamp album search for "artist album" still lands
-            # the user on Bandcamp wish list it.
-            require URI::Escape;
-            my $q = URI::Escape::uri_escape_utf8(
-                join(' ', grep { defined && length } ($rec->{artist}, $rec->{album_title})));
-            $url = "https://bandcamp.com/search?item_type=a&q=$q";
+            $url = $searchUrl;
         }
         $log->warn("LL: buy -> " . ($url // '?') . " (rec $id)");
         $emit->($url);
