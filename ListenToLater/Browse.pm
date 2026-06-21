@@ -21,8 +21,23 @@ use Plugins::ListenToLater::Sources;
 
 use constant ICON => 'plugins/ListenToLater/html/images/ListenToLaterIcon_svg.png';
 
+# Per-section icons. To Buy uses Material's own "shopping_cart" font icon via the
+# "_MTL_icon_<name>" filename convention (same trolley as the context-menu action);
+# Played uses Google's "music_history" SVG via the "_svg.png" recolour convention
+# (that glyph isn't in Material's bundled icon font, so it can't be a font icon).
+use constant ICON_TOBUY  => 'plugins/ListenToLater/html/images/ToBuyIcon_MTL_icon_shopping_cart.png';
+use constant ICON_PLAYED => 'plugins/ListenToLater/html/images/PlayedIcon_svg.png';
+
 my $log   = logger('plugin.listentolater');
 my $prefs = preferences('plugin.listentolater');
+
+# Map a list status to its section icon (Listen to Later uses the plugin icon).
+sub _iconFor {
+    my ($status) = @_;
+    return ICON_TOBUY  if $status eq 'tobuy';
+    return ICON_PLAYED if $status eq 'played';
+    return ICON;
+}
 
 # ---------------------------------------------------------------------------
 # Top level — the whole list on one page
@@ -78,7 +93,7 @@ sub _header {
     # runs for headers too), so an image-less header sets haveWithoutIcons and
     # disables the whole page's grid/list toggle. With an icon, every item has an
     # image → grid stays available, and the header still renders as a divider.
-    my $h = { name => $name, type => $wantHeaders ? 'header' : 'text', image => ICON };
+    my $h = { name => $name, type => $wantHeaders ? 'header' : 'text', image => _iconFor($status) };
 
     if ($wantHeaders) {
         $h->{url}         = sub { _renderSection($_[0], $_[1], $status) };
@@ -112,7 +127,7 @@ sub _albumRow {
     return {
         name        => $name,
         line2       => ucfirst($rec->{source} || ''),
-        image       => $rec->{artwork} || ICON,
+        image       => $rec->{artwork} || _iconFor($rec->{status}),
         type        => 'playlist',
         url         => \&_albumTracks,
         passthrough => [ { id => $rec->{id} } ],

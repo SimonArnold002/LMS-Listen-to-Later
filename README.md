@@ -1,21 +1,22 @@
 # Listen to Later — Lyrion Music Server plugin
 
-Save an album — from your **local library** or any **streaming service** (Qobuz, Bandcamp) — into a *Listen to Later* list, browse it like a playlist *of albums*, and have albums move to a **Played** section once you've heard them.
+Save an album — from your **local library** or any **streaming service** (Qobuz, Bandcamp, Tidal) — into a *Listen to Later* list, browse it like a playlist *of albums*, and have albums move to a **Played** section once you've heard them. A separate **To Buy** wishlist sits alongside, and albums can be moved freely between the three lists.
 
 ## Features
-- **Add from the "…" menu.** An *Add album to Listen to Later* entry appears in the track context menu (local and streaming) and in the library album context menu. Material skin preferred; also works in the classic skin.
-- **Two sections:** *Listen to Later* and *Played*, each with a live count.
-- **Per-album actions:** Play album, Remove from list, Move between sections.
+- **Add from the "…" menu.** *Add album to Listen to Later* and *Add to To Buy* entries appear in the track context menu (local and streaming) and in the library album context menu. Material skin preferred; also works in the classic skin.
+- **Three sections:** *Listen to Later*, *To Buy* and *Played*, each with a live count and its own icon.
+- **Per-album actions:** Play album, Remove from list, Move between any of the three sections.
+- **Buy on Bandcamp.** Bandcamp albums get a *Buy on Bandcamp* entry in the "… → More" menu that opens the album's page in your browser (handy for *To Buy* items).
 - **Plays through the original source.** Library albums play from the library; streaming albums replay through the service they came from (falling back to the service's own search when needed).
 - **Automatic Played tracking.** A saved album moves to *Played* once you've listened to most of it — whether you played it from the list or anywhere else. Configurable, and can be turned off.
 - **Sort:** Recently added / Artist / Album / Year / Recently played.
 - **Material home shelf.** A *Listen to Later* row on the Material Skin home screen — a horizontal, scrollable strip of your saved albums, each playable/tappable. Uses Material's standard home-extra mechanism (no skin patching). Enable it in Material's home-screen customisation if it isn't shown by default.
-- **Auto-tidy the Played section.** Played albums are removed automatically after a configurable window (default 7 days), unless you move them back to *Listen to Later* first. Set the window to 0 to keep them forever.
+- **Auto-tidy the Played section.** Played albums are removed automatically after a configurable window (default 7 days), unless you move them back to *Listen to Later* (or *To Buy*) first. Set the window to 0 to keep them forever. *To Buy* albums are never auto-marked Played nor auto-removed.
 - **Durable storage.** A SQLite database in the server cache directory, ready to back future features.
 
 ## Requirements
 - Lyrion Music Server 9.0+.
-- For streaming albums: the relevant service plugin installed (Qobuz and/or Bandcamp).
+- For streaming albums: the relevant service plugin installed (Qobuz, Bandcamp and/or Tidal).
 
 ## Install (manual)
 ```bash
@@ -26,7 +27,7 @@ sudo systemctl restart lyrionmusicserver
 ```
 
 ## Settings
-- **Default sort order** for both lists.
+- **Default sort order** for all three lists.
 - **Automatically move albums to Played** (master toggle for auto-marking).
 - **Played threshold** — percent of a library album's tracks that must play (default 60).
 - **Streaming track count** — distinct streaming tracks before a streaming album is marked played (default 4; streaming albums have no reliable track total).

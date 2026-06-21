@@ -1,5 +1,17 @@
 # Changelog
 
+## 0.1.24 — Per-section icons
+
+### Changed
+- **Each list now has its own icon.** The three sections are easier to tell apart at a glance:
+  - **Listen to Later** — a new "music note + clock" icon (also now the plugin's own icon, on the Apps tile, home shelf and Manage Plugins).
+  - **To Buy** — Material's shopping-trolley icon (the same one used by the "Add to To Buy" context-menu action).
+  - **Played** — Google's "music history" icon (a clock/history ring with a note).
+- Album rows without their own cover art now fall back to their section's icon instead of the generic plugin icon.
+
+### Notes
+- To Buy uses Material's own font icon via the `_MTL_icon_shopping_cart` filename convention, so it always matches the current theme. Played ships as a recolourable SVG (`_svg.png` convention) because `music_history` isn't in Material's bundled icon font; non-Material skins get a real transparent PNG fallback for every icon.
+
 ## 0.1.23 — Buy on Bandcamp
 
 ### Added
