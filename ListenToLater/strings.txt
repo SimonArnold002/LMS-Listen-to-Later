@@ -7,11 +7,17 @@ PLUGIN_LTL_DESC
 PLUGIN_LTL_ADD
 	EN	Add album to Listen to Later
 
+PLUGIN_LTL_ADD_TOBUY
+	EN	Add album to To Buy
+
 PLUGIN_LTL_ADDED
 	EN	Added to Listen to Later
 
+PLUGIN_LTL_ADDED_TOBUY
+	EN	Added to To Buy
+
 PLUGIN_LTL_ALREADY
-	EN	Already in Listen to Later
+	EN	Already in your list
 
 PLUGIN_LTL_ERROR
 	EN	Could not save album
@@ -21,6 +27,9 @@ PLUGIN_LTL_LISTEN_LATER
 
 PLUGIN_LTL_PLAYED
 	EN	Played
+
+PLUGIN_LTL_TOBUY
+	EN	To Buy
 
 PLUGIN_LTL_SETTINGS
 	EN	Plugin Settings
@@ -46,8 +55,17 @@ PLUGIN_LTL_MOVE_PLAYED
 PLUGIN_LTL_MOVE_LATER
 	EN	Move to Listen to Later
 
+PLUGIN_LTL_MOVE_TOBUY
+	EN	Move to To Buy
+
 PLUGIN_LTL_MOVED
 	EN	Moved
+
+PLUGIN_LTL_BUY_BANDCAMP
+	EN	Buy on Bandcamp
+
+PLUGIN_LTL_BUY_OPEN
+	EN	Open on Bandcamp
 
 PLUGIN_LTL_NO_MATCH
 	EN	Could not find this album to play
@@ -96,6 +114,15 @@ PLUGIN_LTL_STREAM_MIN
 
 PLUGIN_LTL_STREAM_MIN_DESC
 	EN	Streaming albums have no reliable track total, so they move to Played after this many distinct tracks have played. Default 4.
+
+PLUGIN_LTL_RETENTION
+	EN	Auto-remove played albums after
+
+PLUGIN_LTL_RETENTION_DESC
+	EN	Automatically remove albums from the Played section this many days after they were played, unless you move them back to Listen to Later first. Default 7. Set to 0 to keep played albums forever.
+
+PLUGIN_LTL_DAYS
+	EN	days
 
 PLUGIN_LTL_SECTION_MATERIAL
 	EN	Material Skin

@@ -5,7 +5,7 @@
 
 ---
 
-## GitHub issue draft
+## Summary
 
 **Title:**
 > Custom actions: support streaming / app browse items (Qobuz/Tidal/Deezer/Bandcamp), not just library content

@@ -26,6 +26,7 @@ my $log = logger('plugin.listentolater');
 my %SCHEME = (
     qobuz    => 'qobuz',
     bandcamp => 'bandcamp',
+    tidal    => 'tidal',
 );
 
 # ---------------------------------------------------------------------------
@@ -192,7 +193,13 @@ sub resolveTracks {
         eval {
             $node->{url}->($client, sub {
                 my $res = shift;
-                $cb->(($res && $res->{items}) || []);
+                # Services differ in what their album coderef returns: Qobuz/Tidal
+                # pass a hashref { items => [...] }; Bandcamp passes a bare arrayref
+                # of tracks. Accept either (anything else → empty).
+                my $items = ref $res eq 'HASH'  ? ($res->{items} || [])
+                          : ref $res eq 'ARRAY' ? $res
+                          : [];
+                $cb->($items);
             }, {}, $pt);
             1;
         } or $cb->([{ name => cstring($client, 'PLUGIN_LTL_NO_MATCH'), type => 'text' }]);
@@ -264,6 +271,11 @@ sub _streamingAlbumNode {
         $item{url} = \&Plugins::Bandcamp::Plugin::get_album;
         $item{passthrough} = [ { album_id => $albumId } ];
     }
+    elsif ($source eq 'tidal' && Plugins::TIDAL::Plugin->can('getAlbum')) {
+        # Tidal's getAlbum reads $params->{id} (NOT album_id) and returns {items=>...}.
+        $item{url} = \&Plugins::TIDAL::Plugin::getAlbum;
+        $item{passthrough} = [ { id => $albumId } ];
+    }
     else {
         return undef;
     }
@@ -315,6 +327,27 @@ sub _searchService {
         return;
     }
 
+    # Tidal: search albums (callback gets a bare arrayref of album hashes), keep
+    # title+artist matches, render via the plugin's own _renderAlbum (url => getAlbum).
+    if ($source eq 'tidal' && Plugins::TIDAL::Plugin->can('getAPIHandler')
+                           && Plugins::TIDAL::Plugin->can('_renderAlbum')) {
+        my $api = Plugins::TIDAL::Plugin::getAPIHandler($client);
+        return $cb->(_noMatch($client)) unless $api;
+        $api->search(sub {
+            my $albums = shift;
+            my @out;
+            for my $a (@{ $albums || [] }) {
+                next unless ref $a eq 'HASH';
+                my $ar = $a->{artist} || ($a->{artists} && $a->{artists}[0]) || {};
+                my $candArtist = ref $ar eq 'HASH' ? $ar->{name} : '';
+                next unless _albumMatches(_norm($artist), _norm($album), $candArtist, $a->{title});
+                push @out, Plugins::TIDAL::Plugin::_renderAlbum($a);
+            }
+            $cb->(@out ? \@out : _noMatch($client));
+        }, { type => 'albums', search => $query, limit => 20 });
+        return;
+    }
+
     return $cb->(_noMatch($client));
 }
 
@@ -324,12 +357,49 @@ sub _noMatch {
 }
 
 # ---------------------------------------------------------------------------
+# Bandcamp purchase link. We store only artist+album for Bandcamp items, so the
+# album page URL has to be resolved on demand: resolve the album's items (search
+# → get_album) and scan them for the bandcamp.com page link the plugin emits
+# ("Download album from the following address: http://artist.bandcamp.com/album/…").
+# $cb->( $url | undef ).
+# ---------------------------------------------------------------------------
+sub bandcampBuyUrl {
+    my ($client, $rec, $cb) = @_;
+    return $cb->(undef) unless ($rec->{source} || '') eq 'bandcamp';
+    resolveTracks($client, $rec, sub {
+        my $items = shift || [];
+        $cb->(_findBandcampUrl($items));
+    });
+}
+
+sub _findBandcampUrl {
+    my ($items) = @_;
+    return undef unless ref $items eq 'ARRAY';
+
+    # The track play URLs are bandcamp://… (not http), and artwork lives on
+    # bcbits.com — both excluded by requiring an http(s) bandcamp.com link. Prefer
+    # an album/track page, then any *.bandcamp.com page.
+    for my $rx (qr{bandcamp\.com/(?:album|track)/}i, qr{\.bandcamp\.com/}i, qr{//bandcamp\.com/}i) {
+        for my $it (@$items) {
+            next unless ref $it eq 'HASH';
+            for my $f (qw(weblink url link name title)) {
+                my $v = $it->{$f};
+                next if !defined $v || ref $v;
+                return $v if $v =~ m{^https?://\S+} && $v =~ $rx;
+            }
+        }
+    }
+    return undef;
+}
+
+# ---------------------------------------------------------------------------
 # Small matching helpers (ported from the sibling plugin's tuned logic)
 # ---------------------------------------------------------------------------
 sub _serviceCan {
     my ($source) = @_;
     return 1 if $source eq 'qobuz'    && Plugins::Qobuz::Plugin->can('QobuzGetTracks');
     return 1 if $source eq 'bandcamp' && Plugins::Bandcamp::Plugin->can('get_album');
+    return 1 if $source eq 'tidal'    && Plugins::TIDAL::Plugin->can('getAlbum');
     return 0;
 }
 

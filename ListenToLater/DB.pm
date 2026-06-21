@@ -56,7 +56,7 @@ sub _migrate {
     $h->do(<<'SQL');
 CREATE TABLE IF NOT EXISTS albums (
     id          INTEGER PRIMARY KEY AUTOINCREMENT,
-    status      TEXT    NOT NULL DEFAULT 'later',   -- 'later' | 'played'
+    status      TEXT    NOT NULL DEFAULT 'later',   -- 'later' | 'played' | 'tobuy'
     source      TEXT    NOT NULL,                    -- 'library' | 'qobuz' | 'bandcamp' | ...
     artist      TEXT,
     album_title TEXT,
@@ -103,20 +103,21 @@ sub _rowToHash {
 # CRUD
 # ---------------------------------------------------------------------------
 
-# add($rec) — $rec: { source, artist, album_title, year, artwork, ref_kind, ref }
+# add($rec, $status) — $rec: { source, artist, album_title, year, artwork, ref_kind, ref }
+# $status is the target list for a NEW album: 'later' (default) or 'tobuy'.
 # Returns (id, $already) where $already is true if it was already present.
 sub add {
-    my ($rec) = @_;
+    my ($rec, $status) = @_;
+    $status = 'later' unless defined $status && $status =~ /^(?:later|tobuy)$/;
 
     my $source = $rec->{source} or return (undef, 0);
     my $key    = dedupeKey($rec->{artist}, $rec->{album_title});
 
     my $existing = findByKey($source, $key);
     if ($existing) {
-        # Re-adding a Played album returns it to the Listen to Later section.
-        if ($existing->{status} eq 'played') {
-            setStatus($existing->{id}, 'later');
-        }
+        # Failsafe: if the album is already saved in ANY section (Listen to
+        # Later, Played or To Buy) an accidental "Add" is a no-op — it is not
+        # moved between sections. Use the explicit "Move to …" actions for that.
         return ($existing->{id}, 1);
     }
 
@@ -127,7 +128,7 @@ sub add {
             (status, source, artist, album_title, year, artwork, ref_kind, ref_json, dedupe_key, added_at, play_count)
          VALUES (?,?,?,?,?,?,?,?,?,?,0)',
         undef,
-        'later', $source, $rec->{artist}, $rec->{album_title}, $rec->{year},
+        $status, $source, $rec->{artist}, $rec->{album_title}, $rec->{year},
         $rec->{artwork}, $rec->{ref_kind}, $ref_json, $key, time(),
     );
 
@@ -138,6 +139,18 @@ sub get {
     my ($id) = @_;
     my $row = dbh()->selectrow_hashref('SELECT * FROM albums WHERE id = ?', undef, $id);
     return _rowToHash($row);
+}
+
+# Persist a resolved value into the row's ref_json (e.g. a Bandcamp purchase URL
+# discovered on first open), so later lookups are instant. Merges into existing ref.
+sub setRefValue {
+    my ($id, $key, $value) = @_;
+    return unless $id && defined $key;
+    my $rec = get($id) or return;
+    my $ref = (ref $rec->{ref} eq 'HASH') ? $rec->{ref} : {};
+    $ref->{$key} = $value;
+    dbh()->do('UPDATE albums SET ref_json = ? WHERE id = ?', undef, $JSON->encode($ref), $id);
+    return;
 }
 
 sub findByKey {
@@ -210,6 +223,20 @@ sub markPlayed {
         "UPDATE albums SET status = 'played', played_at = ?, play_count = play_count + 1 WHERE id = ?",
         undef, time(), $id);
     return;
+}
+
+# Delete Played albums whose played_at is older than $days days. Only status='played'
+# rows are ever deleted, so albums moved back to Listen to Later ('later') or to the
+# To Buy list ('tobuy') are never purged; re-playing an album resets played_at,
+# restarting its clock. Returns the number removed.
+sub purgePlayed {
+    my ($days) = @_;
+    return 0 unless $days && $days =~ /^\d+$/ && $days > 0;
+    my $cutoff = time() - $days * 86400;
+    my $n = dbh()->do(
+        "DELETE FROM albums WHERE status = 'played' AND played_at IS NOT NULL AND played_at < ?",
+        undef, $cutoff);
+    return ($n && $n ne '0E0') ? ($n + 0) : 0;
 }
 
 1;

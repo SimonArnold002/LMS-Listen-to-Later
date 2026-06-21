@@ -3,6 +3,7 @@ package Plugins::ListenToLater::Browse;
 # Single-page content view. On entry the user sees, in one list:
 #   • Plugin Settings (top)
 #   • a Material header "Listen to Later (N)" + its albums
+#   • a Material header "To Buy (N)" + its albums
 #   • a Material header "Played (N)" + its albums
 # Each album row is directly playable (type => 'playlist'); Remove/Move live in
 # the row's "…" context menu via itemActions => info → the contextmenu query
@@ -41,6 +42,7 @@ sub topLevel {
     };
 
     push @items, _section($client, 'later',  'PLUGIN_LTL_LISTEN_LATER', $wantHeaders);
+    push @items, _section($client, 'tobuy',  'PLUGIN_LTL_TOBUY',        $wantHeaders);
     push @items, _section($client, 'played', 'PLUGIN_LTL_PLAYED',       $wantHeaders);
 
     $callback->({ items => \@items });
@@ -97,7 +99,8 @@ sub _renderSection {
 
 # A directly-playable album row. type => 'playlist' + a url coderef that resolves
 # the album's tracks gives Material the play button and Play/Play Next/Add in the
-# "…". itemActions→info adds the "More" context entry → our Remove/Move menu.
+# "…". itemActions→info adds the "…" → More context entry → our Remove/Move menu
+# (refreshes the list in place; see Plugin::_contextMenuQuery).
 sub _albumRow {
     my ($client, $rec) = @_;
 
@@ -120,6 +123,17 @@ sub _albumRow {
             },
         },
     };
+}
+
+# Material home-page shelf: the "Listen to Later" albums as a flat, quantity-stable
+# card row. The Material carousel and its "show all" click-in are the SAME feed
+# (Material exposes no way to give the click-in a different command), so the result
+# must not vary by request quantity or structure — otherwise item_ids shift and
+# deep playback resolves the wrong album. So: always the same flat list of rows.
+sub homeShelf {
+    my ($client, $callback, $args) = @_;
+    my $rows = Plugins::ListenToLater::DB::list('later', $prefs->get('sort') || 'added');
+    $callback->({ items => [ map { _albumRow($client, $_) } @$rows ] });
 }
 
 # Resolve the tracks for an album row (drill-in and play both call this).

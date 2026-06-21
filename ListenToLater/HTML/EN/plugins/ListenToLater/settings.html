@@ -26,6 +26,10 @@
 <input type="number" name="pref_streaming_min_tracks" value="[% prefs.streaming_min_tracks %]" min="1" max="50" size="4">
 [% END %]
 
+[% WRAPPER setting title="PLUGIN_LTL_RETENTION" desc="PLUGIN_LTL_RETENTION_DESC" %]
+<input type="number" name="pref_played_retention_days" value="[% prefs.played_retention_days %]" min="0" max="3650" size="4"> [% 'PLUGIN_LTL_DAYS' | string %]
+[% END %]
+
 <h2>[% 'PLUGIN_LTL_SECTION_MATERIAL' | string %]</h2>
 
 [% WRAPPER setting title="PLUGIN_LTL_MATERIAL_ACTION" desc="PLUGIN_LTL_MATERIAL_ACTION_DESC" %]

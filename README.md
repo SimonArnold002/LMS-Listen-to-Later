@@ -9,6 +9,8 @@ Save an album — from your **local library** or any **streaming service** (Qobu
 - **Plays through the original source.** Library albums play from the library; streaming albums replay through the service they came from (falling back to the service's own search when needed).
 - **Automatic Played tracking.** A saved album moves to *Played* once you've listened to most of it — whether you played it from the list or anywhere else. Configurable, and can be turned off.
 - **Sort:** Recently added / Artist / Album / Year / Recently played.
+- **Material home shelf.** A *Listen to Later* row on the Material Skin home screen — a horizontal, scrollable strip of your saved albums, each playable/tappable. Uses Material's standard home-extra mechanism (no skin patching). Enable it in Material's home-screen customisation if it isn't shown by default.
+- **Auto-tidy the Played section.** Played albums are removed automatically after a configurable window (default 7 days), unless you move them back to *Listen to Later* first. Set the window to 0 to keep them forever.
 - **Durable storage.** A SQLite database in the server cache directory, ready to back future features.
 
 ## Requirements
@@ -28,6 +30,7 @@ sudo systemctl restart lyrionmusicserver
 - **Automatically move albums to Played** (master toggle for auto-marking).
 - **Played threshold** — percent of a library album's tracks that must play (default 60).
 - **Streaming track count** — distinct streaming tracks before a streaming album is marked played (default 4; streaming albums have no reliable track total).
+- **Auto-remove played albums after N days** — retention window for the Played section (default 7; 0 = keep forever).
 
 ## Notes & limitations
 - For streaming, album-level add is reached from a track ("add this track's album"), because there is no global hook to inject an item into every service's own album "…" menu — `Slim::Menu::TrackInfo` is the cross-service path.

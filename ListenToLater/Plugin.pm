@@ -20,6 +20,7 @@ use Slim::Utils::Log;
 use Slim::Utils::Prefs;
 use Slim::Utils::PluginManager;
 use Slim::Utils::Strings qw(cstring);
+use Slim::Utils::Timers;
 
 use Plugins::ListenToLater::DB;
 use Plugins::ListenToLater::Sources;
@@ -42,6 +43,7 @@ $prefs->init({
     streaming_min_tracks => 4,         # distinct streaming tracks → Played (no total available)
     watch_outside        => 1,         # mark Played from plays started outside the plugin
     material_action      => 1,         # add an "Add to Listen to Later" entry to Material's context menus
+    played_retention_days => 7,        # auto-remove Played albums after N days (0 = keep forever)
 });
 
 sub initPlugin {
@@ -65,6 +67,7 @@ sub initPlugin {
     Slim::Control::Request::addDispatch(['listentolater', 'contextmenu'], [0, 1, 1, \&_contextMenuQuery]);
     Slim::Control::Request::addDispatch(['listentolater', 'remove'],      [0, 0, 1, \&_removeCommand]);
     Slim::Control::Request::addDispatch(['listentolater', 'move'],        [0, 0, 1, \&_moveCommand]);
+    Slim::Control::Request::addDispatch(['listentolater', 'buy'],         [0, 1, 1, \&_buyCommand]);
 
     _registerInfoProviders();
 
@@ -96,7 +99,35 @@ sub postinitPlugin {
             or $log->error("LTL: failed to write Material custom actions: $@");
     }
 
+    # Material Skin home-page shelf for the Listen to Later list (guarded on the
+    # registerHomeExtra API, like Qobuz/Bandcamp/ListenBrainz do).
+    if ( Slim::Utils::PluginManager->isEnabled('Plugins::MaterialSkin::Plugin')
+      && Plugins::MaterialSkin::Plugin->can('registerHomeExtra') ) {
+        eval {
+            require Plugins::ListenToLater::HomeExtras;
+            Plugins::ListenToLater::HomeExtras->initPlugin();
+            $log->info('LTL: registered Material home shelf');
+            1;
+        } or $log->error("LTL: failed to register Material home shelf: $@");
+    }
+
+    # Periodically purge Played albums older than the retention window. First run
+    # shortly after startup, then once a day.
+    Slim::Utils::Timers::killTimers(undef, \&_purgeTick);
+    Slim::Utils::Timers::setTimer(undef, time() + 60, \&_purgeTick);
+
     return;
+}
+
+# Remove Played albums older than `played_retention_days`, then re-arm for ~24h.
+sub _purgeTick {
+    my $days = $prefs->get('played_retention_days');
+    if (defined $days && $days =~ /^\d+$/ && $days > 0) {
+        my $n = eval { Plugins::ListenToLater::DB::purgePlayed($days) } || 0;
+        $log->error("LTL: purgePlayed failed: $@") if $@;
+        $log->info("LTL: purged $n played album(s) older than $days day(s)") if $n;
+    }
+    Slim::Utils::Timers::setTimer(undef, time() + 86400, \&_purgeTick);
 }
 
 # ---------------------------------------------------------------------------
@@ -159,21 +190,36 @@ sub _writeMaterialActions {
         $data->{$cat} = [ grep { !_isOurAction($_) } @{ $data->{$cat} } ];
     }
 
+    # Two entries per category: "Add to Listen to Later" (the base command, which
+    # defaults to the Listen to Later list) and "Add to To Buy" (the same command
+    # plus list:tobuy). Both are stripped/rewritten on each run by _isOurAction.
     for my $cat (keys %cats) {
-        push @{ $data->{$cat} ||= [] }, {
-            title      => 'Add to Listen to Later',
-            icon       => 'playlist_add',
-            lmscommand => $cats{$cat},
-        };
+        my $base = $cats{$cat};
+        push @{ $data->{$cat} ||= [] },
+            {
+                title      => 'Add to Listen to Later',
+                icon       => 'playlist_add',
+                lmscommand => $base,
+            },
+            {
+                title      => 'Add to To Buy',
+                icon       => 'shopping_cart',
+                lmscommand => [ @$base, 'list:tobuy' ],
+            };
     }
 
-    # Suppress the generic streaming "Add" inside our OWN plugin view. Defining these
-    # (empty) categories tells the patched Material to use them instead of "online-*"
-    # for the listentolater app's own items — so an album already in the list isn't
-    # offered "Add to Listen to Later" again (re-adding would bounce a Played album
-    # back to Listen to Later). Remove/Move stay in each row's "…" → More menu, which
-    # is the only place that reliably carries our internal album id.
-    $data->{$_} = [] for qw(listentolater-album listentolater-track listentolater-artist);
+    # Suppress the generic streaming "Add" inside our OWN surfaces (the plugin list
+    # view, command 'listentolater'; and the Material home shelf, command 'LtLHome').
+    # Defining these (empty) categories tells the patched Material to use them instead
+    # of "online-*" for those items — so an album already in the list isn't offered
+    # "Add to Listen to Later" again (re-adding would bounce a Played album back to
+    # Listen to Later). Remove/Move live in each row's "…" → More menu (which refreshes
+    # the list in place), since putting them at the top of the "…" would need a further
+    # Material change.
+    $data->{$_} = [] for qw(
+        listentolater-album listentolater-track listentolater-artist
+        LtLHome-album LtLHome-track LtLHome-artist
+    );
 
     open my $fh, '>:raw', $file or die "open $file: $!";
     print $fh $JSON->encode($data);
@@ -259,9 +305,19 @@ sub _albumInfoHandler {
 # The shared menu item. Modelled on the built-in `playitem`: a jive ACTION item
 # (not a `url` drill — that rendered as a blank page) that fires the registered
 # `listentolater add` command. The album is carried as flat string params; the
-# command rebuilds the replayable ref from them.
+# command rebuilds the replayable ref from them. Two entries are offered — "Add to
+# Listen to Later" and "Add to To Buy" — differing only in the `list` param.
 sub _addItem {
     my ($client, $rec) = @_;
+
+    return [
+        _addItemFor($client, $rec, 'later', 'PLUGIN_LTL_ADD'),
+        _addItemFor($client, $rec, 'tobuy', 'PLUGIN_LTL_ADD_TOBUY'),
+    ];
+}
+
+sub _addItemFor {
+    my ($client, $rec, $list, $labelStr) = @_;
 
     my $ref     = $rec->{ref} || {};
     my $albumid = $ref->{album_id}
@@ -279,18 +335,33 @@ sub _addItem {
             artwork => $rec->{artwork}     // '',
             albumid => $albumid,
             svc     => $ref->{_svc}        // '',
+            list    => $list,
         },
         nextWindow => 'parent',
     };
 
     return {
         type => 'text',
-        name => cstring($client, 'PLUGIN_LTL_ADD'),
+        name => cstring($client, $labelStr),
         jive => {
             actions => { go => $go, play => $go, add => $go },
             style   => 'item',
         },
     };
+}
+
+# Normalise the requested target list. Only 'tobuy' and the default 'later' are
+# valid add targets ('played' is reached by playing or by an explicit Move).
+sub _wantedList {
+    my ($v) = @_;
+    return (defined $v && $v eq 'tobuy') ? 'tobuy' : 'later';
+}
+
+# The confirmation toast, varying by list and whether it was already present.
+sub _addedMsg {
+    my ($client, $list, $already) = @_;
+    return cstring($client, 'PLUGIN_LTL_ALREADY') if $already;
+    return cstring($client, $list eq 'tobuy' ? 'PLUGIN_LTL_ADDED_TOBUY' : 'PLUGIN_LTL_ADDED');
 }
 
 # CLI command behind the menu item: write the album to the DB and confirm.
@@ -300,6 +371,7 @@ sub _addCommand {
     my $source  = $request->getParam('source') || 'library';
     my $albumid = $request->getParam('albumid');
     my $svc     = $request->getParam('svc');
+    my $list    = _wantedList($request->getParam('list'));
 
     my $ref;
     if ($source eq 'library') {
@@ -322,18 +394,17 @@ sub _addCommand {
         ref         => $ref,
     };
 
-    my ($id, $already) = eval { Plugins::ListenToLater::DB::add($rec) };
+    my ($id, $already) = eval { Plugins::ListenToLater::DB::add($rec, $list) };
     if ($@) {
         $log->error("LTL: add command failed: $@");
     }
     else {
         $log->warn("LTL: add command -> id=" . ($id // '?') . " already=" . ($already // 0)
-            . " ($rec->{source} / " . ($rec->{album_title} // '?') . ")");
+            . " list=$list ($rec->{source} / " . ($rec->{album_title} // '?') . ")");
     }
 
     if (my $client = $request->client) {
-        my $msg = cstring($client, $already ? 'PLUGIN_LTL_ALREADY' : 'PLUGIN_LTL_ADDED');
-        eval { $client->showBriefly({ line => [ cstring($client, 'PLUGIN_LTL'), $msg ] }, { duration => 2 }); };
+        eval { $client->showBriefly({ line => [ cstring($client, 'PLUGIN_LTL'), _addedMsg($client, $list, $already) ] }, { duration => 2 }); };
     }
 
     $request->addResult('count', 1);
@@ -350,39 +421,116 @@ sub _contextMenuQuery {
     my $client = $request->client;
     my $rec    = eval { Plugins::ListenToLater::DB::get($id) };
 
-    my $status  = ($rec && $rec->{status}) ? $rec->{status} : 'later';
-    my $target  = $status eq 'later' ? 'played' : 'later';
-    my $moveStr = $status eq 'later' ? 'PLUGIN_LTL_MOVE_PLAYED' : 'PLUGIN_LTL_MOVE_LATER';
+    my $status = ($rec && $rec->{status}) ? $rec->{status} : 'later';
 
-    my @entries = (
-        {
-            text    => cstring($client, 'PLUGIN_LTL_REMOVE'),
-            cmd     => [ 'listentolater', 'remove' ],
-            params  => { id => $id },
-        },
-        {
-            text    => cstring($client, $moveStr),
-            cmd     => [ 'listentolater', 'move' ],
-            params  => { id => $id, status => $target },
-        },
+    # Offer a "Move to …" for each of the other two lists, then Remove. Order is
+    # fixed (later, tobuy, played) so the menu is stable regardless of which list
+    # the row is currently in.
+    my %moveStr = (
+        later  => 'PLUGIN_LTL_MOVE_LATER',
+        tobuy  => 'PLUGIN_LTL_MOVE_TOBUY',
+        played => 'PLUGIN_LTL_MOVE_PLAYED',
     );
+
+    my @entries;
+
+    # Bandcamp items: a "Buy on Bandcamp" entry that drills into the `buy` query,
+    # which resolves the album's bandcamp.com page and opens it (see _buyCommand).
+    # A `go` (drill) entry, not a `do` — so it navigates to the link rather than
+    # firing-and-refreshing in place.
+    if ($rec && ($rec->{source} || '') eq 'bandcamp') {
+        push @entries, {
+            text => cstring($client, 'PLUGIN_LTL_BUY_BANDCAMP'),
+            go   => { player => 0, cmd => [ 'listentolater', 'buy' ], params => { id => $id } },
+        };
+    }
+
+    for my $target (qw(later tobuy played)) {
+        next if $target eq $status;
+        push @entries, {
+            text   => cstring($client, $moveStr{$target}),
+            cmd    => [ 'listentolater', 'move' ],
+            params => { id => $id, status => $target },
+        };
+    }
+    push @entries, {
+        text   => cstring($client, 'PLUGIN_LTL_REMOVE'),
+        cmd    => [ 'listentolater', 'remove' ],
+        params => { id => $id },
+    };
 
     my $i = 0;
     for my $e (@entries) {
         $request->addResultLoop('item_loop', $i, 'text', $e->{text});
-        $request->addResultLoop('item_loop', $i, 'actions', {
-            do => { player => 0, cmd => $e->{cmd}, params => $e->{params} },
-        });
-        # 'parent' on a "More" menu action makes Material refresh the list in place
-        # (browse-functions.js: isMoreMenu && nextWindow=="parent" -> refreshList),
-        # so Remove/Move update the list without jumping back to the home screen.
-        $request->addResultLoop('item_loop', $i, 'nextWindow', 'parent');
+        if ($e->{go}) {
+            # Drill into the buy query; no nextWindow (we want to navigate, not refresh).
+            $request->addResultLoop('item_loop', $i, 'actions', { go => $e->{go} });
+        }
+        else {
+            $request->addResultLoop('item_loop', $i, 'actions', {
+                do => { player => 0, cmd => $e->{cmd}, params => $e->{params} },
+            });
+            # 'parent' on a "More" menu action makes Material refresh the list in place
+            # (browse-functions.js: isMoreMenu && nextWindow=="parent" -> refreshList),
+            # so Remove/Move update the list without jumping back to the home screen.
+            $request->addResultLoop('item_loop', $i, 'nextWindow', 'parent');
+        }
         $i++;
     }
 
     $request->addResult('offset', 0);
     $request->addResult('count', $i);
     $request->setStatusDone;
+}
+
+# Resolve a Bandcamp item's purchase page and return it as a clickable weblink
+# (opens in the browser). Async: resolves the album on first use and caches the
+# URL in the DB so later opens are instant. Always returns a link — falls back to
+# a Bandcamp album search if the exact page can't be found.
+sub _buyCommand {
+    my $request = shift;
+
+    my $client = $request->client;
+    my $id     = $request->getParam('id');
+    my $rec    = eval { Plugins::ListenToLater::DB::get($id) };
+
+    if (!$rec || ($rec->{source} || '') ne 'bandcamp') {
+        $request->addResult('offset', 0);
+        $request->addResult('count', 0);
+        return $request->setStatusDone;
+    }
+
+    my $emit = sub {
+        my ($url) = @_;
+        $request->addResultLoop('item_loop', 0, 'text', cstring($client, 'PLUGIN_LTL_BUY_OPEN'));
+        $request->addResultLoop('item_loop', 0, 'weblink', $url);
+        $request->addResult('offset', 0);
+        $request->addResult('count', 1);
+        $request->setStatusDone;
+    };
+
+    # Cached from a previous open → instant.
+    my $cached = (ref $rec->{ref} eq 'HASH') ? $rec->{ref}{buy_url} : undef;
+    return $emit->($cached) if $cached;
+
+    $request->setStatusProcessing;
+    Plugins::ListenToLater::Sources::bandcampBuyUrl($client, $rec, sub {
+        my $url = shift;
+        if ($url) {
+            eval { Plugins::ListenToLater::DB::setRefValue($id, 'buy_url', $url); 1 }
+                or $log->error("LTL: cache buy_url failed: $@");
+        }
+        else {
+            # No exact page — a Bandcamp album search for "artist album" still lands
+            # the user on Bandcamp to buy it.
+            require URI::Escape;
+            my $q = URI::Escape::uri_escape_utf8(
+                join(' ', grep { defined && length } ($rec->{artist}, $rec->{album_title})));
+            $url = "https://bandcamp.com/search?item_type=a&q=$q";
+        }
+        $log->warn("LTL: buy -> " . ($url // '?') . " (rec $id)");
+        $emit->($url);
+    });
 }
 
 # Add triggered by a Material custom action. The variables Material substitutes
@@ -400,6 +548,8 @@ sub _addCtxCommand {
         $v = undef if defined $v && $v =~ /^\$[A-Z]/;
         ($_ => $v)
     } qw(name artist albumid trackname trackid year favurl image svc);
+
+    my $list = _wantedList($request->getParam('list'));
 
     $log->warn('LTL: addctx params -> '
         . join(', ', map { "$_=" . (defined $p{$_} ? $p{$_} : '(undef)') } qw(name artist albumid year trackname trackid favurl image svc)));
@@ -450,7 +600,13 @@ sub _addCtxCommand {
     }
     elsif ($streaming) {
         $source = Plugins::ListenToLater::Sources::sourceFromUrl($p{favurl});
-        $ref    = { _svc => $source };
+        # Some services put the native album id in the favurl (e.g. Tidal
+        # tidal://album:529626253) — capture it so we replay through the service's own
+        # album node instead of a fuzzy artist+album search.
+        my ($aid) = $p{favurl} =~ m{(?:[:/])album:([A-Za-z0-9._-]+)};
+        $ref = $aid
+            ? { _svc => $source, album_id => $aid, passthrough => { album_id => $aid } }
+            : { _svc => $source };
     }
     else {
         # Streaming album rows carry no favorites_url; the browsing service id is
@@ -473,17 +629,16 @@ sub _addCtxCommand {
         ref         => $ref,
     };
 
-    my ($id, $already) = eval { Plugins::ListenToLater::DB::add($rec) };
+    my ($id, $already) = eval { Plugins::ListenToLater::DB::add($rec, $list) };
     if ($@) {
         $log->error("LTL: addctx add failed: $@");
     }
     else {
-        $log->warn("LTL: addctx -> $source / " . ($album // '?') . " (id=" . ($id // '?') . ", already=" . ($already // 0) . ")");
+        $log->warn("LTL: addctx -> $source / " . ($album // '?') . " (id=" . ($id // '?') . ", already=" . ($already // 0) . ", list=$list)");
     }
 
     if (my $client = $request->client) {
-        my $msg = cstring($client, $already ? 'PLUGIN_LTL_ALREADY' : 'PLUGIN_LTL_ADDED');
-        eval { $client->showBriefly({ line => [ cstring($client, 'PLUGIN_LTL'), $msg ] }, { duration => 2 }); };
+        eval { $client->showBriefly({ line => [ cstring($client, 'PLUGIN_LTL'), _addedMsg($client, $list, $already) ] }, { duration => 2 }); };
     }
 
     $request->setStatusDone;
@@ -506,6 +661,7 @@ sub _moveCommand {
     my $request = shift;
     my $id     = $request->getParam('id');
     my $status = $request->getParam('status') || 'later';
+    $status = 'later' unless $status =~ /^(?:later|played|tobuy)$/;
     eval { Plugins::ListenToLater::DB::setStatus($id, $status); 1 } or $log->error("LTL: move failed: $@");
     $request->setStatusDone;
 }

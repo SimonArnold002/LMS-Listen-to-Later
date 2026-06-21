@@ -1,0 +1,106 @@
+From f14ee458934bc25f7ed3b5902e81e3e9e8c2c757 Mon Sep 17 00:00:00 2001
+From: SimonArnold002 <82664521+SimonArnold002@users.noreply.github.com>
+Date: Fri, 19 Jun 2026 09:41:40 +0100
+Subject: [PATCH] Custom actions on streaming / app browse items
+
+Custom actions currently appear on library items only. Streaming/app content
+is delivered as SlimBrowse item_loop items, which bypass the STD_ITEMS
+action-menu path (their stdItem is >= STD_ITEM_ONLINE_ARTIST, so
+item.stdItem < STD_ITEMS.length is false) and so never get the CUSTOM_ACTIONS
+marker or resp.itemCustomActions.
+
+browse-resp.js: in the item_loop per-item handling, for online items and
+playable app rows, add the CUSTOM_ACTIONS marker to the item's own menu and
+populate resp.itemCustomActions. Service album rows (e.g. Qobuz New Releases)
+carry no favorites_url/metadata - only a playable item_id and title/subtitle -
+so key off playability and expose title/subtitle via item.album/item.artist so
+$ALBUMNAME/$ARTISTNAME resolve. Category lookup tries "<command>-<type>" (the
+app's own view) before the generic "online-<type>", so an app can customise or
+suppress actions on its own list.
+
+customactions.js: add $SERVICE (the browsing service / command) and $SUBTITLE
+(the raw second line) replacements, and register them in ACTION_KEYS.
+---
+ .../HTML/material/html/js/browse-resp.js      | 37 +++++++++++++++++++
+ .../HTML/material/html/js/customactions.js    | 10 ++++-
+ 2 files changed, 46 insertions(+), 1 deletion(-)
+
+diff --git a/MaterialSkin/HTML/material/html/js/browse-resp.js b/MaterialSkin/HTML/material/html/js/browse-resp.js
+index d2b4b3d..0cdee62 100644
+--- a/MaterialSkin/HTML/material/html/js/browse-resp.js
++++ b/MaterialSkin/HTML/material/html/js/browse-resp.js
+@@ -651,6 +651,43 @@ function parseBrowseResp(data, parent, options, cacheKey) {
+                     i.menu.push(SHOW_IMAGE_ACTION);
+                 }
+ 
++                // Surface custom actions on app/online (streaming) browse items. These arrive
++                // via item_loop (library content uses the *_loop branches) and bypass the
++                // STD_ITEMS action-menu path (online stdItems are >= STD_ITEM_ONLINE_ARTIST, so
++                // item.stdItem<STD_ITEMS.length is false), so add the CUSTOM_ACTIONS marker to
++                // the item's own menu and populate the view-level itemCustomActions. Service
++                // album rows (e.g. Qobuz New Releases) carry no favorites_url/metadata - only a
++                // playable item_id + title/subtitle - so key off playability and expose
++                // title/subtitle via item.album/item.artist so $ALBUMNAME/$ARTISTNAME resolve;
++                // $SERVICE carries the browsing service ('command').
++                let isOnlineAlbum  = STD_ITEM_ONLINE_ALBUM==i.stdItem;
++                let isOnlineArtist = STD_ITEM_ONLINE_ARTIST==i.stdItem;
++                let isAppItem = !isOnlineAlbum && !isOnlineArtist && !isOnlineTrack &&
++                                addedPlayAction && undefined==i.stdItem && !isFavorites && !isAppsTop;
++                if (isOnlineAlbum || isOnlineArtist || isOnlineTrack || isAppItem) {
++                    let btype    = isOnlineArtist ? "artist" : isOnlineTrack ? "track" : "album";
++                    let ocFilter = i.presetParams ? i.presetParams.favorites_url : undefined;
++                    // A plugin/app can define a custom-action category for its OWN view, named
++                    // "<command>-<type>" (e.g. "listentolater-album"). If defined - even as an
++                    // empty list - it takes precedence over the generic "online-*" category, so
++                    // a plugin's own list can show different actions, or none (an empty category
++                    // suppresses the generic actions on that app's items).
++                    let appCat = (undefined!=command) ? command+"-"+btype : undefined;
++                    let oca = (undefined!=appCat && undefined!=customActions && (appCat in customActions))
++                              ? getCustomActions(appCat, false, ocFilter)
++                              : getCustomActions("online-"+btype, false, ocFilter);
++                    if (undefined!=oca && oca.length>0) {
++                        if (isAppItem) {
++                            if (undefined==i.album)  { i.album   = i.title; }
++                            if (undefined==i.artist) { i.artist  = i.subtitle; }
++                            i.service = command;
++                        }
++                        addedDivider = addDivider(i, addedDivider);
++                        i.menu.push(CUSTOM_ACTIONS);
++                        if (undefined==resp.itemCustomActions) { resp.itemCustomActions = oca; }
++                    }
++                }
++
+                 // Only show 'More' action if:
+                 //    'more' is in baseActions and item has item_id
+                 //    - OR -
+diff --git a/MaterialSkin/HTML/material/html/js/customactions.js b/MaterialSkin/HTML/material/html/js/customactions.js
+index 66ffe4b..4060566 100644
+--- a/MaterialSkin/HTML/material/html/js/customactions.js
++++ b/MaterialSkin/HTML/material/html/js/customactions.js
+@@ -77,7 +77,7 @@ function performCustomAction(action, player, item) {
+     }
+ }
+ 
+-const ACTION_KEYS = ['ID', 'NAME', 'ARTISTID', 'ARTISTNAME', 'ALBUMID', 'ALBUMNAME', 'TRACKID', 'TRACKNAME', 'TRACKNUM', 'DISC', 'GENREID', 'GENRENAME', 'YEAR', 'PLAYLISTID', 'PLAYLISTNAME', 'COMPOSER', 'CONDUCTOR', 'BAND', 'LANG', 'FAVURL', 'TITLE', 'ITEMID',];
++const ACTION_KEYS = ['ID', 'NAME', 'ARTISTID', 'ARTISTNAME', 'ALBUMID', 'ALBUMNAME', 'TRACKID', 'TRACKNAME', 'TRACKNUM', 'DISC', 'GENREID', 'GENRENAME', 'YEAR', 'PLAYLISTID', 'PLAYLISTNAME', 'COMPOSER', 'CONDUCTOR', 'BAND', 'LANG', 'FAVURL', 'TITLE', 'ITEMID', 'SERVICE', 'SUBTITLE',];
+ 
+ function doReplacements(string, player, item) {
+     let val = ''+string;
+@@ -162,6 +162,14 @@ function doReplacements(string, player, item) {
+         if (undefined!=item.presetParams && undefined!=item.presetParams.favorites_url) {
+             val=val.replaceAll("$FAVURL", item.presetParams.favorites_url);
+         }
++        // Online/app browse items: the service the item was browsed from, and the raw
++        // second line (e.g. "Artist (Year)") - see browse-resp.js item_loop handling.
++        if (undefined!=item.service) {
++            val=val.replaceAll("$SERVICE", item.service);
++        }
++        if (undefined!=item.subtitle) {
++            val=val.replaceAll("$SUBTITLE", item.subtitle);
++        }
+     }
+     val=val.replaceAll("$HOST", window.location.hostname);
+     val=val.replaceAll("$LANG", undefined==lmsOptions.lang ? 'en' : lmsOptions.lang);
+-- 
+2.50.1 (Apple Git-155)
+

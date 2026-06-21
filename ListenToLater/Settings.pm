@@ -20,6 +20,7 @@ sub page {
 sub prefs {
     return ($prefs, qw(
         sort played_threshold streaming_min_tracks watch_outside material_action
+        played_retention_days
     ));
 }
 
@@ -37,6 +38,11 @@ sub handler {
         $min = 4 unless $min =~ /^\d+$/;
         $min = 1 if $min < 1;
         $prefs->set('streaming_min_tracks', $min + 0);
+
+        my $ret = $params->{pref_played_retention_days} // 7;
+        $ret = 7 unless $ret =~ /^\d+$/;   # 0 = keep forever
+        $ret = 3650 if $ret > 3650;
+        $prefs->set('played_retention_days', $ret + 0);
 
         $log->info('Listen to Later settings saved');
     }

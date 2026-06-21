@@ -1,5 +1,56 @@
 # Changelog
 
+## 0.1.23 — Buy on Bandcamp
+
+### Added
+- **"Buy on Bandcamp" for Bandcamp albums.** A Bandcamp item's "… → More" menu now has a **Buy on Bandcamp** entry that opens the album's Bandcamp page in your browser (handy for To Buy items). We only store artist+album for Bandcamp, so the page URL is resolved on first use (the Bandcamp plugin emits it among the album's items) and then **cached in the DB** (`ref.buy_url`) for instant opens afterwards. If the exact page can't be matched, it falls back to a Bandcamp album search for the artist+album, so there's always a working link.
+
+## 0.1.22 — New "To Buy" list
+
+### Added
+- **A third list, "To Buy".** Alongside Listen to Later and Played, you can now keep a wishlist of albums to buy. It appears as its own section in the plugin view (between Listen to Later and Played).
+- **"Add to To Buy" context-menu action.** Every place that offers "Add to Listen to Later" — Material's album/track/playlist menus (including streaming services) and the local library "…" menus — now also offers **Add to To Buy**, which saves the album straight into the To Buy list.
+- **Move to/from To Buy.** Each album row's "… → More" menu now lists a "Move to …" entry for whichever two lists it isn't currently in (Listen to Later / To Buy / Played), plus Remove.
+
+### Notes
+- **To Buy albums are never auto-removed.** The 7-day Played retention only ever deletes `status='played'` rows, and the auto-"move to Played" detector only acts on Listen to Later albums — so a To Buy album (or one moved back to Listen to Later) is never purged and never auto-marked Played. This state lives in the album's `status` column, so it survives restarts.
+- Adding an album that's already saved anywhere remains a no-op (consistent with 0.1.21) — to put an existing album into To Buy, use the "Move to To Buy" action.
+
+## 0.1.21 — Ignore accidental re-adds
+
+### Changed
+- **Adding an album that's already saved is now a true no-op, in any section.** Previously, clicking "Add to Listen to Later" on an album already in the **Played** section silently bounced it back into the active Listen to Later list — easy to trigger by accident. Now if the album exists in either section the Add is ignored (toast: *"Already in your list"*); a Played album only returns to the active list via the explicit **Move to Listen to Later** action. Dedupe is per source (`source` + normalised `artist|album`).
+
+## 0.1.20 — Fix Tidal & Bandcamp playback
+
+### Fixed
+- **Tidal albums now play.** Tidal browse rows carry the native album id in their `favorites_url` (`tidal://album:<id>`), but `addctx` was discarding it and there was no Tidal adapter — so playback fell back to an (artist-less) search that found nothing. Now the id is captured from the favurl and the album is replayed through Tidal's own `getAlbum` (passthrough key `id`); a Tidal album search is also added as a fallback. **Tidal albums added before this version need re-adding** to capture the id.
+- **Bandcamp albums now play.** Resolving an album's tracks crashed with *"Not a HASH reference at Sources.pm line 195"*: Qobuz/Tidal return `{ items => [...] }` from their album coderef, but Bandcamp returns a bare arrayref of tracks — the code only handled the hashref form. Now both shapes are accepted.
+
+## 0.1.19 — Revert Remove/Move to the "… → More" menu
+
+### Changed
+- **Reverted 0.1.18.** Putting Remove/Move at the *top* of the "…" was possible, but making them refresh the list **in place** (rather than re-listing into a new, less tidy page with an awkward back path) would have required a second Material patch (`browse-page.js`, in the main bundle). To keep the Material footprint to the single deferred-bundle patch, Remove/Move are back in the row's **"… → More"** menu, where they already refresh in place (`nextWindow => 'parent'`, since 0.1.15). "Add" stays suppressed on the plugin's own list and home shelf.
+
+## 0.1.18 — Remove / Move at the top of the "…" menu
+
+### Changed
+- **Remove and Move now sit at the top of each album's "…" menu** (where "Add to Listen to Later" appears on streaming items), instead of under "More". They work exactly like Add: a Material custom action that acts on the item's displayed info — here the row's name (`$TITLE`) — and the plugin matches it back to the saved album. Move toggles the album between Listen to Later and Played. Both re-list the view so the change shows immediately. **Plugin-only** — no Material bundle change (uses the per-app `listentolater-album` category the patched bundle already renders, plus stock `$TITLE`/`lmsbrowse`).
+- The home-shelf cards no longer offer "Add" either (suppressed via the shelf's own category).
+
+### Note
+- Classic (non-Material) skins have no custom actions, so per-row Remove/Move are Material-only now.
+
+## 0.1.17 — Auto-remove old Played albums
+
+### Added
+- **Played albums are automatically removed after a retention window** (default **7 days** from when they were played), unless you move them back to Listen to Later first. New setting **"Auto-remove played albums after N days"** (`played_retention_days`; set **0** to keep them forever). A daily background task (`DB::purgePlayed`, scheduled in `postinitPlugin`, first run ~60s after start) deletes `status='played'` rows whose `played_at` is older than the window; re-playing an album resets its clock.
+
+## 0.1.16 — Material home-page shelf
+
+### Added
+- **A "Listen to Later" shelf on the Material home screen** — a horizontal, scrollable row of the albums in your Listen to Later list, each playable / tappable (with the same "…" Remove/Move). Registered via Material's `registerHomeExtra` (the same mechanism Qobuz/Bandcamp use), so it works on stock Material — no patched bundle needed. Enable it under Material's home-screen customisation if it isn't shown by default. New `HomeExtras.pm` (`LtLHome` → `Browse::homeShelf`); the feed is a flat, quantity-stable card list so deep playback from the shelf resolves correctly.
+
 ## 0.1.15 — Remove/Move refresh the list in place
 
 ### Fixed
