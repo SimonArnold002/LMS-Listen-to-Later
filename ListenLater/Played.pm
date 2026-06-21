@@ -1,4 +1,4 @@
-package Plugins::ListenToLater::Played;
+package Plugins::ListenLater::Played;
 
 # Watches playback and moves a saved album to "Played" once most of it has been
 # listened to. Subscribes to playlist newsong/stop/clear and, per player, counts
@@ -19,11 +19,11 @@ use POSIX qw(ceil);
 use Slim::Utils::Log;
 use Slim::Utils::Prefs;
 
-use Plugins::ListenToLater::DB;
-use Plugins::ListenToLater::Sources;
+use Plugins::ListenLater::DB;
+use Plugins::ListenLater::Sources;
 
-my $log   = logger('plugin.listentolater');
-my $prefs = preferences('plugin.listentolater');
+my $log   = logger('plugin.listenlater');
+my $prefs = preferences('plugin.listenlater');
 
 # per-player: { rec_id => N, seen => { url => 1 }, total => T|undef }
 my %tracking;
@@ -34,7 +34,7 @@ sub init {
         \&_onChange,
         [['playlist'], ['newsong', 'stop', 'clear']],
     );
-    $log->info('Listen to Later play-detector subscribed');
+    $log->info('Listen Later play-detector subscribed');
     return;
 }
 
@@ -80,7 +80,7 @@ sub _onChange {
         _maybeMark($cid);
     }
     else {
-        # now playing something not in our Listen to Later list
+        # now playing something not in our Listen Later list
         _finalize($cid) if $cur;
     }
 
@@ -97,16 +97,16 @@ sub _matchRecord {
     if (!$remote) {
         my $album = $track->can('album') ? $track->album : undef;
         return undef unless $album && $album->can('id');
-        return Plugins::ListenToLater::DB::findBySourceAlbumId('library', $album->id);
+        return Plugins::ListenLater::DB::findBySourceAlbumId('library', $album->id);
     }
 
-    my $source = Plugins::ListenToLater::Sources::sourceFromUrl($url);
+    my $source = Plugins::ListenLater::Sources::sourceFromUrl($url);
     my $artist = eval { $track->artistName } // '';
     my $album  = eval { $track->albumname }  // '';
     return undef unless length $album;   # streaming best-effort
 
-    my $key = Plugins::ListenToLater::DB::dedupeKey($artist, $album);
-    return Plugins::ListenToLater::DB::findByKey($source, $key);
+    my $key = Plugins::ListenLater::DB::dedupeKey($artist, $album);
+    return Plugins::ListenLater::DB::findByKey($source, $key);
 }
 
 sub _totalTracks {
@@ -135,7 +135,7 @@ sub _maybeMark {
     }
 
     if ($met) {
-        Plugins::ListenToLater::DB::markPlayed($t->{rec_id});
+        Plugins::ListenLater::DB::markPlayed($t->{rec_id});
         $log->info("marked album rec $t->{rec_id} as Played ($seen tracks)");
         delete $tracking{$cid};
     }

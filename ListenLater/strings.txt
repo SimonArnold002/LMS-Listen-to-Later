@@ -1,0 +1,134 @@
+PLUGIN_LL
+	EN	Listen Later
+
+PLUGIN_LL_DESC
+	EN	Save albums from your library or any streaming service to a Listen Later list, then have them move to a Played section once you've heard them.
+
+PLUGIN_LL_ADD
+	EN	Add album to Listen Later
+
+PLUGIN_LL_ADD_WISHLIST
+	EN	Add album to Wish List
+
+PLUGIN_LL_ADDED
+	EN	Added to Listen Later
+
+PLUGIN_LL_ADDED_WISHLIST
+	EN	Added to Wish List
+
+PLUGIN_LL_ALREADY
+	EN	Already in your list
+
+PLUGIN_LL_ERROR
+	EN	Could not save album
+
+PLUGIN_LL_LISTEN_LATER
+	EN	Listen Later
+
+PLUGIN_LL_PLAYED
+	EN	Played
+
+PLUGIN_LL_WISHLIST
+	EN	Wish List
+
+PLUGIN_LL_SETTINGS
+	EN	Plugin Settings
+
+PLUGIN_LL_EMPTY
+	EN	Nothing here yet
+
+PLUGIN_LL_UNKNOWN_ALBUM
+	EN	Unknown Album
+
+PLUGIN_LL_PLAY_ALBUM
+	EN	Play album
+
+PLUGIN_LL_REMOVE
+	EN	Remove from list
+
+PLUGIN_LL_REMOVED
+	EN	Removed
+
+PLUGIN_LL_MOVE_PLAYED
+	EN	Move to Played
+
+PLUGIN_LL_MOVE_LATER
+	EN	Move to Listen Later
+
+PLUGIN_LL_MOVE_WISHLIST
+	EN	Move to Wish List
+
+PLUGIN_LL_MOVED
+	EN	Moved
+
+PLUGIN_LL_BUY_BANDCAMP
+	EN	Buy on Bandcamp
+
+PLUGIN_LL_BUY_OPEN
+	EN	Open on Bandcamp
+
+PLUGIN_LL_NO_MATCH
+	EN	Could not find this album to play
+
+PLUGIN_LL_SECTION_LIST
+	EN	List Settings
+
+PLUGIN_LL_SECTION_PLAYED
+	EN	Played Settings
+
+PLUGIN_LL_DEFAULT_SORT
+	EN	Default sort order
+
+PLUGIN_LL_DEFAULT_SORT_DESC
+	EN	How the Listen Later and Played lists are ordered.
+
+PLUGIN_LL_SORT_ADDED
+	EN	Recently added
+
+PLUGIN_LL_SORT_ARTIST
+	EN	Artist
+
+PLUGIN_LL_SORT_ALBUM
+	EN	Album
+
+PLUGIN_LL_SORT_YEAR
+	EN	Year
+
+PLUGIN_LL_SORT_PLAYED
+	EN	Recently played
+
+PLUGIN_LL_WATCH_OUTSIDE
+	EN	Automatically move albums to Played
+
+PLUGIN_LL_WATCH_OUTSIDE_DESC
+	EN	When on, a saved album moves to Played once you have listened to most of it, whether you played it from this list or anywhere else. Turn off to only move albums manually.
+
+PLUGIN_LL_THRESHOLD
+	EN	Played threshold
+
+PLUGIN_LL_THRESHOLD_DESC
+	EN	How much of a library album must be played before it moves to Played (percent of its tracks). Default 60.
+
+PLUGIN_LL_STREAM_MIN
+	EN	Streaming track count
+
+PLUGIN_LL_STREAM_MIN_DESC
+	EN	Streaming albums have no reliable track total, so they move to Played after this many distinct tracks have played. Default 4.
+
+PLUGIN_LL_RETENTION
+	EN	Auto-remove played albums after
+
+PLUGIN_LL_RETENTION_DESC
+	EN	Automatically remove albums from the Played section this many days after they were played, unless you move them back to Listen Later first. Default 7. Set to 0 to keep played albums forever.
+
+PLUGIN_LL_DAYS
+	EN	days
+
+PLUGIN_LL_SECTION_MATERIAL
+	EN	Material Skin
+
+PLUGIN_LL_MATERIAL_ACTION
+	EN	Add to Material context menus
+
+PLUGIN_LL_MATERIAL_ACTION_DESC
+	EN	Adds an "Add to Listen Later" entry to Material Skin's album, track and playlist context menus (including streaming services like Qobuz, whose own menus can't otherwise be extended). Writes to Material's actions.json. Takes effect after the next restart.

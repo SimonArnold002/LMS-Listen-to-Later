@@ -1,6 +1,6 @@
-package Plugins::ListenToLater::DB;
+package Plugins::ListenLater::DB;
 
-# Persistent storage for the Listen to Later list.
+# Persistent storage for the Listen Later list.
 #
 # A plain SQLite file (DBI/DBD::SQLite ship with LMS — the library DB uses them)
 # rather than prefs: the list is meant to grow, be sorted several ways, carry
@@ -19,7 +19,7 @@ use JSON::XS ();
 use Slim::Utils::Log;
 use Slim::Utils::Prefs;
 
-my $log = logger('plugin.listentolater');
+my $log = logger('plugin.listenlater');
 
 my $dbh;        # lazily-opened handle
 my $JSON = JSON::XS->new->utf8->canonical;
@@ -29,13 +29,14 @@ my $JSON = JSON::XS->new->utf8->canonical;
 # ---------------------------------------------------------------------------
 sub _path {
     my $dir = preferences('server')->get('cachedir') || '/tmp';
-    return "$dir/listentolater.db";
+    return "$dir/listenlater.db";
 }
 
 sub dbh {
     return $dbh if $dbh && $dbh->ping;
 
     my $path = _path();
+    _migrateDbFile($path);   # rebrand: reuse the pre-rename listentolater.db if present
     $dbh = DBI->connect("dbi:SQLite:dbname=$path", '', '', {
         RaiseError => 1,
         PrintError => 0,
@@ -46,8 +47,26 @@ sub dbh {
     $dbh->do('PRAGMA journal_mode=WAL');
     _migrate($dbh);
 
-    $log->info("Listen to Later DB ready at $path");
+    $log->info("Listen Later DB ready at $path");
     return $dbh;
+}
+
+# Rebrand migration: the DB was listentolater.db before this release. If the new
+# file doesn't exist yet but the old one does, move it (with its WAL/SHM sidecars)
+# so the user keeps their saved albums. Best-effort — failure just starts fresh.
+sub _migrateDbFile {
+    my ($newPath) = @_;
+    return if -e $newPath;
+    (my $oldPath = $newPath) =~ s/\blistenlater\.db$/listentolater.db/;
+    return if $oldPath eq $newPath || !-e $oldPath;
+    require File::Copy;
+    for my $suf ('', '-wal', '-shm', '-journal') {
+        next unless -e "$oldPath$suf";
+        File::Copy::move("$oldPath$suf", "$newPath$suf")
+            or $log->warn("Listen Later: could not move $oldPath$suf -> $newPath$suf: $!");
+    }
+    $log->info("Listen Later: migrated DB $oldPath -> $newPath");
+    return;
 }
 
 sub _migrate {
@@ -56,7 +75,7 @@ sub _migrate {
     $h->do(<<'SQL');
 CREATE TABLE IF NOT EXISTS albums (
     id          INTEGER PRIMARY KEY AUTOINCREMENT,
-    status      TEXT    NOT NULL DEFAULT 'later',   -- 'later' | 'played' | 'tobuy'
+    status      TEXT    NOT NULL DEFAULT 'later',   -- 'later' | 'played' | 'wishlist'
     source      TEXT    NOT NULL,                    -- 'library' | 'qobuz' | 'bandcamp' | ...
     artist      TEXT,
     album_title TEXT,
@@ -73,6 +92,8 @@ CREATE TABLE IF NOT EXISTS albums (
 SQL
 
     $h->do('CREATE INDEX IF NOT EXISTS idx_albums_status ON albums(status)');
+    # Rebrand: the "To Buy" list status was 'tobuy' before it became "Wish List".
+    $h->do("UPDATE albums SET status = 'wishlist' WHERE status = 'tobuy'");
     return;
 }
 
@@ -104,11 +125,11 @@ sub _rowToHash {
 # ---------------------------------------------------------------------------
 
 # add($rec, $status) — $rec: { source, artist, album_title, year, artwork, ref_kind, ref }
-# $status is the target list for a NEW album: 'later' (default) or 'tobuy'.
+# $status is the target list for a NEW album: 'later' (default) or 'wishlist'.
 # Returns (id, $already) where $already is true if it was already present.
 sub add {
     my ($rec, $status) = @_;
-    $status = 'later' unless defined $status && $status =~ /^(?:later|tobuy)$/;
+    $status = 'later' unless defined $status && $status =~ /^(?:later|wishlist)$/;
 
     my $source = $rec->{source} or return (undef, 0);
     my $key    = dedupeKey($rec->{artist}, $rec->{album_title});
@@ -116,7 +137,7 @@ sub add {
     my $existing = findByKey($source, $key);
     if ($existing) {
         # Failsafe: if the album is already saved in ANY section (Listen to
-        # Later, Played or To Buy) an accidental "Add" is a no-op — it is not
+        # Later, Played or Wish List) an accidental "Add" is a no-op — it is not
         # moved between sections. Use the explicit "Move to …" actions for that.
         return ($existing->{id}, 1);
     }
@@ -226,8 +247,8 @@ sub markPlayed {
 }
 
 # Delete Played albums whose played_at is older than $days days. Only status='played'
-# rows are ever deleted, so albums moved back to Listen to Later ('later') or to the
-# To Buy list ('tobuy') are never purged; re-playing an album resets played_at,
+# rows are ever deleted, so albums moved back to Listen Later ('later') or to the
+# Wish List list ('wishlist') are never purged; re-playing an album resets played_at,
 # restarting its clock. Returns the number removed.
 sub purgePlayed {
     my ($days) = @_;

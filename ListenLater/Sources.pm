@@ -1,4 +1,4 @@
-package Plugins::ListenToLater::Sources;
+package Plugins::ListenLater::Sources;
 
 # Per-source adapters. Three jobs:
 #   1. capture*   — turn an info-menu context (a track or a library album) into a
@@ -20,7 +20,7 @@ use warnings;
 use Slim::Utils::Log;
 use Slim::Utils::Strings qw(cstring);
 
-my $log = logger('plugin.listentolater');
+my $log = logger('plugin.listenlater');
 
 # url scheme -> our source tag
 my %SCHEME = (
@@ -186,7 +186,7 @@ sub resolveTracks {
         my ($node) = grep { ($_->{type} || '') eq 'playlist' && ref $_->{url} eq 'CODE' } @$items;
 
         unless ($node) {
-            return $cb->([{ name => cstring($client, 'PLUGIN_LTL_NO_MATCH'), type => 'text' }]);
+            return $cb->([{ name => cstring($client, 'PLUGIN_LL_NO_MATCH'), type => 'text' }]);
         }
 
         my $pt = (ref $node->{passthrough} eq 'ARRAY') ? $node->{passthrough}[0] : {};
@@ -202,7 +202,7 @@ sub resolveTracks {
                 $cb->($items);
             }, {}, $pt);
             1;
-        } or $cb->([{ name => cstring($client, 'PLUGIN_LTL_NO_MATCH'), type => 'text' }]);
+        } or $cb->([{ name => cstring($client, 'PLUGIN_LL_NO_MATCH'), type => 'text' }]);
     });
 }
 
@@ -353,7 +353,7 @@ sub _searchService {
 
 sub _noMatch {
     my ($client) = @_;
-    return [ { name => cstring($client, 'PLUGIN_LTL_NO_MATCH'), type => 'text' } ];
+    return [ { name => cstring($client, 'PLUGIN_LL_NO_MATCH'), type => 'text' } ];
 }
 
 # ---------------------------------------------------------------------------

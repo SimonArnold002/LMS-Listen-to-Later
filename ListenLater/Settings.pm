@@ -1,4 +1,4 @@
-package Plugins::ListenToLater::Settings;
+package Plugins::ListenLater::Settings;
 
 use strict;
 use base qw(Slim::Web::Settings);
@@ -6,15 +6,15 @@ use base qw(Slim::Web::Settings);
 use Slim::Utils::Prefs;
 use Slim::Utils::Log;
 
-my $prefs = preferences('plugin.listentolater');
-my $log   = logger('plugin.listentolater');
+my $prefs = preferences('plugin.listenlater');
+my $log   = logger('plugin.listenlater');
 
 sub name {
-    return Slim::Web::HTTP::CSRF->protectName('PLUGIN_LTL');
+    return Slim::Web::HTTP::CSRF->protectName('PLUGIN_LL');
 }
 
 sub page {
-    return Slim::Web::HTTP::CSRF->protectURI('plugins/ListenToLater/settings.html');
+    return Slim::Web::HTTP::CSRF->protectURI('plugins/ListenLater/settings.html');
 }
 
 sub prefs {
@@ -44,7 +44,7 @@ sub handler {
         $ret = 3650 if $ret > 3650;
         $prefs->set('played_retention_days', $ret + 0);
 
-        $log->info('Listen to Later settings saved');
+        $log->info('Listen Later settings saved');
     }
 
     return $class->SUPER::handler($client, $params);

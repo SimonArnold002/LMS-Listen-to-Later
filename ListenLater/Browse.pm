@@ -1,9 +1,9 @@
-package Plugins::ListenToLater::Browse;
+package Plugins::ListenLater::Browse;
 
 # Single-page content view. On entry the user sees, in one list:
 #   • Plugin Settings (top)
-#   • a Material header "Listen to Later (N)" + its albums
-#   • a Material header "To Buy (N)" + its albums
+#   • a Material header "Listen Later (N)" + its albums
+#   • a Material header "Wish List (N)" + its albums
 #   • a Material header "Played (N)" + its albums
 # Each album row is directly playable (type => 'playlist'); Remove/Move live in
 # the row's "…" context menu via itemActions => info → the contextmenu query
@@ -16,25 +16,25 @@ use Slim::Utils::Log;
 use Slim::Utils::Prefs;
 use Slim::Utils::Strings qw(cstring);
 
-use Plugins::ListenToLater::DB;
-use Plugins::ListenToLater::Sources;
+use Plugins::ListenLater::DB;
+use Plugins::ListenLater::Sources;
 
-use constant ICON => 'plugins/ListenToLater/html/images/ListenToLaterIcon_svg.png';
+use constant ICON => 'plugins/ListenLater/html/images/ListenLaterIcon_svg.png';
 
-# Per-section icons. To Buy uses Material's own "shopping_cart" font icon via the
+# Per-section icons. Wish List uses Material's own "shopping_cart" font icon via the
 # "_MTL_icon_<name>" filename convention (same trolley as the context-menu action);
 # Played uses Google's "music_history" SVG via the "_svg.png" recolour convention
 # (that glyph isn't in Material's bundled icon font, so it can't be a font icon).
-use constant ICON_TOBUY  => 'plugins/ListenToLater/html/images/ToBuyIcon_MTL_icon_shopping_cart.png';
-use constant ICON_PLAYED => 'plugins/ListenToLater/html/images/PlayedIcon_svg.png';
+use constant ICON_WISHLIST  => 'plugins/ListenLater/html/images/WishListIcon_MTL_icon_shopping_cart.png';
+use constant ICON_PLAYED => 'plugins/ListenLater/html/images/PlayedIcon_svg.png';
 
-my $log   = logger('plugin.listentolater');
-my $prefs = preferences('plugin.listentolater');
+my $log   = logger('plugin.listenlater');
+my $prefs = preferences('plugin.listenlater');
 
-# Map a list status to its section icon (Listen to Later uses the plugin icon).
+# Map a list status to its section icon (Listen Later uses the plugin icon).
 sub _iconFor {
     my ($status) = @_;
-    return ICON_TOBUY  if $status eq 'tobuy';
+    return ICON_WISHLIST  if $status eq 'wishlist';
     return ICON_PLAYED if $status eq 'played';
     return ICON;
 }
@@ -50,15 +50,15 @@ sub topLevel {
     my @items;
 
     push @items, {
-        name    => cstring($client, 'PLUGIN_LTL_SETTINGS'),
+        name    => cstring($client, 'PLUGIN_LL_SETTINGS'),
         type    => 'link',
-        weblink => '/plugins/ListenToLater/settings.html',
+        weblink => '/plugins/ListenLater/settings.html',
         image   => ICON,
     };
 
-    push @items, _section($client, 'later',  'PLUGIN_LTL_LISTEN_LATER', $wantHeaders);
-    push @items, _section($client, 'tobuy',  'PLUGIN_LTL_TOBUY',        $wantHeaders);
-    push @items, _section($client, 'played', 'PLUGIN_LTL_PLAYED',       $wantHeaders);
+    push @items, _section($client, 'later',  'PLUGIN_LL_LISTEN_LATER', $wantHeaders);
+    push @items, _section($client, 'wishlist',  'PLUGIN_LL_WISHLIST',        $wantHeaders);
+    push @items, _section($client, 'played', 'PLUGIN_LL_PLAYED',       $wantHeaders);
 
     $callback->({ items => \@items });
 }
@@ -66,7 +66,7 @@ sub topLevel {
 sub _section {
     my ($client, $status, $titleStr, $wantHeaders) = @_;
 
-    my $rows  = Plugins::ListenToLater::DB::list($status, $prefs->get('sort') || 'added');
+    my $rows  = Plugins::ListenLater::DB::list($status, $prefs->get('sort') || 'added');
     my $count = scalar @$rows;
 
     my @items = ( _header($client, $status, $titleStr, $count, $wantHeaders) );
@@ -105,10 +105,10 @@ sub _header {
 
 sub _renderSection {
     my ($client, $callback, $status) = @_;
-    my $rows = Plugins::ListenToLater::DB::list($status, $prefs->get('sort') || 'added');
+    my $rows = Plugins::ListenLater::DB::list($status, $prefs->get('sort') || 'added');
     my @items = @$rows
         ? map { _albumRow($client, $_) } @$rows
-        : ({ name => cstring($client, 'PLUGIN_LTL_EMPTY'), type => 'text' });
+        : ({ name => cstring($client, 'PLUGIN_LL_EMPTY'), type => 'text' });
     $callback->({ items => \@items });
 }
 
@@ -121,7 +121,7 @@ sub _albumRow {
 
     my $name = '';
     $name .= $rec->{artist} . " \x{2013} " if $rec->{artist};
-    $name .= $rec->{album_title} // cstring($client, 'PLUGIN_LTL_UNKNOWN_ALBUM');
+    $name .= $rec->{album_title} // cstring($client, 'PLUGIN_LL_UNKNOWN_ALBUM');
     $name .= " ($rec->{year})" if $rec->{year};
 
     return {
@@ -133,21 +133,21 @@ sub _albumRow {
         passthrough => [ { id => $rec->{id} } ],
         itemActions => {
             info => {
-                command     => [ 'listentolater', 'contextmenu' ],
+                command     => [ 'listenlater', 'contextmenu' ],
                 fixedParams => { id => $rec->{id} },
             },
         },
     };
 }
 
-# Material home-page shelf: the "Listen to Later" albums as a flat, quantity-stable
+# Material home-page shelf: the "Listen Later" albums as a flat, quantity-stable
 # card row. The Material carousel and its "show all" click-in are the SAME feed
 # (Material exposes no way to give the click-in a different command), so the result
 # must not vary by request quantity or structure — otherwise item_ids shift and
 # deep playback resolves the wrong album. So: always the same flat list of rows.
 sub homeShelf {
     my ($client, $callback, $args) = @_;
-    my $rows = Plugins::ListenToLater::DB::list('later', $prefs->get('sort') || 'added');
+    my $rows = Plugins::ListenLater::DB::list('later', $prefs->get('sort') || 'added');
     $callback->({ items => [ map { _albumRow($client, $_) } @$rows ] });
 }
 
@@ -155,12 +155,12 @@ sub homeShelf {
 sub _albumTracks {
     my ($client, $callback, $args, $pt) = @_;
 
-    my $rec = Plugins::ListenToLater::DB::get($pt->{id});
+    my $rec = Plugins::ListenLater::DB::get($pt->{id});
     unless ($rec) {
-        return $callback->({ items => [{ name => cstring($client, 'PLUGIN_LTL_EMPTY'), type => 'text' }] });
+        return $callback->({ items => [{ name => cstring($client, 'PLUGIN_LL_EMPTY'), type => 'text' }] });
     }
 
-    Plugins::ListenToLater::Sources::resolveTracks($client, $rec, sub {
+    Plugins::ListenLater::Sources::resolveTracks($client, $rec, sub {
         my $tracks = shift || [];
         $callback->({ items => $tracks });
     });

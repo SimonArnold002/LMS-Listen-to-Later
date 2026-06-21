@@ -4,19 +4,19 @@
 
 <id>6240f6c8-5a38-4efb-8d0a-9c7aa5f40d3f</id>
 
-<name>ListenToLater</name>
+<name>ListenLater</name>
 
-<module>Plugins::ListenToLater::Plugin</module>
+<module>Plugins::ListenLater::Plugin</module>
 
-<version>0.1.24</version>
+<version>0.1.25</version>
 
-<description>PLUGIN_LTL_DESC</description>
+<description>PLUGIN_LL_DESC</description>
 
 <creator>CrystalGipsy</creator>
 
 <homepageURL>https://github.com/SimonArnold002/LMS-Listen-to-Later</homepageURL>
 
-<icon>plugins/ListenToLater/html/images/ListenToLaterIcon_svg.png</icon>
+<icon>plugins/ListenLater/html/images/ListenLaterIcon_svg.png</icon>
 
 <defaultState>enabled</defaultState>
 
@@ -30,6 +30,6 @@
 
 </targetApplication>
 
-<optionsURL>plugins/ListenToLater/settings.html</optionsURL>
+<optionsURL>plugins/ListenLater/settings.html</optionsURL>
 
 </extension>
