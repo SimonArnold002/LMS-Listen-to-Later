@@ -186,10 +186,15 @@ sub _writeMaterialActions {
 
     # Online (streaming) items don't expose $ALBUMNAME/$ARTISTNAME/$ALBUMID, but they
     # DO expose $TITLE (name), $FAVURL (qobuz://album:… — the source + id), and $IMAGE.
+    # The merged upstream Material (PR #1235, dev) sets i.service=<browse command> and
+    # exposes it as $SERVICE — the clean replacement for the old "bake svc:<command>
+    # into the lmscommand" hack. So pass svc:$SERVICE; addctx reads it as the
+    # authoritative source. (Unpopulated → literal "$SERVICE", which addctx's
+    # ^[a-z0-9]+$ check rejects → empty → cover-host fallback.)
     # These `online-*` categories only do anything on a Material build that wires up
     # custom actions for online items (see docs/material-online-custom-actions-proposal).
     my $onlineCmd = [ 'listenlater', 'addctx',
-        'name:$TITLE', 'artist:$ARTISTNAME', 'favurl:$FAVURL', 'image:$IMAGE' ];
+        'name:$TITLE', 'artist:$ARTISTNAME', 'svc:$SERVICE', 'favurl:$FAVURL', 'image:$IMAGE' ];
 
     my %cats = (
         'album'          => $albumCmd,

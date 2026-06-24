@@ -8,13 +8,13 @@
 
 <module>Plugins::ListenLater::Plugin</module>
 
-<version>0.1.26</version>
+<version>0.1.29</version>
 
 <description>PLUGIN_LL_DESC</description>
 
 <creator>CrystalGipsy</creator>
 
-<homepageURL>https://github.com/SimonArnold002/LMS-Listen-to-Later</homepageURL>
+<homepageURL>https://simonarnold002.github.io/LMS-Listen-to-Later/README.html</homepageURL>
 
 <icon>plugins/ListenLater/html/images/ListenLaterIcon_svg.png</icon>
 

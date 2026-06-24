@@ -1,5 +1,7 @@
 # Proposal: custom actions on streaming / app browse items (Material)
 
+> **STATUS: MERGED (2026-06) — historical.** This proposal was accepted as [PR #1235](https://github.com/CDrummond/lms-material/pull/1235), merged to `dev` (`b631754`) and then `master` (`519b03a`). The shipped Material exposes the service as `$SERVICE` and resolves the per-app `<command>-<type>` category with an `online-<type>` fallback. The plugin uses it via `svc:$SERVICE` (0.1.28). Kept for design context; not in a released Material yet (latest release `6.4.3` predates it).
+
 **Target:** CDrummond/lms-material (Material Skin)
 **Tested against:** `master` @ `Release 6.4.3`, on LMS 9.1.0 with the Qobuz plugin.
 

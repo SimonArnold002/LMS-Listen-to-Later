@@ -1,5 +1,26 @@
 # Changelog
 
+## 0.1.29 — Section headers fixed for newer Material
+
+### Fixed
+- **Section headers (Listen Later / Wish List / Played) render as dividers again on newer Material.** Material's development line changed how it draws *actionable* headers — because the plugin's headers carry a "re-list this section" action, newer Material was drawing them as **grid cards** mixed in with the album artwork instead of as full-width dividers. The plugin now emits the header as Material's `header-basic` type (which renders as a plain, non-actionable divider).
+
+### Compatibility
+- The new `header-basic` type only exists in **Material 6.4.3+**. The plugin detects the running Material version and uses it only there; on **older Material it keeps the previous `header` behaviour unchanged**, so nothing changes for users on older skins.
+
+## 0.1.28 — Streaming adds use Material's `$SERVICE`
+
+### Changed
+- **The "Add to Listen Later" / "Add to Wish List" actions on a streaming service's browse list now identify the service via Material's `$SERVICE` variable** — the clean mechanism in the upstream Material change ([PR #1235](https://github.com/CDrummond/lms-material/pull/1235), now merged), replacing the earlier internal workaround.
+
+### Compatibility
+- Adding directly from a **streaming service's browse list** requires a Material build that includes the merged custom-actions-on-streaming feature (the next Material release). On Material without it, that one entry simply doesn't appear; every other way to add (the album/track "…" menu, library, etc.) is unaffected.
+
+## 0.1.27 — "More info" points to the docs page
+
+### Changed
+- The plugin's **homepage / "More info" link** (shown in LMS *Manage Plugins* and the repository's plugin list) now points to the rendered docs page (`README.html` on GitHub Pages) instead of the bare GitHub repo.
+
 ## 0.1.26 — Code-review fixes
 
 ### Fixed

@@ -80,20 +80,20 @@ sub _section {
     return @items;
 }
 
-# A section header. Material renders type => 'header' bold/accented, but forces a
-# drill action onto it, so (per the sibling plugin's finding) give it a url that
-# re-lists just this section — the header / its "More" then shows that section
-# rather than an empty page. Non-header clients get plain text.
+# A section header. Emitted only when the client advertises header support
+# (features contains 'h', i.e. features:hi — what Material sends); other clients
+# get plain text. On Material >= 6.4.3 the type is 'header-basic' (clears the
+# item's actions so it renders as a plain full-width divider rather than an
+# actionable grid card); older Material gets the long-standing 'header'. See
+# _headerType. We keep the re-list url so 'header' still drills on older skins;
+# 'header-basic' strips the action, so the url is harmlessly ignored there.
 sub _header {
     my ($client, $status, $titleStr, $count, $wantHeaders) = @_;
 
     my $name = cstring($client, $titleStr) . " ($count)";
-    # Give the header an image. Material 6.4.x has no header guard in its grid
-    # check (browse-resp.js: `if (i.image) haveWithIcons; else haveWithoutIcons`
-    # runs for headers too), so an image-less header sets haveWithoutIcons and
-    # disables the whole page's grid/list toggle. With an icon, every item has an
-    # image → grid stays available, and the header still renders as a divider.
-    my $h = { name => $name, type => $wantHeaders ? 'header' : 'text', image => _iconFor($status) };
+    # Give the header an image so the page's grid view stays available (an
+    # image-less item sets haveWithoutIcons and disables the grid/list toggle).
+    my $h = { name => $name, type => $wantHeaders ? _headerType() : 'text', image => _iconFor($status) };
 
     if ($wantHeaders) {
         $h->{url}         = sub { _renderSection($_[0], $_[1], $status) };
@@ -183,6 +183,27 @@ sub _featuresOf {
 sub _wantHeaders {
     my ($features) = @_;
     return (defined $features && $features =~ /h/) ? 1 : 0;
+}
+
+# Which header item-type to emit for a header-capable (Material) client.
+# Material's 'header-basic' (a non-actionable, full-width divider) only exists
+# from Material 6.4.3 onwards; older Material understands only 'header'. To avoid
+# changing behaviour for users on older skins, use 'header-basic' iff the running
+# Material is >= 6.4.3 (or a non-release dev/test build), else fall back to the
+# long-standing 'header'. Cached — the Material version can't change at runtime.
+my $_headerTypeCache;
+sub _headerType {
+    return $_headerTypeCache if defined $_headerTypeCache;
+    my $ver = eval { Plugins::MaterialSkin::Plugin->getPluginVersion() };
+    my $useBasic;
+    if (!defined $ver) {
+        $useBasic = 0;                                  # can't tell -> stay safe
+    } elsif ($ver =~ /^(\d+)\.(\d+)\.(\d+)/) {
+        $useBasic = ( $1 <=> 6 || $2 <=> 4 || $3 <=> 3 ) >= 0 ? 1 : 0;
+    } else {
+        $useBasic = 1;                                  # dev/test build -> new
+    }
+    return $_headerTypeCache = $useBasic ? 'header-basic' : 'header';
 }
 
 1;
