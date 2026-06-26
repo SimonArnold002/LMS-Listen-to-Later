@@ -194,10 +194,16 @@ sub _writeMaterialActions {
     my $onlineCmd = [ 'listenlater', 'addctx',
         'name:$TITLE', 'artist:$ARTISTNAME', 'svc:$SERVICE', 'favurl:$FAVURL', 'image:$IMAGE' ];
 
+    # NB: deliberately NO plain 'track' category. Material's Now Playing screen is
+    # the ONLY consumer of 'track' (nowplaying-page.js getCustomActions("track")) —
+    # browse track lists use 'album-track'/'playlist-track', the queue uses
+    # 'queue-track', streaming rows use 'online-track'. Writing 'track' would put
+    # "Add to Listen Later" on Now Playing only, which we don't want. Omitting it
+    # suppresses it there with no effect on any browse surface — and the strip pass
+    # above clears any 'track' entry a previous version wrote.
     my %cats = (
         'album'          => $albumCmd,
         'album-track'    => $trackCmd,
-        'track'          => $trackCmd,
         'playlist'       => $albumCmd,
         'playlist-track' => $trackCmd,
         'online-album'   => $onlineCmd,

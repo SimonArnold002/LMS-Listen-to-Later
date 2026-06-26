@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.1.34 — No "Add to Listen Later" on the Now Playing screen
+
+### Changed
+- **The "Add to Listen Later" / "Add to Wish List" entries no longer appear in Material's Now Playing context menu.** They're still on every browse surface — album and playlist track lists, the queue, and streaming service "…" menus — just not on the now-playing track itself, where they didn't belong. Plugin-only change; no Material update required.
+
 ## 0.1.33 — Don't save the same album twice from different services
 
 ### Changed
