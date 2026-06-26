@@ -136,15 +136,17 @@ sub add {
     my ($rec, $status) = @_;
     $status = 'later' unless defined $status && $status =~ /^(?:later|wishlist)$/;
 
-    my $source = $rec->{source} or return (undef, 0);
+    my $source = $rec->{source} or return (undef, 0, undef);
     my $key    = dedupeKey($rec->{artist}, $rec->{album_title});
 
-    my $existing = findByKey($source, $key);
+    # Block duplicates across EVERY source, not just the same one: the same album
+    # saved from a different streaming service (or the library) is still the same
+    # album, so an accidental "Add" is a no-op — we never create a second row and
+    # never move it between sections (use the explicit "Move to …" for that).
+    # Return the existing row's source so the caller can name it in the toast.
+    my $existing = findAnyByKey($key);
     if ($existing) {
-        # Failsafe: if the album is already saved in ANY section (Listen to
-        # Later, Played or Wish List) an accidental "Add" is a no-op — it is not
-        # moved between sections. Use the explicit "Move to …" actions for that.
-        return ($existing->{id}, 1);
+        return ($existing->{id}, 1, $existing->{source});
     }
 
     my $ref_json = $JSON->encode($rec->{ref} || {});
@@ -158,7 +160,7 @@ sub add {
         $rec->{artwork}, $rec->{ref_kind}, $ref_json, $key, time(),
     );
 
-    return (dbh()->last_insert_id('', '', 'albums', ''), 0);
+    return (dbh()->last_insert_id('', '', 'albums', ''), 0, undef);
 }
 
 sub get {
@@ -183,6 +185,16 @@ sub findByKey {
     my ($source, $key) = @_;
     my $row = dbh()->selectrow_hashref(
         'SELECT * FROM albums WHERE source = ? AND dedupe_key = ?', undef, $source, $key);
+    return _rowToHash($row);
+}
+
+# Like findByKey but across EVERY source — the same album from a different service
+# shares the same dedupe_key, so this is how add() spots a cross-service duplicate.
+# Returns the earliest-added match (lowest id) when more than one exists.
+sub findAnyByKey {
+    my ($key) = @_;
+    my $row = dbh()->selectrow_hashref(
+        'SELECT * FROM albums WHERE dedupe_key = ? ORDER BY id LIMIT 1', undef, $key);
     return _rowToHash($row);
 }
 

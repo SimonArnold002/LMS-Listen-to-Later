@@ -163,3 +163,14 @@ The "Add to Listen Later"/"Add to Wish List" custom actions appear on streaming 
   `_libraryTrackItems` (one Schema query); the unused `ICON` constant left Plugin.pm and
   `HomeExtras::ICON` now aliases `Browse::ICON`; both `_norm`s carry a "deliberately differs —
   don't unify" comment (DB keeps `(…)` for the dedupe key, Sources strips it for fuzzy match).
+- **0.1.33** — **Cross-service de-duplication.** Saving an album already in the list — even from
+  a *different* service — is a no-op instead of a second row. `DB::add` now matches on
+  `dedupe_key` across **all** sources via the new `DB::findAnyByKey` (was the per-source
+  `findByKey`), and returns `($id, $already, $existingSource)`. `Plugin::_addedMsg` takes the
+  existing + new source and, when they differ, toasts `PLUGIN_LL_ALREADY_FROM` ("Already saved
+  from %s", via `sprintf(cstring(...))` — the sibling's idiom); same-source re-adds keep
+  "Already in your list". Applies on both add paths (`_addCommand`, `_addCtxCommand` incl. the
+  Material streaming action — chosen as block+toast because that fire-and-forget action can't
+  show a Replace/Ignore prompt). Pre-existing duplicate rows are NOT auto-merged. (Note:
+  Played auto-detection still matches per-source in `Played::_matchRecord`, so a Qobuz-saved
+  album played from the library won't auto-move to Played — pre-existing, left as-is.)

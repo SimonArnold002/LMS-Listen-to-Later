@@ -1,5 +1,13 @@
 # Changelog
 
+## 0.1.33 — Don't save the same album twice from different services
+
+### Changed
+- **Adding an album you've already saved — even from a different service — no longer creates a second copy.** Duplicate detection used to be per-service, so the same album from, say, Qobuz and Bandcamp ended up as two entries. It's now matched across every source (and the library), so a repeat "Add" is a no-op and shows a toast naming where it's already saved, e.g. *"Already saved from Qobuz"*. This applies on every add path, including the "Add" action on a streaming service's browse list.
+
+### Notes
+- Albums already saved twice (one per service) before this update are left as-is — this prevents new duplicates rather than merging existing ones; remove one of the pair manually if you have any.
+
 ## 0.1.32 — Code-review fixes
 
 ### Fixed

@@ -400,9 +400,16 @@ sub _wantedList {
 }
 
 # The confirmation toast, varying by list and whether it was already present.
+# When it's already saved from a DIFFERENT service, name that service so it's
+# clear why the add was a no-op (e.g. "Already saved from Qobuz").
 sub _addedMsg {
-    my ($client, $list, $already) = @_;
-    return cstring($client, 'PLUGIN_LL_ALREADY') if $already;
+    my ($client, $list, $already, $existingSource, $newSource) = @_;
+    if ($already) {
+        if ($existingSource && $newSource && lc($existingSource) ne lc($newSource)) {
+            return sprintf(cstring($client, 'PLUGIN_LL_ALREADY_FROM'), ucfirst($existingSource));
+        }
+        return cstring($client, 'PLUGIN_LL_ALREADY');
+    }
     return cstring($client, $list eq 'wishlist' ? 'PLUGIN_LL_ADDED_WISHLIST' : 'PLUGIN_LL_ADDED');
 }
 
@@ -436,7 +443,7 @@ sub _addCommand {
         ref         => $ref,
     };
 
-    my ($id, $already) = eval { Plugins::ListenLater::DB::add($rec, $list) };
+    my ($id, $already, $existingSource) = eval { Plugins::ListenLater::DB::add($rec, $list) };
     if ($@) {
         $log->error("LL: add command failed: $@");
     }
@@ -446,7 +453,7 @@ sub _addCommand {
     }
 
     if (my $client = $request->client) {
-        eval { $client->showBriefly({ line => [ cstring($client, 'PLUGIN_LL'), _addedMsg($client, $list, $already) ] }, { duration => 2 }); };
+        eval { $client->showBriefly({ line => [ cstring($client, 'PLUGIN_LL'), _addedMsg($client, $list, $already, $existingSource, $rec->{source}) ] }, { duration => 2 }); };
     }
 
     $request->addResult('count', 1);
@@ -708,7 +715,7 @@ sub _addCtxCommand {
         ref         => $ref,
     };
 
-    my ($id, $already) = eval { Plugins::ListenLater::DB::add($rec, $list) };
+    my ($id, $already, $existingSource) = eval { Plugins::ListenLater::DB::add($rec, $list) };
     if ($@) {
         $log->error("LL: addctx add failed: $@");
     }
@@ -717,7 +724,7 @@ sub _addCtxCommand {
     }
 
     if (my $client = $request->client) {
-        eval { $client->showBriefly({ line => [ cstring($client, 'PLUGIN_LL'), _addedMsg($client, $list, $already) ] }, { duration => 2 }); };
+        eval { $client->showBriefly({ line => [ cstring($client, 'PLUGIN_LL'), _addedMsg($client, $list, $already, $existingSource, $source) ] }, { duration => 2 }); };
     }
 
     $request->setStatusDone;

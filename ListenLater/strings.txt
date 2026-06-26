@@ -19,6 +19,9 @@ PLUGIN_LL_ADDED_WISHLIST
 PLUGIN_LL_ALREADY
 	EN	Already in your list
 
+PLUGIN_LL_ALREADY_FROM
+	EN	Already saved from %s
+
 PLUGIN_LL_ERROR
 	EN	Could not save album
 
