@@ -12,7 +12,8 @@ use base qw(Plugins::MaterialSkin::HomeExtraBase);
 
 use Plugins::ListenLater::Browse;
 
-use constant ICON => 'plugins/ListenLater/html/images/ListenLaterIcon_svg.png';
+# Single source of truth for the app icon path lives in Browse (Browse::ICON).
+use constant ICON => Plugins::ListenLater::Browse::ICON;
 
 sub initPlugin {
     my ($class) = @_;

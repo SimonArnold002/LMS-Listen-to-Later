@@ -100,6 +100,11 @@ SQL
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
+# Normalise for the dedupe KEY. NB: intentionally differs from Sources::_norm —
+# this one KEEPS parenthesised/bracketed text (only collapses non-alphanumerics),
+# so "Album (Deluxe)" and "Album" dedupe as distinct saves. Do NOT unify the two:
+# Sources::_norm strips "(…)"/"[…]" for fuzzy match tolerance, which is the opposite
+# of what a stable dedupe key needs.
 sub _norm {
     my $s = lc($_[0] // '');
     $s =~ s/[^a-z0-9]+/ /g;

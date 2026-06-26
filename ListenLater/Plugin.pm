@@ -27,8 +27,6 @@ use Plugins::ListenLater::Sources;
 
 my $JSON = JSON::XS->new->utf8->canonical->pretty;
 
-use constant ICON => 'plugins/ListenLater/html/images/ListenLaterIcon_svg.png';
-
 my $log = Slim::Utils::Log->addLogCategory({
     'category'     => 'plugin.listenlater',
     'defaultLevel' => 'INFO',
@@ -204,7 +202,9 @@ sub _writeMaterialActions {
         'playlist-track' => $trackCmd,
         'online-album'   => $onlineCmd,
         'online-track'   => $onlineCmd,
-        'online-artist'  => $onlineCmd,
+        # NB: deliberately NO 'online-artist' — we save albums, not artists. An
+        # artist row's $TITLE is the artist name (no album, no favurl), so adding
+        # one would store a junk record (album_title = artist) that can never replay.
     );
 
     # First strip OUR entries from EVERY existing category (clears legacy 0.1.7 hash
@@ -572,14 +572,18 @@ sub _buyCommand {
 
     # Bandcamp's async search may never call back (network stall, no error path);
     # guarantee completion so the Material query doesn't spin forever.
-    Slim::Utils::Timers::setTimer(undef, time() + 15, sub {
+    my $timeout = sub {
         return if $done;
         $log->warn("LL: buy resolve timed out (rec $id) — using search URL");
         $emit->($searchUrl);
-    });
+    };
+    Slim::Utils::Timers::setTimer(undef, time() + 15, $timeout);
 
     Plugins::ListenLater::Sources::bandcampBuyUrl($client, $rec, sub {
         my $url = shift;
+        # Resolve won the race — cancel the fallback timer so its closure (and the
+        # held request) is freed now rather than lingering for the full 15s.
+        Slim::Utils::Timers::killTimers(undef, $timeout);
         if ($url) {
             eval { Plugins::ListenLater::DB::setRefValue($id, 'buy_url', $url); 1 }
                 or $log->error("LL: cache buy_url failed: $@");
@@ -608,13 +612,29 @@ sub _addCtxCommand {
         ($_ => $v)
     } qw(name artist albumid trackname trackid year favurl image svc);
 
+    # A favurl from the sibling ListenBrainz Fresh Releases plugin carries the album
+    # cover as a "?cover=<url-encoded>" param: its matched rows show the streaming
+    # SERVICE LOGO as the thumbnail, so $IMAGE is the logo, not the art. Pull the
+    # cover out and prefer it over $IMAGE, then strip the param so the source /
+    # album:<id> logic below sees a clean "<scheme>://album:<id>". Only fires when
+    # the param is present, so native streaming-plugin favurls are byte-unchanged.
+    # Strip the param with its OWN leading delimiter ([?&]): removing "&cover=…"
+    # (cover as a later param) or "?cover=…" (cover as the lone param — what LBF
+    # actually appends) both leave a well-formed favurl. [^&]* (not +) tolerates an
+    # empty value. We don't consume a trailing "&", so nothing is glued together.
+    my $favCover;
+    if ($p{favurl} && $p{favurl} =~ s{[?&]cover=([^&]*)}{}) {
+        require URI::Escape;
+        $favCover = URI::Escape::uri_unescape($1);
+    }
+
     my $list = _wantedList($request->getParam('list'));
 
     $log->warn('LL: addctx params -> '
         . join(', ', map { "$_=" . (defined $p{$_} ? $p{$_} : '(undef)') } qw(name artist albumid year trackname trackid favurl image svc)));
 
     my $artist  = $p{artist};
-    my $artwork = $p{image};
+    my $artwork = $favCover // $p{image};
     my $year    = $p{year};
     my $album   = $p{name};
     # Material appends " (YYYY)" to album display titles — strip it for a clean

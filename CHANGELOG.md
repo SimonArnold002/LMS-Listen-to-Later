@@ -1,5 +1,28 @@
 # Changelog
 
+## 0.1.32 — Code-review fixes
+
+### Fixed
+- **"Add" no longer appears on streaming *artist* rows.** The plugin saves albums, not artists; offering "Add" on an artist row stored a junk entry (the artist's name as an album title) that could never play. Artist rows now show no "Add" action — album and track rows are unchanged.
+- **Hardened the private `?cover=` favurl handling** (the ListenBrainz Fresh Releases cover hand-off): the param is now stripped with its own leading delimiter so the remaining favurl is always well-formed, regardless of where the param sits.
+
+### Internal
+- "Buy on Bandcamp" cancels its 15-second fallback timer as soon as the page resolves, instead of letting it linger.
+- Removed a duplicated library-track lookup and an unused icon constant; added comments documenting why the two `_norm` helpers (dedupe key vs. fuzzy match) deliberately differ. No behaviour change.
+
+## 0.1.31 — Settings entry uses a cog icon
+
+### Changed
+- **The top-level "Plugin Settings" entry now shows a cog icon** instead of the plugin's own logo, matching the sibling ListenBrainz Fresh Releases plugin. It uses Material's own themed `settings` font icon (the `_MTL_icon_settings` filename convention, same approach as the Wish List trolley), so it recolours with your theme; non-Material skins get a plain cog PNG fallback.
+
+## 0.1.30 — Cover artwork from the ListenBrainz Fresh Releases detail page
+
+### Added
+- **Adding a streaming album from the sibling ListenBrainz Fresh Releases detail page now keeps its real cover.** Those rows show the streaming **service logo** as their thumbnail (so you can see which service the match is on), which meant the image handed to "Add" was the logo, not the album art. The plugin now reads an album-art URL that ListenBrainz Fresh Releases tucks onto the favurl as a private `?cover=<url-encoded>` param: it uses that as the stored cover (preferred over the row image), then strips it so the source / `album:<id>` replay logic sees a clean `<service>://album:<id>`. Together with the favurl those rows now carry, an added match gets the **correct service**, a **directly-replayable album**, and the **right artwork**.
+
+### Compatibility
+- The `?cover=` param is only emitted by **ListenBrainz Fresh Releases 0.9.42+**. Native streaming-plugin "Add" (Qobuz/Tidal/Bandcamp browse rows) is **completely unaffected** — those favurls never carry the param, so the extraction never fires and the favurl is left byte-for-byte unchanged.
+
 ## 0.1.29 — Section headers fixed for newer Material
 
 ### Fixed

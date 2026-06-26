@@ -27,6 +27,9 @@ use constant ICON => 'plugins/ListenLater/html/images/ListenLaterIcon_svg.png';
 # (that glyph isn't in Material's bundled icon font, so it can't be a font icon).
 use constant ICON_WISHLIST  => 'plugins/ListenLater/html/images/WishListIcon_MTL_icon_shopping_cart.png';
 use constant ICON_PLAYED => 'plugins/ListenLater/html/images/PlayedIcon_svg.png';
+# Settings entry uses Material's own "settings" cog font icon via the same
+# "_MTL_icon_<name>" convention (matches the sibling ListenBrainz plugin's cog).
+use constant ICON_SETTINGS => 'plugins/ListenLater/html/images/SettingsIcon_MTL_icon_settings.png';
 
 my $log   = logger('plugin.listenlater');
 my $prefs = preferences('plugin.listenlater');
@@ -53,7 +56,7 @@ sub topLevel {
         name    => cstring($client, 'PLUGIN_LL_SETTINGS'),
         type    => 'link',
         weblink => '/plugins/ListenLater/settings.html',
-        image   => ICON,
+        image   => ICON_SETTINGS,
     };
 
     push @items, _section($client, 'later',  'PLUGIN_LL_LISTEN_LATER', $wantHeaders);

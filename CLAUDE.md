@@ -133,3 +133,33 @@ The "Add to Listen Later"/"Add to Wish List" custom actions appear on streaming 
 - **0.1.27** — Homepage / "More info" link points to the rendered docs page (`README.html`) instead of the bare repo.
 - **0.1.28** — Streaming-browse "Add" actions identify the service via Material's **`$SERVICE`** variable (`online-*` commands carry `svc:$SERVICE`), the clean upstream mechanism now that [PR #1235](https://github.com/CDrummond/lms-material/pull/1235) is **merged** — replaces the old baked-`svc:` workaround. Needs a Material build with the merged feature (next release); degrades to "entry absent" without it. See "Material custom actions on streaming …".
 - **0.1.29** — **Section headers render as dividers again on newer Material.** Newer Material draws an *actionable* header (the plugin's headers carry a re-list `url`) as a grid **card**; the plugin now emits `type => 'header-basic'` (clears actions → plain divider). Gated by Material version: `Browse::_headerType` reads `Plugins::MaterialSkin::Plugin->getPluginVersion()` and uses `header-basic` only on Material **>= 6.4.3** (or dev/`test` builds), else the long-standing `header` — so older skins are unchanged. (`header-basic` first appears in Material 6.4.3.) Same one-liner is needed in sibling header-using plugins (ListenBrainz New Releases "Week of XXX").
+- **0.1.30** — **Album cover from the ListenBrainz Fresh Releases detail page.** Those
+  matched streaming rows show the **service logo** as their thumbnail (the detail-page
+  service indicator), so `$IMAGE` is the logo, not the art. ListenBrainz Fresh Releases
+  0.9.42+ instead tucks the album art onto the favurl as a private
+  `?cover=<URI::Escape-d>` param. `_addCtxCommand` now, right after building `%p`, does
+  `if ($p{favurl} && $p{favurl} =~ s{[?&]cover=([^&]+)}{}) { $favCover = uri_unescape($1) }`
+  — extracting the cover **and stripping it in place**, so all the downstream source /
+  `album:<id>` logic sees a clean `<scheme>://album:<id>` (and the stored favurl stays
+  clean). `$artwork` becomes `$favCover // $p{image}`. **Scoped strictly to our own
+  convention:** the substitution only matches the literal `cover=` token, so a native
+  Qobuz/Tidal/Bandcamp browse favurl (no `?cover=`) never triggers it and is byte-for-byte
+  unchanged — no effect on the normal streaming-plugin Add path. Pairs with LBF's
+  `_attachFavUrl`; a private handshake between the two plugins, opaque to Material.
+- **0.1.31** — **Settings entry uses a cog icon.** The top-level "Plugin Settings" row now
+  uses `ICON_SETTINGS` (`SettingsIcon_MTL_icon_settings.png`, Material's `settings` font icon
+  via the `_MTL_icon_<name>` convention — same mechanism as the Wish List trolley and the
+  sibling ListenBrainz plugin's `MENU_COG`) instead of the app `ICON`. PNG copied from the
+  sibling plugin's `lbf-cog_MTL_icon_settings.png`; it's only the non-Material fallback.
+- **0.1.32** — **Code-review fixes (no user-facing feature change).**
+  (1) Dropped the `online-artist` Material category — we save albums, not artists, and an
+  artist row's `$TITLE` is the artist name with no album/favurl, so "Add" there stored a junk
+  record that never replays. Stale `online-artist` entries self-clean on the next
+  `_writeMaterialActions` (the strip-our-entries pass) — only our entries, never a user's.
+  (2) The private `?cover=` strip in `_addCtxCommand` now matches `[?&]cover=([^&]*)` (param
+  with its own leading delimiter, empty value tolerated, no trailing `&` consumed) so the
+  residual favurl is always well-formed. (3) `_buyCommand` keeps the fallback timer in a
+  lexical and `killTimers` it once the resolve callback wins. (4) `_libraryAlbumTracks` reuses
+  `_libraryTrackItems` (one Schema query); the unused `ICON` constant left Plugin.pm and
+  `HomeExtras::ICON` now aliases `Browse::ICON`; both `_norm`s carry a "deliberately differs —
+  don't unify" comment (DB keeps `(…)` for the dedupe key, Sources strips it for fuzzy match).

@@ -206,6 +206,9 @@ sub resolveTracks {
     });
 }
 
+# The album's tracks (disc/track order) as a flat list of playable audio items.
+# Single source of truth — both the direct resolve path and the OPML node coderef
+# (_libraryAlbumTracks) go through here.
 sub _libraryTrackItems {
     my ($albumId) = @_;
     return [] unless $albumId;
@@ -232,23 +235,11 @@ sub _libraryPlayable {
     }];
 }
 
-# Return the album's tracks as a playable list (drilled or played directly).
+# OPML node coderef for a library album row (drilled or played directly): the same
+# track list as _libraryTrackItems, wrapped in the { items => … } shape the feed wants.
 sub _libraryAlbumTracks {
     my ($client, $cb, $args, $pt) = @_;
-    my $albumId = $pt->{album_id};
-
-    my @items;
-    my $rs = Slim::Schema->search('Track', { 'album.id' => $albumId },
-        { join => 'album', order_by => 'me.disc, me.tracknum' });
-    while (my $t = $rs->next) {
-        push @items, {
-            name => $t->title,
-            type => 'audio',
-            url  => $t->url,
-        };
-    }
-
-    $cb->({ items => \@items });
+    $cb->({ items => _libraryTrackItems($pt->{album_id}) });
 }
 
 # Rebuild a native streaming album node from a captured album id, reattaching the
@@ -404,6 +395,10 @@ sub _serviceCan {
     return 0;
 }
 
+# Normalise for fuzzy MATCHING. NB: intentionally differs from DB::_norm — this one
+# also STRIPS "(…)"/"[…]" (deluxe/remaster/edition qualifiers) so a saved title
+# matches the service's variant. Don't unify it with DB::_norm, whose dedupe key
+# must keep those qualifiers distinct.
 sub _norm {
     my $s = lc($_[0] // '');
     $s =~ s/\([^)]*\)//g;
