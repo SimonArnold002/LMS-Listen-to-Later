@@ -160,12 +160,51 @@ sub buildPlayableItems {
     my $ref = $rec->{ref} || {};
     my $albumId = $ref->{album_id} || ($ref->{passthrough} && $ref->{passthrough}{album_id});
 
-    if ($albumId && _serviceCan($source)) {
+    # Bandcamp's get_album scrapes the album PAGE url, NOT the album_id, so it needs
+    # album_url for a direct replay. Normally that url arrives in the favurl's ?b= blob
+    # (LBF 0.9.53+ packs <art>|<url>) and is stored on the record at add time, so this
+    # path runs directly. The album_id-search resolve below is only a SAFETY NET for the
+    # rare record with no stored url: it searches Bandcamp once, matches our exact
+    # album_id, and caches the resolved url (_cacheBandcampUrl) so later replays are
+    # direct. Qobuz/Tidal replay fine straight from the captured id.
+    # (Historical note: an earlier belief that "Material drops a long favurl" was wrong —
+    # it was a shadowed-install artifact; the full ?b= favurl survives intact.)
+    my $directOk = ($source eq 'bandcamp') ? ($ref->{album_url} ? 1 : 0) : ($albumId ? 1 : 0);
+
+    if ($directOk && _serviceCan($source)) {
         my $item = _streamingAlbumNode($client, $source, $albumId, $rec);
         return $cb->([$item]) if $item;
     }
 
+    # Bandcamp, first time (no cached url): resolve via search (album_id-exact) and cache
+    # the page url so subsequent plays skip the search.
+    if ($source eq 'bandcamp' && !$ref->{album_url}) {
+        return _searchService($client, $source, $rec, sub {
+            my $items = shift;
+            _cacheBandcampUrl($rec, $items);
+            $cb->($items);
+        });
+    }
+
     return _searchService($client, $source, $rec, $cb);
+}
+
+# Persist the Bandcamp album PAGE url resolved by a first-time search, so future replays
+# (and Buy-on-Bandcamp) use it directly instead of searching again. Pulls the url out of
+# the matched playable node's passthrough.
+sub _cacheBandcampUrl {
+    my ($rec, $items) = @_;
+    return unless $rec->{id} && ref $items eq 'ARRAY';
+    my ($node) = grep {
+        ref $_ eq 'HASH' && ($_->{type} || '') eq 'playlist' && ref $_->{passthrough} eq 'ARRAY'
+    } @$items;
+    my $pt  = $node ? $node->{passthrough}[0] : undef;
+    my $url = $pt && ($pt->{album_url} || $pt->{url});
+    return unless $url && !ref $url && $url =~ m{^https?://}i;
+    eval {
+        Plugins::ListenLater::DB::setRefValue($rec->{id}, 'album_url', $url);
+        $rec->{ref}{album_url} = $url;   # reflect it on the in-hand record too
+    };
 }
 
 # Resolve a stored record to a flat list of playable track items (type => audio),
@@ -259,8 +298,13 @@ sub _streamingAlbumNode {
         $item{passthrough} = [ { album_id => $albumId } ];
     }
     elsif ($source eq 'bandcamp' && Plugins::Bandcamp::Plugin->can('get_album')) {
+        # get_album resolves the tracklist from the album PAGE url (album_url||url), NOT
+        # the album_id — so the captured page url is the real replay key (id kept only
+        # for reference). buildPlayableItems only reaches here for Bandcamp when
+        # album_url is present.
+        my $burl = $rec->{ref}{album_url};
         $item{url} = \&Plugins::Bandcamp::Plugin::get_album;
-        $item{passthrough} = [ { album_id => $albumId } ];
+        $item{passthrough} = [ { album_id => $albumId, ($burl ? (album_url => $burl, url => $burl) : ()) } ];
     }
     elsif ($source eq 'tidal' && Plugins::TIDAL::Plugin->can('getAlbum')) {
         # Tidal's getAlbum reads $params->{id} (NOT album_id) and returns {items=>...}.
@@ -304,16 +348,26 @@ sub _searchService {
 
     if ($source eq 'bandcamp') {
         eval { require Plugins::Bandcamp::Search; 1 } or return $cb->(_noMatch($client));
+        # The album was originally matched in the sibling plugin and we kept its native
+        # album_id — so prefer the search result whose album_id matches it EXACTLY (the
+        # same album, no fuzziness), and only fall back to an artist+album title match.
+        my $wantId = $rec->{ref}
+            && ($rec->{ref}{album_id} || ($rec->{ref}{passthrough} && $rec->{ref}{passthrough}{album_id}));
         Plugins::Bandcamp::Search::search($client, sub {
             my $res = shift;
-            my @out;
+            my (@idHits, @titleHits);
             for my $it (@{ ($res && $res->{items}) || [] }) {
                 next unless ref $it eq 'HASH';
                 my $pt = ref $it->{passthrough} eq 'ARRAY' ? $it->{passthrough}[0] : undef;
                 next unless $pt && $pt->{album_id};
-                next unless _albumMatches(_norm($artist), _norm($album), $pt->{artist}, $pt->{title});
-                push @out, $it;
+                if (defined $wantId && length $wantId && $pt->{album_id} eq $wantId) {
+                    push @idHits, $it;
+                }
+                elsif (_albumMatches(_norm($artist), _norm($album), $pt->{artist}, $pt->{title})) {
+                    push @titleHits, $it;
+                }
             }
+            my @out = @idHits ? @idHits : @titleHits;
             $cb->(@out ? \@out : _noMatch($client));
         }, { search => $query });
         return;
@@ -358,6 +412,11 @@ sub _noMatch {
 sub bandcampBuyUrl {
     my ($client, $rec, $cb) = @_;
     return $cb->(undef) unless ($rec->{source} || '') eq 'bandcamp';
+    # Once the page url has been resolved (cached on the record by the first replay —
+    # _cacheBandcampUrl), it IS the buy page: link straight to it, no scan needed.
+    my $burl = $rec->{ref} && $rec->{ref}{album_url};
+    return $cb->($burl) if defined $burl && $burl =~ m{^https?://}i;
+    # Not cached yet: resolveTracks resolves+caches it; scan the items for the page link.
     resolveTracks($client, $rec, sub {
         my $items = shift || [];
         $cb->(_findBandcampUrl($items));

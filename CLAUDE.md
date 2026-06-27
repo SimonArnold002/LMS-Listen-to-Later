@@ -184,3 +184,60 @@ The "Add to Listen Later"/"Add to Wish List" custom actions appear on streaming 
   **no Material change** (not even a PR'd one): the existing strip-our-entries pass clears any
   `track` entry a previous version wrote, so it disappears on the next `postinitPlugin` run.
   See "Material custom actions on streaming …" (the per-section category table).
+- **0.1.39** — **Bandcamp albums from ListenBrainz Fresh Releases replay by their exact page
+  URL, carried in the favurl.** Bandcamp's `get_album` resolves a tracklist from the album
+  **page URL**, not the `album:<id>` in the favurl, so these saves used to produce no tracks.
+  LBF 0.9.53+ packs the cover art **and** the page URL into one escaped `?b=<art>|<url>`
+  favurl param; `_addCtxCommand` unpacks both (`$favCover` → saved artwork, `$favBandcampUrl`
+  → `ref.album_url`), so replay goes straight through `get_album` and Buy-on-Bandcamp opens
+  the page directly. The `?b=` strip mirrors the 0.1.30 `?cover=` handshake and runs in the
+  same spot. **Corrected a wrong conclusion:** an earlier belief that "Material drops favurls
+  longer than ~150 chars" (0.1.35–0.1.38 worked around it by re-deriving the URL via an
+  `album_id` search) was an artifact of a **stale repo-installed build shadowing the manual
+  dev install** (see memory `plugin-repo-shadows-manual-install`) — the new favurl code never
+  ran, so the add arrived with no favurl. With the correct build loaded, the full ~164-char
+  favurl arrives intact. The `album_id`-search resolve in `Sources::buildPlayableItems` is kept
+  only as a safety net. The discarded `docs/material-favurl-length-issue.md` (written for the
+  Material dev about the non-existent limit) was removed. **Debugging gotcha:** the `addctx`
+  log line prints the favurl *after* the `?b=`/`?cover=` payload is stripped, so it always
+  reads as a bare `bandcamp://album:<id>` — not proof the payload was dropped; and
+  `image=(undef)` there is Material's `$IMAGE` (the service logo, intentionally unused).
+- **0.1.40** — **"Buy on Bandcamp" opens a stored page URL directly.** `_buyCommand` now
+  short-circuits on `ref.album_url` (the exact page URL captured at add time from the 0.1.39
+  `?b=` favurl) as well as `ref.buy_url` (resolved on a prior open) — the album page *is* the
+  buy page, so a newly-added Bandcamp album opens instantly with no resolve/search. Records
+  with neither URL still take the resolve route (`bandcampBuyUrl` → `resolveTracks` →
+  `_findBandcampUrl`, with the 15s search-URL fallback). Note `bandcampBuyUrl` in `Sources.pm`
+  already preferred `ref.album_url`; this change moves the short-circuit up into `_buyCommand`
+  so it skips `setStatusProcessing`/the fallback timer entirely.
+- **0.1.41** — **"Buy on Bandcamp" is a one-tap link when the URL is known.** 0.1.40 removed the
+  resolve *delay* but the entry was still a `go` drill into the `buy` query, which returns an
+  intermediate "Open on Bandcamp" weblink — a second tap. Now the "… → More" builder
+  (`_contextMenuQuery`) checks `ref.buy_url || ref.album_url` at menu-build time:
+  if a page URL is known it emits the entry **as a `weblink` item itself** (handled in the
+  render loop before the `go`/`do` branches), so one tap opens the browser. Only records with
+  no stored URL still drill into `buy` (resolve once → cache → show link → one-tap thereafter).
+  This is the actual fix for "Buy on Bandcamp doesn't resolve in one go" — 0.1.40 alone didn't
+  remove the extra tap. (Reminder: only Bandcamp albums **added after LBF 0.9.53 / LL 0.1.39**
+  carry `ref.album_url`; pre-0.1.39 saves resolve+cache `buy_url` on first buy, then one-tap.)
+  **Known limitation (decided: leave as-is):** the weblink opens the page but does NOT return
+  to the Listen Later list afterwards — Move/Remove do (they're `do` actions that flow through
+  `browseDoClick` → `browseHandleNextWindow`, which honours `nextWindow:'parent'`), but a
+  `weblink` is intercepted earlier in Material's `browseClick` (`else if (item.weblink) {
+  openWebLink(item); }`) and that branch never checks `nextWindow`. There is **no plugin-only**
+  way to both open the URL and pop back: the command path can't open a browser, the weblink
+  path can't navigate. The only fix is a one-line Material change (call `browseGoBack`/honour
+  `nextWindow` after `openWebLink`) + the entry setting `nextWindow:'parent'` — declined here to
+  avoid a Material dependency (2026-06-27).
+  **Two upstream Material options were explored (PR text drafted, neither submitted — kept 0.1.41
+  as-is):** (1) *honour `nextWindow` on weblink clicks* — one-line change in `browseClick`'s
+  weblink branch (`if (item.nextWindow) browseGoBack(view, true);`), so a weblink can open + return.
+  (2) *make the browse-list service emblem clickable* like Now Playing's — Material already renders
+  `emblem: getEmblem(i.extid)` on browse rows but it's decorative (no `@click`), whereas the Now
+  Playing emblem (`emblemClicked` → `openWindow(playerStatus.current.source.url)`) opens the service
+  page. A browse `@click.stop` handler preferring an explicit `item.emblemUrl` then falling back to
+  `getTrackSource(item)` would open the page from the row, no context menu / no go-back at all.
+  Caveat found: `track-sources.json` has **no URL template for Bandcamp** (only `{name,extid}`), so
+  `getTrackSource` yields no URL for it — hence the explicit `emblemUrl` (which our stored
+  `ref.album_url` would supply). Also note: for a **currently-playing** Bandcamp album the Now
+  Playing emblem already opens the page for free, so the Buy entry is partly redundant once playing.

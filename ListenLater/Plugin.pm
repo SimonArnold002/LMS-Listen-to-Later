@@ -489,15 +489,27 @@ sub _contextMenuQuery {
 
     my @entries;
 
-    # Bandcamp items: a "Buy on Bandcamp" entry that drills into the `buy` query,
-    # which resolves the album's bandcamp.com page and opens it (see _buyCommand).
-    # A `go` (drill) entry, not a `do` — so it navigates to the link rather than
-    # firing-and-refreshing in place.
+    # Bandcamp items: a "Buy on Bandcamp" entry.
+    #   - URL already known (ref.album_url captured at add time, or ref.buy_url cached on a
+    #     prior open): make the entry ITSELF a weblink → one tap opens the page in the
+    #     browser, no intermediate "Open on Bandcamp" drill.
+    #   - URL not known (older saves): fall back to a `go` drill into the `buy` query,
+    #     which resolves the page once, caches it, and shows the weblink (see _buyCommand).
     if ($rec && ($rec->{source} || '') eq 'bandcamp') {
-        push @entries, {
-            text => cstring($client, 'PLUGIN_LL_BUY_BANDCAMP'),
-            go   => { player => 0, cmd => [ 'listenlater', 'buy' ], params => { id => $id } },
-        };
+        my $ref   = (ref $rec->{ref} eq 'HASH') ? $rec->{ref} : {};
+        my $known = $ref->{buy_url} || $ref->{album_url};
+        if ($known && $known =~ m{^https?://}i) {
+            push @entries, {
+                text    => cstring($client, 'PLUGIN_LL_BUY_BANDCAMP'),
+                weblink => $known,
+            };
+        }
+        else {
+            push @entries, {
+                text => cstring($client, 'PLUGIN_LL_BUY_BANDCAMP'),
+                go   => { player => 0, cmd => [ 'listenlater', 'buy' ], params => { id => $id } },
+            };
+        }
     }
 
     for my $target (qw(later wishlist played)) {
@@ -517,7 +529,11 @@ sub _contextMenuQuery {
     my $i = 0;
     for my $e (@entries) {
         $request->addResultLoop('item_loop', $i, 'text', $e->{text});
-        if ($e->{go}) {
+        if ($e->{weblink}) {
+            # Direct external link: one tap opens the page in the browser, no drill.
+            $request->addResultLoop('item_loop', $i, 'weblink', $e->{weblink});
+        }
+        elsif ($e->{go}) {
             # Drill into the buy query; no nextWindow (we want to navigate, not refresh).
             $request->addResultLoop('item_loop', $i, 'actions', { go => $e->{go} });
         }
@@ -569,9 +585,15 @@ sub _buyCommand {
         $request->setStatusDone;
     };
 
-    # Cached from a previous open → instant.
-    my $cached = (ref $rec->{ref} eq 'HASH') ? $rec->{ref}{buy_url} : undef;
-    return $emit->($cached) if $cached;
+    # Already have the page URL → open it directly, no resolve.
+    #   - buy_url:   resolved + cached on a previous open.
+    #   - album_url: the exact album page URL captured at add time (LBF 0.9.53+ packs it
+    #                into the favurl's ?b= blob). The album page IS the buy page, so a
+    #                newly-added title opens instantly without searching.
+    # Older records have neither → fall through to the resolve/search route below.
+    my $ref    = (ref $rec->{ref} eq 'HASH') ? $rec->{ref} : {};
+    my $cached = $ref->{buy_url} || $ref->{album_url};
+    return $emit->($cached) if $cached && $cached =~ m{^https?://}i;
 
     # Fallback used if the exact page can't be resolved OR the resolve stalls: a
     # Bandcamp album search for "artist album" still lands the user on Bandcamp to
@@ -635,8 +657,23 @@ sub _addCtxCommand {
     # (cover as a later param) or "?cover=…" (cover as the lone param — what LBF
     # actually appends) both leave a well-formed favurl. [^&]* (not +) tolerates an
     # empty value. We don't consume a trailing "&", so nothing is glued together.
+    # Bandcamp matches pack the cover art AND the album page url into a single escaped
+    # '?b=' param ('<art>|<url>'): get_album needs the page url for an exact replay.
+    # Unpack it — art = cover, url = exact replay key (and the Buy link). The full ~164-
+    # char favurl is confirmed to survive Material intact (an earlier "long favurls are
+    # dropped" theory was a shadowed-install artifact, not real); the album_id resolve in
+    # Sources is just a safety net if the url half is ever absent. Other services use the
+    # plain '?cover=' (art only). NOTE: this strip runs BEFORE the addctx log below, so
+    # the logged favurl always reads as a bare 'bandcamp://album:<id>'.
     my $favCover;
-    if ($p{favurl} && $p{favurl} =~ s{[?&]cover=([^&]*)}{}) {
+    my $favBandcampUrl;
+    if ($p{favurl} && $p{favurl} =~ s{[?&]b=([^&?]*)}{}) {
+        require URI::Escape;
+        my ($a, $u) = split /\|/, URI::Escape::uri_unescape($1), 2;
+        $favCover       = $a if defined $a && length $a;
+        $favBandcampUrl = $u if defined $u && length $u;
+    }
+    elsif ($p{favurl} && $p{favurl} =~ s{[?&]cover=([^&]*)}{}) {
         require URI::Escape;
         $favCover = URI::Escape::uri_unescape($1);
     }
@@ -662,7 +699,11 @@ sub _addCtxCommand {
         $year ||= $1;
     }
     if (defined $album) {
-        $album =~ s/\s*\((?:Hi-Res[^)]*|Explicit|Mono|Stereo)\)\s*$//i;
+        # Drop the format qualifier streaming rows append. Bandcamp tacks "(Album)" /
+        # "(Track)" onto its result titles (the ListenBrainz Fresh Releases match rows
+        # carry it) — strip those too so the stored name is clean AND the Bandcamp
+        # search-replay (_searchService) can match the album.
+        $album =~ s/\s*\((?:Hi-Res[^)]*|Explicit|Mono|Stereo|Album|Track)\)\s*$//i;
     }
     unless (defined $album && length $album) {
         $log->warn('LL: addctx had no album name — nothing added');
@@ -699,6 +740,10 @@ sub _addCtxCommand {
         $ref = $aid
             ? { _svc => $source, album_id => $aid, passthrough => { album_id => $aid } }
             : { _svc => $source };
+        # Bandcamp: if the favurl carried the page url (the ?b= blob survived Material),
+        # stash it for an exact get_album replay; otherwise buildPlayableItems resolves
+        # it once by album_id instead.
+        $ref->{album_url} = $favBandcampUrl if defined $favBandcampUrl && length $favBandcampUrl;
     }
     else {
         # Streaming album rows carry no favorites_url; the browsing service id is

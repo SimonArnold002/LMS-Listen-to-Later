@@ -1,5 +1,32 @@
 # Changelog
 
+## 0.1.41 — Buy on Bandcamp opens in one tap when the URL is known
+
+### Changed
+- **"Buy on Bandcamp" opens the page in a single tap when the URL is already stored.** Previously the entry always drilled into a resolve query that then showed an intermediate "Open on Bandcamp" link — two taps. Now, when the album's Bandcamp page URL is known (`ref.album_url` captured at add time, or `ref.buy_url` cached from a prior open), the "… → More" entry **is** the link: one tap opens the browser, no intermediate step. Albums with no stored URL (older saves) keep the resolve drill, which finds the page, caches it, and shows the link as before — so they become one-tap on the next open.
+
+## 0.1.40 — Buy on Bandcamp opens the stored page directly
+
+### Changed
+- **"Buy on Bandcamp" opens the album page instantly when the URL is already known.** Albums added from ListenBrainz Fresh Releases 0.9.53+ arrive with their exact Bandcamp page URL (stored as `ref.album_url`), so "Buy on Bandcamp" now links straight to it — no resolve, no search, no intermediate lookup. Albums that don't have a stored URL (older saves, or any that arrived without one) still use the previous route: resolve the page once, scan for the link, and fall back to a Bandcamp search if it can't be found.
+
+## 0.1.39 — Use the exact Bandcamp page URL from the favurl
+
+### Changed
+- **Replay a Bandcamp album by the exact page URL passed in the favurl.** Pairs with ListenBrainz Fresh Releases 0.9.53, which packs the cover art **and** the album page URL into a single escaped `?b=<art>|<url>` favurl param. Listen Later unpacks both: the cover becomes the saved artwork, and the page URL is stored on the record (`ref.album_url`) so replay goes straight through `get_album` — exact, no lookup — and Buy-on-Bandcamp opens it directly. The `album_id`-search resolve from 0.1.38 stays as a safety net for the rare case the URL half is absent, but normal saves no longer need it.
+
+### Fixed
+- **A Bandcamp album saved from the ListenBrainz Fresh Releases plugin now plays, and keeps its cover and correct source.** Bandcamp resolves a tracklist from the album **page URL**, not the `album:<id>` carried in the favurl, so earlier saves produced no tracks. The fix carries the page URL (and the cover) across in the favurl via the `?b=<art>|<url>` blob (see "Verified: the favurl carries the full payload" below). The `(Album)`/`(Track)` suffix Bandcamp appends to titles is stripped on save for a clean name.
+
+### Verified: the favurl carries the full payload (correcting an earlier wrong conclusion)
+- An earlier theory — that Material **drops favurls longer than ~150 chars** — was **wrong**. It was reached while a stale repo-installed build was shadowing the manual dev install, so the test plugin's favurl code never actually ran and the add arrived with *no* favurl. With the correct build loaded, the full `bandcamp://album:<id>?b=<art>|<url>` favurl (~164 chars) arrives intact: the saved record shows the real Bandcamp cover *and* stores the exact page URL.
+- Note for future debugging: the `addctx` log line prints the favurl **after** the `?b=`/`?cover=` payload is stripped off (`_addCtxCommand` strips, *then* logs), so it always reads as a bare `bandcamp://album:<id>` — that is **not** evidence the payload was dropped. And `image=(undef)` in that log is Material's `$IMAGE` (the service *logo*, intentionally unused); the cover rides the `?b=` blob.
+- The former `docs/material-favurl-length-issue.md` (a write-up of the non-existent length limit, for the Material dev) has been **removed** — its premise was false.
+
+## 0.1.35 – 0.1.38
+
+Intermediate iterations of the Bandcamp page-URL interop work, all **superseded by 0.1.39** (above): the cover-only `?cover=` handling, the resolve-by-`album_id` fallback, and the early attempts to carry the page URL in the favurl. The "Material drops long favurls" conclusion drawn during these turned out to be a stale-install artifact (see 0.1.39). Consolidated rather than listed individually — no action needed if you ran one of these dev builds.
+
 ## 0.1.34 — No "Add to Listen Later" on the Now Playing screen
 
 ### Changed
