@@ -111,7 +111,7 @@ Open **Settings → Advanced → Listen Later** (also linked as **Plugin Setting
 ## Notes & limitations
 
 - **Album-add from streaming** is reached from a track or album row in the service's browse view; there's no global LMS hook to inject an item into every service's own album "…" menu, so the plugin uses `Slim::Menu::TrackInfo`/`AlbumInfo` plus Material's custom-action mechanism.
-- **Adding directly from a streaming service's *browse list*** (e.g. a *New Releases* row) relies on a Material Skin feature that was merged upstream ([lms-material #1235](https://github.com/CDrummond/lms-material/pull/1235)) and ships in **Material's next release**. Until your Material includes it, that one entry just won't appear — adding from an album's or track's own "…" menu (and everything else) works regardless.
+- **Adding directly from a streaming service's *browse list*** (e.g. a *New Releases* row) relies on a Material Skin feature that was merged upstream ([lms-material #1235](https://github.com/CDrummond/lms-material/pull/1235)) and ships in **Material 6.4.4 and later**. On older Material that one entry just won't appear — adding from an album's or track's own "…" menu (and everything else) works regardless.
 - **Outside-the-plugin Played detection** is reliable for the local library (matched by album id); for streaming it's best-effort, matched on the now-playing artist + album.
 - **Material custom actions on home-shelf cards** only appear after you've opened a streaming browse page in the same session — a Material limitation in how the home shelves render menus.
 - **Storage** is a SQLite database in the server cache directory, so your lists survive restarts and rescans.

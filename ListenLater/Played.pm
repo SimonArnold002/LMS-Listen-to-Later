@@ -105,8 +105,11 @@ sub _matchRecord {
     my $album  = eval { $track->albumname }  // '';
     return undef unless length $album;   # streaming best-effort
 
-    my $key = Plugins::ListenLater::DB::dedupeKey($artist, $album);
-    return Plugins::ListenLater::DB::findByKey($source, $key);
+    # Match on artist+album regardless of year: the dedupe key now carries the release
+    # year (so same-title different-year albums save separately), but a playing streaming
+    # track can't be relied on to report the matching year, so Played uses the year-agnostic
+    # lookup.
+    return Plugins::ListenLater::DB::findByArtistAlbum($source, $artist, $album);
 }
 
 sub _totalTracks {

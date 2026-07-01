@@ -67,10 +67,10 @@ Three section icons, set in `Browse.pm` (`_iconFor($status)` → `_header`/`_alb
 - **Why Wish List uses the font but Played can't**: Material's bundled icon font (Release 6.4.3, matching the box) **has** `shopping_cart` but **not** `music_history` (verified via the font's GSUB ligatures with fontTools) — an `_MTL_icon_music_history` would render blank. So Played's `music_history` had to be shipped as a recoloured `.svg` instead. (Confirm new font icons exist in `test-artifacts/lms-material/.../font/MaterialIcons.ttf` before using `_MTL_icon_`.)
 - **No SVG rasteriser on this Mac** (no cairo/rsvg/inkscape; svglib's renderPM needs cairo). The PNGs are generated **qlmanage → Pillow** (the documented sibling-plugin path): `qlmanage -t -s 512` renders the `.svg` onto white, then Pillow does luminance→alpha (black art, transparent bg), trims to content bbox, and centres on a 256² canvas with 8% pad. Black-on-transparent so both the recolour and classic fallbacks look right.
 
-## Material custom actions on streaming "…" menus (the hard problem — solved, now upstream)
+## Material custom actions on streaming "…" menus (the hard problem — solved, released in Material 6.4.4)
 Goal: an **"Add to Listen Later"** entry on a streaming **album row while browsing** (Qobuz New Releases, etc.), where the service plugin owns the "…" menu so TrackInfo/AlbumInfo providers can't reach it. Material's **custom actions** (`prefs/material-skin/actions.json`, served at `/material/customactions.json`) are the only hook — but out of the box they appear on **library** items only.
 
-**STATUS (2026-06): the Material side is MERGED upstream** — [PR #1235](https://github.com/CDrummond/lms-material/pull/1235) landed on `dev` (`b631754`) and was merged on to `master` (`519b03a`). So there is **no more local bundle patching**: the feature ships in Material itself. The merged code does exactly what the patch did — sets `i.service`=browse command (exposed as **`$SERVICE`**), sets `i.album=i.title`/`i.artist=i.subtitle`, and resolves the per-app `<command>-<type>` category with `online-<type>` fallback. NOT YET in a *released* Material (latest release `6.4.3` lacks it; only on `master`/`DEVELOPMENT`) — the streaming-browse "Add" lights up once the next Material is released. The original full trace, kept for context:
+**STATUS (2026-07): MERGED upstream AND RELEASED in Material 6.4.4** — [PR #1235](https://github.com/CDrummond/lms-material/pull/1235) landed on `dev` (`b631754`), merged to `master` (`519b03a`), and shipped in the **Material 6.4.4** release (tag `6.4.4`, master `9be80db`). So there is **no more local bundle patching** — the feature ships in stock Material. Verified live on the box: it runs the stock 6.4.4 deferred bundle (561 KB, i.e. the un-patched size — the old patched build was 889 KB) and the streaming online actions are served and functional. The released code does exactly what the patch did — sets `i.service`=browse command (exposed as **`$SERVICE`**), sets `i.album=i.title`/`i.artist=i.subtitle`, and resolves the per-app `<command>-<type>` category with `online-<type>` fallback. The `$SERVICE` streaming feature is **6.4.4+**; `header-basic` (below) predates it (**6.4.3+**). On Material older than 6.4.4 the streaming-browse "Add" degrades to *entry absent* (the online browse path doesn't exist there) — every other add path is unaffected. No Perl-side `registerAction` API was added upstream, so the plugin's direct `actions.json` write (`_writeMaterialActions`) remains the correct mechanism. The original full trace, kept for context:
 
 - **Bundles**: Material ships two minified JS bundles. `material.min.js` (**main**) contains `customactions.js` (`getCustomActions`, `doReplacements`, `doCustomAction`) and `browse-page.js` (renders the menu). `material-deferred.min.js` (**deferred**) contains `browse-resp.js`, `browse-functions.js`, `standarditems.js`. The deferred build list is the `addJsToDocument("html/js/",[…])` array in `index.html`.
 - **Why library-only**: per-item custom actions are added in `browse-functions.js` only when `item.stdItem < STD_ITEMS.length` **and** `STD_ITEMS[item.stdItem].actionMenu` contains the `CUSTOM_ACTIONS` (`-2`) marker. Online items have `stdItem` **300/301** (`STD_ITEM_ONLINE_ARTIST/ALBUM`), far beyond `STD_ITEMS.length` (~16) — so they **bypass that whole path**. (And `standarditems.js` has `CUSTOM_ACTIONS` commented out on the online-album entry anyway.)
@@ -78,8 +78,8 @@ Goal: an **"Add to Listen Later"** entry on a streaming **album row while browsi
 - **The real blocker — Qobuz album rows have no identity**: verified over JSON-RPC, a New Releases album row is only `{type:"playlist", text:"Album (Hi-Res)\nArtist (YYYY)", params:{item_id:"6.0"}, icon:…}` — **no `favorites_url`, no `metadata`** (even with `wantMetadata:1`; LMS is 9.1 so the server supports it — the Qobuz plugin just doesn't emit it). Title/artist/year are only in the 2-line `text`; play works via `base.actions.play` + the positional `item_id` (non-durable). **Track** rows inside an album *do* carry `presetParams.favorites_url: qobuz://<trackid>.flac` + `favorites_type:audio`. So Material can't classify album rows as online albums — and neither can a classification-based patch.
 - **Working fix** (in `browse-resp.js`, the `item_loop` per-item section, after the play-action block): key off **playability** not classification — `addedPlayAction && undefined==i.stdItem && !isFavorites && !isAppsTop` (these are app/online rows; library albums never reach `item_loop`). For such rows, set `i.album=i.title` / `i.artist=i.subtitle` so `$ALBUMNAME`/`$ARTISTNAME` resolve, push `CUSTOM_ACTIONS` into `i.menu`, and set `resp.itemCustomActions=getCustomActions("online-album")`. Service identity = the browse **`command`** (`data.params[1][0]`, e.g. `"qobuz"`), set on `i.service`. The merged Material exposes it as the **`$SERVICE`** replacement variable, so the plugin's `online-*` commands carry `svc:$SERVICE` (0.1.28). (The pre-merge local patch *baked* a literal `svc:<command>` into each `lmscommand` instead — that workaround is gone now that `$SERVICE` exists.)
 - **Variable map** (`doReplacements`): `$ALBUMNAME`←`item.album`, `$ARTISTNAME`←`item.artist`, `$TITLE`←`item.title`, `$FAVURL`←`item.presetParams.favorites_url`, `$IMAGE`←`item.image`, `$ALBUMID`←`item.album_id`. Online album rows populate none of these by default — hence setting `item.album`/`item.artist` in `browse-resp.js`.
-- **Plugin side** (`addctx`): reads `svc` as the authoritative source (no guessing); strips a trailing `(YYYY)` off the **artist** line → year, and a format qualifier (`(Hi-Res…)`/`(Explicit)`/…) off the **album**. `Sources::sourceFromImage` (cover host → service) is a fallback only. `_writeMaterialActions` strips every prior LL entry from all categories, then writes the active set with the flat-array `lmscommand` shape (NOT the `{command,params}` `lmsbrowse` shape): library `album`/`album-track`/`playlist`/`playlist-track` and streaming `online-album`/`online-track`. **Deliberately NOT written:** `online-artist` (dropped 0.1.32 — we save albums, not artists) and the plain **`track`** category (dropped 0.1.34 — its sole consumer is Material's Now Playing screen, `nowplaying-page.js` `getCustomActions("track")`; browse track lists use `album-track`/`playlist-track`, so omitting `track` suppresses "Add" on Now Playing only, plugin-side, no Material change). The strip pass also clears any `track`/`online-artist` entries an older version left behind.
-- **Building/testing a dev Material (now that the feature is upstream)**: the clone is `test-artifacts/lms-material` (gitignored; remotes `origin`=CDrummond, `mine`=fork). To test the merged feature before it's released, build a real minified Material plugin from `origin/master`: `python3 mkrel.py test` → `lms-material-test.zip` (its contents = a `MaterialSkin/` plugin: install by replacing the box's MaterialSkin dir, chown `squeezeboxserver:nogroup`, restart; test in an **incognito** window — Material caches the bundle at app start). `mkrel.py` needs **Java 17** (runs the bundled Closure jar) + python **`requests`** (both installed on this Mac); CSS minify is pure-Python, no LESS step. Verify a build with e.g. `unzip -p lms-material-test.zip HTML/material/html/js/material.min.js | grep -c '\$SERVICE'`. *(Historical: before the merge, with no JDK on this Mac, the deferred bundle was hand-**concatenated** from the raw 6.4.3 sources and dropped onto the box. No longer needed.)* Proposal draft (now historical): `docs/material-online-custom-actions-proposal.md`.
+- **Plugin side** (`addctx`): reads `svc` as the authoritative source (no guessing); strips a trailing `(YYYY)` off the **artist** line → year, and a format qualifier (`(Hi-Res…)`/`(Explicit)`/…) off the **album**. `Sources::sourceFromImage` (cover host → service) is a fallback only. `_writeMaterialActions` strips every prior LL entry from all categories, then writes the active set with the flat-array `lmscommand` shape (NOT the `{command,params}` `lmsbrowse` shape): library `album`/`album-track`/`playlist`/`playlist-track`; streaming `online-album`/`online-track` as a single Add/Wish-List pair; and the own-view suppressors `listenlater-*`/`LLHome-*` = []. **We do NOT scope "Add" per streaming service anymore** (0.1.51 removed the 0.1.46–0.1.50 experiments — scheme filter, app/radio blocklist, home-shelf suppression). Instead the **add commands reject any source we can't replay** (`_isReplayableSource` = library or `Sources::_serviceCan`): an unsupported service's "Add" button is a harmless no-op with a "not supported" toast, never a stored-but-unplayable row. This is the one reliable gate (runs on every add path, unlike the flaky/unscopeable Material button). **Deliberately NOT written:** `online-artist` (dropped 0.1.32 — we save albums, not artists) and the plain **`track`** category (dropped 0.1.34 — its sole consumer is Material's Now Playing screen, `nowplaying-page.js` `getCustomActions("track")`; browse track lists use `album-track`/`playlist-track`, so omitting `track` suppresses "Add" on Now Playing only, plugin-side, no Material change). The strip pass also clears any `track`/`online-artist` entries an older version left behind.
+- **Building/testing a dev Material (the feature is now released in 6.4.4 — this is only for future Material work)**: the clone is `test-artifacts/lms-material` (gitignored; remotes `origin`=CDrummond, `mine`=fork). The streaming feature no longer needs any local build/patch — stock Material 6.4.4+ carries it. To test *further* Material changes, build a real minified Material plugin from `origin/master`: `python3 mkrel.py test` → `lms-material-test.zip` (its contents = a `MaterialSkin/` plugin: install by replacing the box's MaterialSkin dir, chown `squeezeboxserver:nogroup`, restart; test in an **incognito** window — Material caches the bundle at app start). `mkrel.py` needs **Java 17** (runs the bundled Closure jar) + python **`requests`** (both installed on this Mac); CSS minify is pure-Python, no LESS step. Verify a build with e.g. `unzip -p lms-material-test.zip HTML/material/html/js/material.min.js | grep -c '\$SERVICE'`. *(Historical: before the merge, with no JDK on this Mac, the deferred bundle was hand-**concatenated** from the raw 6.4.3 sources and dropped onto the box. No longer needed.)* Proposal draft (now historical): `docs/material-online-custom-actions-proposal.md`.
 - **Suppressing the action inside our OWN view (the per-app override)**: our plugin is itself an app, so its list rows are playable `item_loop` items → `isAppItem` matched and "Add to Listen Later" showed on albums already in the list (re-adding would bounce a *Played* album back to *Later*). Fix: the patched Material resolves the category for app items as `getCustomActions(command+"-"+btype)` **if** `command+"-"+btype in customActions` (the in-check is needed because `getCustomActions` returns `undefined` for an empty category), else falls back to `online-<btype>`. The plugin writes empty `listenlater-album`/`-track`/`-artist` categories, so its own rows show no "Add" while streaming services still do. This is also a general feature (any app can customise or suppress actions on its own view).
 - **Remove/Move placement — kept in "… → More" (0.1.18 reverted in 0.1.19)**: they live in each row's `itemActions.info` → `listenlater contextmenu` query, and refresh the list **in place** via `nextWindow => 'parent'` (0.1.15). Putting them at the *top* of the "…" is possible as Material custom actions matched by the stock `$TITLE` variable (no db-id needed — identify the row by its displayed name, like Add) — but a top-level custom action can only refresh by `lmsbrowse` re-list (new page + awkward back path), and **in-place** refresh would need a second Material patch (`browse-page.js` `itemCustomAction` → `refreshList()` on a `refresh` flag) in the **main** bundle. To keep the Material footprint to the single deferred-bundle patch, we stayed with the More menu. (The would-be inline approach: `listenlater-album` holds `lmsbrowse` Remove/Move using `ltlremove:$TITLE`/`ltlmove:$TITLE`, handled in `topLevel` by matching a lowercased-alphanumeric key of the display name.) The empty `listenlater-*` and `LLHome-*` categories remain — they suppress "Add" on the plugin's own list and home shelf via the per-app override.
 - **Context-menu actions: refresh in place, don't go home**: a "More"-menu `do` action's `nextWindow` governs navigation. `'grandparent'` jumps two levels (→ home); use **`'parent'`** — Material's rule `isMoreMenu && nextWindow=="parent"` calls `view.refreshList()`, updating the list where you are. (Path: `itemMoreAction` → `doTextClick(item, true)` sets `isMoreMenu`.) Remove/Move use `nextWindow => 'parent'`. Plugin-only — no Material change.
@@ -131,7 +131,7 @@ The "Add to Listen Later"/"Add to Wish List" custom actions appear on streaming 
 - **0.1.25** — **Renamed "Listen to Later" → "Listen Later"** and **"To Buy" → "Wish List"** throughout (title, menus, Perl packages `Plugins::ListenLater::*`, folder, `listenlater` command, `plugin.listenlater` prefs, `listenlater.db`, Material categories, icon filenames). Automatic data migration on first start (old db moved, `tobuy`→`wishlist`, prefs copied, stale Material actions cleaned). Download is now `ListenLater.zip`.
 - **0.1.26** — Code-review fixes: settings clamps applied *before* the base handler saves (out-of-range values could mark albums Played too early); `actions.json` written atomically; "Buy on Bandcamp" can't hang (15s fallback); Bandcamp's "Download album from…" text lines kept out of the drill/queue; guarded the Qobuz `_albumItem` fallback.
 - **0.1.27** — Homepage / "More info" link points to the rendered docs page (`README.html`) instead of the bare repo.
-- **0.1.28** — Streaming-browse "Add" actions identify the service via Material's **`$SERVICE`** variable (`online-*` commands carry `svc:$SERVICE`), the clean upstream mechanism now that [PR #1235](https://github.com/CDrummond/lms-material/pull/1235) is **merged** — replaces the old baked-`svc:` workaround. Needs a Material build with the merged feature (next release); degrades to "entry absent" without it. See "Material custom actions on streaming …".
+- **0.1.28** — Streaming-browse "Add" actions identify the service via Material's **`$SERVICE`** variable (`online-*` commands carry `svc:$SERVICE`), the clean upstream mechanism now that [PR #1235](https://github.com/CDrummond/lms-material/pull/1235) is **merged and released in Material 6.4.4** — replaces the old baked-`svc:` workaround. Needs Material **6.4.4+**; degrades to "entry absent" on older Material. See "Material custom actions on streaming …".
 - **0.1.29** — **Section headers render as dividers again on newer Material.** Newer Material draws an *actionable* header (the plugin's headers carry a re-list `url`) as a grid **card**; the plugin now emits `type => 'header-basic'` (clears actions → plain divider). Gated by Material version: `Browse::_headerType` reads `Plugins::MaterialSkin::Plugin->getPluginVersion()` and uses `header-basic` only on Material **>= 6.4.3** (or dev/`test` builds), else the long-standing `header` — so older skins are unchanged. (`header-basic` first appears in Material 6.4.3.) Same one-liner is needed in sibling header-using plugins (ListenBrainz New Releases "Week of XXX").
 - **0.1.30** — **Album cover from the ListenBrainz Fresh Releases detail page.** Those
   matched streaming rows show the **service logo** as their thumbnail (the detail-page
@@ -241,3 +241,195 @@ The "Add to Listen Later"/"Add to Wish List" custom actions appear on streaming 
   `getTrackSource` yields no URL for it — hence the explicit `emblemUrl` (which our stored
   `ref.album_url` would supply). Also note: for a **currently-playing** Bandcamp album the Now
   Playing emblem already opens the page for free, so the Buy entry is partly redundant once playing.
+- **0.1.42** — **Right album on replay for same-titled releases + keep the artist on ListenBrainz adds.**
+  Two independent fixes, both diagnosed live over JSON-RPC (saved records replayed the wrong tracklist:
+  "American Football (LP4) (2026)" → the 1999 LP1's *Never Meant…*; one of two "Your Day Will Come"s →
+  the wrong year).
+  (1) **`_searchService` disambiguation (`Sources.pm`).** A Qobuz/Tidal browse row carries **no album
+  id**, so replay searches the service and title-matches — but `_norm` strips the `(LP4)` distinguisher
+  AND the year, so `_albumMatches` took the first same-base-title hit. Now the search sends the **raw
+  artist only** and filters titles locally (recall — mirrors the sibling plugin's 0.9.34 lesson), and a
+  new `_bestMatches` ranks the base-matched candidates: exact full title (kept via `_normStrict`, which
+  strips only quality qualifiers, not `(LP4)`) **and** matching year > year > full title > base. Year
+  comes from the raw service date field, else the year the renderer already shows on the item (`_yearOf`,
+  a boundary-anchored 19xx/20xx match that ignores an epoch `released_at`). Bandcamp unchanged (replays
+  by captured album id). The distinguishing title + year were already on the record — just discarded at
+  match time.
+  (2) **Artist packed in the favurl.** LBF match rows arrive with an empty `$ARTISTNAME` (Material
+  doesn't map their subtitle — confirmed in the `addctx` log: `artist=` empty, `favurl=qobuz://album:…`
+  present), so LBF-saved records had no artist and never auto-moved to Played. LBF 0.9.58+ packs
+  `&a=<artist>` into the favurl; `_addCtxCommand` reads `[?&]a=`/`[?&]y=` as fallbacks for artist/year
+  (after the `?cover=`/`?b=` strip, before the log so the logged favurl stays clean) and strips them.
+  Native favurls (no query) never trigger it. Needs LBF 0.9.58; existing artist-less records can be
+  removed + re-added.
+- **0.1.43** — **Same-titled albums from different years can both be saved.** The dedupe key became
+  `artist|album|year` (was `artist|album`), so e.g. Chanel Beads' 2024 and 2026 "Your Day Will Come"
+  (identical titles, only the year differs) no longer block each other — the second used to be dropped
+  as a duplicate. `DB::dedupeKey` takes the year; `add` passes `$rec->{year}`; a one-off idempotent
+  migration in `_migrate` appends `|<year>` to existing 1-pipe keys (`WHERE dedupe_key NOT LIKE
+  '%|%|%'`). **Played detection** must NOT gain the year (a playing streaming track can't be trusted to
+  report it), so `Played::_matchRecord` now calls the new `DB::findByArtistAlbum($source,$artist,$album)`
+  — a year-agnostic `dedupe_key LIKE 'artist|album|%'` prefix lookup (normalised parts carry no LIKE
+  metacharacters) — replacing the removed `findByKey`. Two same-title different-year albums both saved:
+  a play attributes to the lower id (streaming metadata can't disambiguate; accepted). Differently-titled
+  editions ("(LP2)"/"(Deluxe)") were already distinct via `DB::_norm` (keeps parens) and are unchanged.
+  Pairs with LBF 0.9.59, which packs the year into the favurl as `&y=` (`_addCtxCommand` reads
+  `[?&]a=`/`[?&]y=`) so LBF adds carry a year too; older LBF builds send none → those dedupe on
+  `artist|album|` as before.
+- **0.1.44** — **Qobuz albums replay by their exact id, recovered from the cover URL — no search.**
+  Diagnosed live: every direct-Qobuz add arrives with `favurl=` empty and `albumid=(undef)` (Qobuz
+  browse rows carry no identity), so replay fell back to `Sources::_searchService` (artist-only search
+  + 0.1.42 year/title tiering) — which for "American Football (LP2) (2016)" returned nothing (Qobuz's
+  artist search didn't surface that specific edition), giving "Could not find this album to play" while
+  LP3/LP4 happened to resolve. Root fix: the Qobuz **cover URL filename IS the album id**
+  (`…/static.qobuz.com/images/covers/<xx>/<yy>/<ALBUMID>_<size>.jpg`; the xx/yy path is derived from the
+  id's last chars — verified against the known-good favurl id `y89n6mtoxfa4k` and LP3/LP4's covers).
+  New `Sources::qobuzAlbumIdFromImage` uri-unescapes the proxied cover and extracts the id;
+  `_addCtxCommand`'s no-favurl branch, when `$source eq 'qobuz'`, sets `ref.album_id` from it (uses the
+  raw `$p{image}`, not `$artwork`). `buildPlayableItems` then replays via `_streamingAlbumNode` by id —
+  exact, no search — for ALL direct-Qobuz adds (also makes Chanel Beads etc. exact, not year-tiered).
+  `_searchService` stays as the fallback for records with no recoverable id (older saves, non-Qobuz-cover
+  images). Existing artist-less/id-less Qobuz records need a re-add to gain the id. Tidal already carried
+  `tidal://album:<id>` in its favurl, so this is Qobuz-specific.
+- **0.1.45** — **Tidal direct adds backfill the artist from the album (async); LBF adds confirmed carrying artist.**
+  Tidal browse rows arrive with `favurl=tidal://album:<id>` (replay by id works) but `artist=` EMPTY
+  (Material doesn't map their subtitle) and `year=(undef)`, and the Tidal cover URL is a random
+  `resources.tidal.com/images/<uuid>/…` with no artist/id to recover (unlike Qobuz — see
+  [[qobuz-album-id-from-cover-url]]). So `_addCtxCommand` now, for a fresh artist-less Tidal add with an
+  album id, calls `_backfillTidalArtist` fire-and-forget: `Plugins::TIDAL::Plugin::getAlbum` (→
+  `albumTracks(id)` → each `_renderTrack` sets `line2 => artist->{name}`) → take the first track's line2
+  → `DB::updateArtist($id,$artist)`, which sets the artist column AND recomputes `dedupe_key` (year still
+  unknown/empty) so Played's `findByArtistAlbum` prefix lookup matches. Guarded; a Tidal hiccup can't
+  break the add. Artist shows on the row a moment after adding (async); pre-0.1.45 Tidal saves need a
+  re-add. Tidal year is not exposed by albumTracks — left empty (only matters for same-title different-year
+  Tidal dedupe, an edge case; AF editions have distinct titles). **Verified LBF adds already carry the
+  artist**: a live LBF detail page streaming row's `favorites_url` was
+  `qobuz://album:dmuizydvpcxsy?cover=…&a=Temples&y=2026` (0.9.59 `_attachFavUrl` + 0.1.44 `[?&]a=` receiver).
+  Tidal plugin source: github.com/michaelherger/lms-plugin-tidal (`getAlbum`/`albumTracks`/`_renderTrack`).
+- **0.1.46** — *(superseded by 0.1.47)* Tried an **allowlist** for the "Add restricted to supported services"
+  feature: stopped writing the generic `online-*` and instead wrote `<command>-album`/`-track` per supported
+  service. **Regressed the Material home-page shelves** — a shelf card has no per-service browse `command`, so
+  it resolves custom actions via the generic `online-*` fallback (`browse-resp.js` ~L693); emptying `online-*`
+  made "Add" disappear from every home shelf. Reverted in 0.1.47.
+- **0.1.47** — **"Add" hidden on unsupported streaming services (Deezer, …) — as a BLOCKLIST.** The Add entry
+  is suppressed on services we can't save/replay, while library + Qobuz/Bandcamp/Tidal + the ListenBrainz
+  Fresh Releases feed keep it. Chosen as a **blocklist** (`@BLOCKED_ONLINE`, seeded `deezer`), not an
+  allowlist, because it's the only design that keeps Material's generic `online-album`/`online-track`
+  **populated** — the **home-page shelf cards depend on `online-*`** (they carry no per-service `command`, so
+  they fall back to it); an allowlist empties `online-*` and kills Add on all home shelves (the 0.1.46
+  regression). Mechanism: keep `online-*` = our Add/Wish-List pair, and for each blocked command write an
+  **empty** `"<command>-album"`/`"-track"` category — Material's resolver (`browse-resp.js` ~L693) prefers a
+  present app category (even empty) over `online-<btype>`, so the empty category hides Add on that service's
+  browse rows only (same trick as our own-view `listenlater-*`/`LLHome-*` empties). Two surfaces, keyed on
+  DIFFERENT identifiers: (1) **Material browse action** — blocked by browse COMMAND (`$SERVICE`); (2)
+  **TrackInfo "…" provider** — `_trackInfoHandler` returns no item when `$rec->{source}` (play-url scheme) is
+  blocked. The command and the scheme can DIFFER for one service (Spotty **browses** as `spotty` but **plays**
+  `spotify://…`), so a fully-blocked service needs BOTH spellings in `@BLOCKED_ONLINE`. Tradeoff (accepted):
+  open by default — a new unsupported plugin shows Add until added (a one-word change). Empty blocked
+  categories linger in `actions.json` if a service is later removed from the list / becomes supported — clear
+  them then (not auto-cleaned, unlike the rebrand strip).
+- **0.1.48** — **Blocked-service suppression uses `||=`, not `=`, on the shared `actions.json`.** The 0.1.47
+  block wrote `$data->{"<svc>-album"} = []`, which would overwrite another plugin's/user's custom actions for
+  that service (unlike our own `listenlater-*`/`LLHome-*` namespaces, `<svc>-*` isn't ours to reset). `||= []`
+  only creates the empty category when absent — our Add stays hidden (any defined category, even someone
+  else's, overrides `online-*`) while their entries survive. Code-review fix, no user-facing change.
+- **0.1.49** — **"Add" gated by play-URL SCHEME via Material's per-action `filter`, replacing the 0.1.47/0.1.48
+  service blocklist.** The blocklist couldn't scale — too many unsupported services (Spotify, BBC Sounds,
+  Radio Paradise, endless internet radio). Material's `filter` field (customactions.js `getSectionActions`:
+  an action shows only when the passed filter `startsWith(sect[i].filter)`; the filter passed for online rows
+  is `i.presetParams.favorites_url`, `browse-resp.js` ~L686/695) lets us allow by **scheme** instead. Now
+  `_writeMaterialActions` writes: (a) `online-album`/`online-track` = one Add + one Wish List **per supported
+  scheme** (`@SUPPORTED_SCHEMES` = `qobuz://`/`bandcamp://`/`tidal://`), each with `filter => <scheme>` — so
+  only those play-urls get Add, everything else is excluded with nothing to enumerate, and ListenBrainz Fresh
+  Releases rows qualify automatically (their favurl IS `qobuz://…`); (b) an **unfiltered** per-command
+  `qobuz-`/`bandcamp-`/`tidal-`album`/`track` (`@NATIVE_SERVICES`) because those services' "New Releases" rows
+  carry NO `favorites_url`, so the scheme filter can't see them (a filter is bypassed when the favurl is
+  undefined → on a no-favurl row ALL scheme copies would show; the per-command category gives a single Add and
+  Material prefers it over `online-*`). **Home shelves keep working** because `online-*` stays POPULATED (the
+  shelf cards go through `parseBrowseResp` → per-card `CUSTOM_ACTIONS` marker, but only when `online-*` is
+  non-empty — the 0.1.46 allowlist emptied it and broke them). Non-clobbering: entries are PUSHED, so another
+  plugin's `qobuz-album`/etc. survive (verified). The TrackInfo "…" provider uses the source allowlist
+  `%SUPPORTED_SOURCE` = `library qobuz bandcamp tidal`. Stale `deezer-*` (0.1.48) are deleted on write
+  (`@STALE_CATEGORIES`). **Known edge:** a NO-favurl row on an UNsupported service bypasses the filter and
+  would show all scheme copies — but such services (Deezer/Spotify/radio) carry favurls, and native no-favurl
+  services are the supported ones; if one ever appears, give it an empty per-command category (the old
+  blocklist trick, now a targeted escape hatch). Add a service: adapter in `Sources.pm` + scheme in
+  `@SUPPORTED_SCHEMES` (+ command in `@NATIVE_SERVICES` if its browse rows can lack a favurl; + scheme in
+  `%SUPPORTED_SOURCE` for the TrackInfo menu).
+- **0.1.50** — **"Add" scoped by a DYNAMIC command blocklist read from the server's own menus — replaces the
+  0.1.49 scheme filter (rolled back).** Verified over JSON-RPC why the scheme filter failed: ListenBrainz
+  Fresh Releases rows AND Material home-shelf cards carry `favorites_url = None` / empty `presetParams` (they're
+  `type=link` drills, or home cards whose menu resolves via `online-*` with an *undefined* command — a per-
+  command category like `LBFForYou-album` is NOT consulted for them). With no favurl, Material's `filter` is
+  bypassed (`undefined==filter` short-circuits `getSectionActions`), so all 3 scheme copies showed → the 6-way
+  duplicate "Add" on LBF. There is no per-item identity to filter on; the only axis LBF/home rows expose is the
+  browse COMMAND (home cards: none → `online-*`). So: keep `online-album`/`online-track` a single populated pair
+  (home shelves + LBF keep Add, no dup), and suppress "Add" on unsupported services' BROWSE rows via empty
+  `<command>-album`/`-track`. The blocklist is **not hardcoded** (every user installs different services):
+  `_unsupportedAppCommands` runs `Slim::Control::Request::executeRequest(undef, ['apps'|'radios', 0, 500])`
+  (both work with no player), reads each entry's `cmd` from `appss_loop`/`radioss_loop`, and blocks every
+  command NOT in `%SUPPORTED_APP` (`qobuz bandcamp tidal listenbrainzfreshreleases listenlater`). Enumerating
+  BOTH menus matters: streaming apps are under `apps`, internet radio (TuneIn categories `music`/`news`/`search`/
+  … + `bbcsounds` + `podcast`/`presets`) is under `radios`, and a service can be in both (Qobuz) — unioned by
+  command, and `qobuz` is supported so it's never blocked whichever menu it came from. Verified the generic
+  TuneIn command names don't collide: `search` returns TuneIn radio (not Qobuz — Qobuz's own search runs under
+  cmd `qobuz`). `||=` keeps the non-clobber property. **Known gaps (documented, left as-is):** (1) Material
+  **global search** puts every service under one `globalsearch` command (verified: Qobuz/Tidal/BBC all drill as
+  `['globalsearch','items']`), so it can't be scoped — Add shows there for unsupported too; blocking it would
+  also kill it for Qobuz/Tidal. (2) Home-shelf cards of unsupported services can still show Add (no command/URL
+  to scope). Add a service now = adapter in `Sources.pm` + its command in `%SUPPORTED_APP` (+ scheme in
+  `%SUPPORTED_SOURCE` for the TrackInfo menu). See [[lms-server-http-testing]] for the JSON-RPC probes used.
+- **0.1.51** — **Dropped ALL the 0.1.46–0.1.50 per-service "Add"-button scoping; reject unplayable adds at add
+  time instead.** The whole scoping saga (blocklist → allowlist → scheme filter → dynamic app/radio
+  enumeration) was fighting Material's custom-action mechanism, which is fundamentally unfit for this: on
+  home-page shelves it's driven by leftover view state (`handleHomeExtra` never sets `itemCustomActions`, so a
+  card only shows "Add" if a *prior* browse populated it — the user's "use it on a library shelf and it starts
+  working on Qobuz shelves" symptom) AND unscopeable: ALL home shelves are fetched in ONE
+  `["material-skin","home-extra",…]` call (browse-page.js L1146), so the custom-action `command` is always
+  `material-skin` (L91) and `LLHome-album=[]` is never consulted. **CORRECTION (per CDrummond, the Material
+  author):** this one-call design is NOT new to 6.4.3 — "Material always got all scrollable lists with one
+  call." An earlier note here claimed 6.4.3 introduced it; that was wrong, from a `git log -S` on the SHALLOW
+  test-artifacts clone (history only reaches the 6.4.3 tag, so the search reported the oldest visible commit,
+  not the real origin). So `LLHome-album` never worked on the carousel — home-shelf "Add" has always been
+  governed by `online-*` + leftover view state (i.e. always "hit and miss"), never a regression. So we
+  stopped trying to hide the button and moved the gate to the one path that always runs: the **add commands**.
+  `_addCommand`/`_addCtxCommand` now call `_rejectAdd` (no DB row, **silent** — see below) unless
+  `_isReplayableSource($source)` — library, or `Sources::_serviceCan` (an installed Qobuz/Bandcamp/Tidal
+  adapter). Verified over JSON-RPC that **Deezer sends a valid `deezer://album:<id>` favurl and still can't
+  play** (no adapter → `_searchService` has no deezer branch → `_noMatch`), which is why the gate keys on
+  ADAPTER support, not favurl presence. `_writeMaterialActions` reverts to the pre-0.1.46 shape (library +
+  `online-*` single pair + `listenlater-*`/`LLHome-*` suppressors); the TrackInfo provider's source gate was
+  removed too (rejection covers it). Net: "Add" may appear on unsupported services / home shelves, but it's a
+  harmless no-op — nothing unplayable is ever stored. **The reject is silent by necessity:** Material renders
+  no toast for a custom-action/menu command (server-side `showBriefly` reaches physical player displays only,
+  never the web UI — verified: no `showBriefly` handler anywhere in Material's JS), and its only feedback hook
+  is a generic `'…' failed` snackbar whose text we can't set. So there's no way to show a descriptive "not
+  supported" message from this path; the `showBriefly`/`PLUGIN_LL_UNSUPPORTED` reject-toast was removed as dead
+  code (0.1.54). The pre-existing "Added" confirmation `showBriefly` stays — it still shows on hardware player
+  displays. Known-gap docs from 0.1.50
+  (globalsearch, home-shelf leakage) are now moot — they were only about hiding the button.
+- **0.1.52** — **Fix: 0.1.51 hid "Add" on Qobuz/Tidal/Bandcamp/ListenBrainz.** `actions.json` is SHARED and
+  persists across plugin updates. The scoping experiments (0.1.46–0.1.50) wrote per-command categories
+  (`qobuz-album`, `tidal-album`, `bandcamp-album`, `listenbrainzfreshreleases-album`, the LBF tags, and the
+  dynamic blocklist ones); 0.1.51 stopped writing them but the STRIP pass only removes our *entries*, leaving
+  the categories as EMPTY arrays — and an empty `<cmd>-album` overrides the generic `online-album`
+  (browse-resp.js ~L693), so it suppressed "Add" on the very services we support. Verified live over the
+  served `customactions.json` (qobuz-album=0, tidal-album=0, …) and that LBF writes NO custom actions of its
+  own (so every stale empty is ours). Fix: after the strip pass, delete every empty `*-album`/`*-track`/
+  `*-artist` category EXCEPT the ones we actively write (the `%cats` keys) and our own suppressors
+  (`listenlater-*`/`LLHome-*`); only-empty so another plugin's real entries are never touched. Supported
+  services then fall through to the populated `online-*` again. **Lesson:** when you STOP writing a custom-
+  action category, you must DELETE it — leaving it empty is not neutral, it actively suppresses.
+- **0.1.53** — **Reject unidentifiable adds instead of defaulting them to Qobuz.** An LB "Created for You"
+  playlist added as an empty `qobuz` album (log: `name=W/C 22 June 2026 … favurl= image=plugins/ListenBrainz…
+  playlist-weekly-jams-prev.png svc=material-skin-client → addctx -> qobuz / … (id=113)`). Root cause: in
+  `_addCtxCommand`'s no-favurl `else` branch, `svc` = `material-skin-client` fails the `^[a-z0-9]+$` test
+  (hyphens), the image is a plugin PNG (not a service cover, so `sourceFromImage`→''), and the old
+  `_defaultStreamingSource()` then forced `source='qobuz'` — which passed the reject gate and stored an
+  album-less row. Fix: dropped `_defaultStreamingSource` (source is now `$svc || sourceFromImage || ''`), and
+  `_isReplayableSource('')` now returns FALSE (was defaulting empty→library→true). So an unidentifiable item
+  is rejected; a real streaming album with a service cover (e.g. Qobuz on a home shelf — same `svc=
+  material-skin-client`, but a `static.qobuz.com` cover → `sourceFromImage`→qobuz → id recovered) is
+  unaffected. NB the add commands still pass an explicit `'library'` for real library items, so empty source
+  never legitimately means library. (Full playlist SUPPORT was assessed as too much work — LB playlists are
+  ListenBrainz recommendation lists resolved track-by-track by LBF, with no service playlist id to replay.)

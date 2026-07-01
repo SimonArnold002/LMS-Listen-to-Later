@@ -116,7 +116,7 @@
   <h1>Listen Later — LMS Plugin</h1>
   <p class="tagline">A plugin for <strong>Lyrion Music Server (LMS)</strong> that lets you save an album — from your <strong>local library</strong> or any <strong>streaming service</strong> (Qobuz, Tidal, Bandcamp) — into a curated list, browse it like a playlist <em>of albums</em>, and have albums move to a <strong>Played</strong> section once you've heard them. A separate <strong>Wish List</strong> sits alongside for things you mean to buy, and albums move freely between the three lists.</p>
   <div class="badges">
-    <span class="badge accent">v0.1.41</span>
+    <span class="badge accent">v0.1.54</span>
     <span class="badge">LMS 9.0.0+</span>
     <span class="badge">Material Skin</span>
     <span class="badge">Library + Streaming</span>
@@ -223,7 +223,7 @@ sudo systemctl restart lyrionmusicserver</code></pre>
 <ul>
 <li><strong>Album-add from streaming</strong> is reached from a track or album row in the service's browse view; there's no global LMS hook to inject an item into every service's own album "…" menu, so the plugin uses <code>Slim::Menu::TrackInfo</code>/<code>AlbumInfo</code> plus Material's custom-action mechanism.
 </li>
-<li>**Adding directly from a streaming service's *browse list*** (e.g. a <em>New Releases</em> row) relies on a Material Skin feature that was merged upstream (<a href="https://github.com/CDrummond/lms-material/pull/1235">lms-material #1235</a>) and ships in <strong>Material's next release</strong>. Until your Material includes it, that one entry just won't appear — adding from an album's or track's own "…" menu (and everything else) works regardless.
+<li>**Adding directly from a streaming service's *browse list*** (e.g. a <em>New Releases</em> row) relies on a Material Skin feature that was merged upstream (<a href="https://github.com/CDrummond/lms-material/pull/1235">lms-material #1235</a>) and ships in <strong>Material 6.4.4 and later</strong>. On older Material that one entry just won't appear — adding from an album's or track's own "…" menu (and everything else) works regardless.
 </li>
 <li><strong>Outside-the-plugin Played detection</strong> is reliable for the local library (matched by album id); for streaming it's best-effort, matched on the now-playing artist + album.
 </li>

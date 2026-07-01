@@ -44,6 +44,27 @@ $prefs->init({
     played_retention_days => 7,        # auto-remove Played albums after N days (0 = keep forever)
 });
 
+# Can we actually save AND replay an album from this source? Only the local library and
+# the streaming services with an adapter in Sources.pm (Qobuz/Bandcamp/Tidal, when their
+# plugin is installed). Everything else — Deezer, Spotify, BBC Sounds, radio stations,
+# any service we haven't added support for — would store a record that can never resolve
+# to a playable album (it fails at play time with "Could not find this album to play"), so
+# we REJECT the add instead of storing junk. NB the test is adapter support, NOT whether a
+# favurl was supplied: Deezer sends a perfectly good `deezer://album:<id>` favurl and still
+# can't play, because there's no Deezer adapter. This is the one reliable gate — it runs on
+# every add path regardless of which (often flaky) Material surface triggered it, which is
+# why we no longer try to scope the "Add" button itself per service.
+sub _isReplayableSource {
+    my ($source) = @_;
+    # No source at all = we couldn't identify what this is (e.g. an LB "Created for You"
+    # playlist row: no favurl, a plugin-PNG image, and a hyphenated svc that isn't a
+    # service) → reject rather than guess. (The add commands pass an explicit 'library'
+    # for real library items, so empty here never means library.)
+    return 0 unless defined $source && length $source;
+    return 1 if lc $source eq 'library';
+    return Plugins::ListenLater::Sources::_serviceCan(lc $source) ? 1 : 0;
+}
+
 sub initPlugin {
     my $class = shift;
 
@@ -189,8 +210,9 @@ sub _writeMaterialActions {
     # into the lmscommand" hack. So pass svc:$SERVICE; addctx reads it as the
     # authoritative source. (Unpopulated → literal "$SERVICE", which addctx's
     # ^[a-z0-9]+$ check rejects → empty → cover-host fallback.)
-    # These `online-*` categories only do anything on a Material build that wires up
-    # custom actions for online items (see docs/material-online-custom-actions-proposal).
+    # These `online-*` categories are the generic fallback for every streaming/app
+    # item (and the home-shelf cards, which have no per-service command). Only does
+    # anything on a Material build that wires up custom actions for online items.
     my $onlineCmd = [ 'listenlater', 'addctx',
         'name:$TITLE', 'artist:$ARTISTNAME', 'svc:$SERVICE', 'favurl:$FAVURL', 'image:$IMAGE' ];
 
@@ -227,6 +249,26 @@ sub _writeMaterialActions {
         LtLHome-album LtLHome-track LtLHome-artist
     );
 
+    # Clean up the stale per-command categories the 0.1.46–0.1.50 scoping experiments left
+    # in the SHARED actions.json. They persist across plugin updates, and an EMPTY
+    # "<service>-album" takes precedence over "online-*" — so a leftover empty
+    # "qobuz-album"/"tidal-album"/"bandcamp-album"/"listenbrainzfreshreleases-album" (etc.)
+    # HIDES "Add" on the very services we support (the 0.1.51 regression). We no longer scope
+    # per command — adds are gated at add time — so after the strip pass above every such
+    # category we wrote is empty. Delete every empty "*-album"/"*-track"/"*-artist" EXCEPT the
+    # ones we actively write (album/online-*/… below) and our own suppressors
+    # (listenlater-*/LLHome-*). Only-empty so another plugin's real entries are never touched;
+    # no other plugin in this stack writes empty per-command categories (LBF verified), so an
+    # empty one is our own cruft. This restores fall-through to the populated "online-*".
+    my %keep = ( map { $_ => 1 } keys %cats,
+        qw(listenlater-album listenlater-track listenlater-artist
+           LLHome-album LLHome-track LLHome-artist) );
+    for my $cat (keys %$data) {
+        next unless $cat =~ /-(?:album|track|artist)$/;
+        next if $keep{$cat};
+        delete $data->{$cat} if ref $data->{$cat} eq 'ARRAY' && !@{ $data->{$cat} };
+    }
+
     # Two entries per category: "Add to Listen Later" (the base command, which
     # defaults to the Listen Later list) and "Add to Wish List" (the same command
     # plus list:wishlist). Both are stripped/rewritten on each run by _isOurAction.
@@ -247,8 +289,9 @@ sub _writeMaterialActions {
 
     # Suppress the generic streaming "Add" inside our OWN surfaces (the plugin list
     # view, command 'listenlater'; and the Material home shelf, command 'LLHome').
-    # Defining these (empty) categories tells the patched Material to use them instead
-    # of "online-*" for those items — so an album already in the list isn't offered
+    # Defining these (empty) categories tells Material (the per-app category feature,
+    # released in Material 6.4.4) to use them instead of "online-*" for those items —
+    # so an album already in the list isn't offered
     # "Add to Listen Later" again (re-adding would bounce a Played album back to
     # Listen Later). Remove/Move live in each row's "…" → More menu (which refreshes
     # the list in place), since putting them at the top of the "…" would need a further
@@ -257,6 +300,12 @@ sub _writeMaterialActions {
         listenlater-album listenlater-track listenlater-artist
         LLHome-album LLHome-track LLHome-artist
     );
+
+    # NB: we deliberately do NOT try to scope "Add" per streaming service here — that's
+    # unreliable (Material home-shelf cards carry no command/favurl and its custom actions
+    # are leftover-view-state flaky) and, worse, unnecessary: the add COMMANDS reject any
+    # source we can't replay (_isReplayableSource), so an unsupported service's "Add" is a
+    # harmless no-op with a clear toast rather than a stored-but-unplayable record.
 
     # Write atomically: actions.json is SHARED with Material and every other
     # plugin/user custom action, so a truncated write (crash mid-write) would
@@ -449,6 +498,10 @@ sub _addCommand {
         ref         => $ref,
     };
 
+    # Don't save an album from a source we can't replay — reject instead of
+    # storing a record that only fails later at play time (see _isReplayableSource).
+    return _rejectAdd($request, $source, $rec->{album_title}) unless _isReplayableSource($source);
+
     my ($id, $already, $existingSource) = eval { Plugins::ListenLater::DB::add($rec, $list) };
     if ($@) {
         $log->error("LL: add command failed: $@");
@@ -464,6 +517,20 @@ sub _addCommand {
 
     $request->addResult('count', 1);
     $request->setStatusDone;
+}
+
+# Reject an add whose source we can't replay: no DB row, request completed cleanly.
+# Silent by necessity — Material renders no toast for a custom-action/menu command
+# (server-side showBriefly reaches physical player displays only, not the web UI),
+# and its only feedback hook is a generic "'…' failed" snackbar we can't customise.
+# The point of the gate is to keep unplayable junk out of the list. Shared by both paths.
+sub _rejectAdd {
+    my ($request, $source, $album) = @_;
+    $log->warn("LL: rejected add — unsupported source '" . ($source // '?')
+        . "' (" . ($album // '?') . ")");
+    $request->addResult('count', 0);
+    $request->setStatusDone;
+    return;
 }
 
 # The "…" → More context menu for an album row: Remove + Move. Each entry is a
@@ -678,14 +745,34 @@ sub _addCtxCommand {
         $favCover = URI::Escape::uri_unescape($1);
     }
 
+    # LBF also packs the release artist (and optionally year) into the favurl as
+    # private '&a='/'&y=' params, because Material sends its matched rows NO
+    # $ARTISTNAME — so without this the record is artist-less and never auto-moves to
+    # Played (Played matching keys on source+artist+album). Read them as a fallback and
+    # strip so the album:<id> logic below sees a clean "<scheme>://album:<id>". Native
+    # streaming-plugin favurls carry no query string, so these never fire for a normal
+    # streaming Add. Runs before the addctx log so the logged favurl is the clean id.
+    my $favArtist;
+    my $favYear;
+    if ($p{favurl} && $p{favurl} =~ s{[?&]a=([^&]*)}{}) {
+        require URI::Escape;
+        $favArtist = URI::Escape::uri_unescape($1);
+    }
+    if ($p{favurl} && $p{favurl} =~ s{[?&]y=([^&]*)}{}) {
+        $favYear = $1;
+    }
+
     my $list = _wantedList($request->getParam('list'));
 
     $log->warn('LL: addctx params -> '
         . join(', ', map { "$_=" . (defined $p{$_} ? $p{$_} : '(undef)') } qw(name artist albumid year trackname trackid favurl image svc)));
 
     my $artist  = $p{artist};
+    # Fall back to the artist packed in the favurl (LBF rows arrive with an empty
+    # $ARTISTNAME) so the stored record has an artist for display AND Played matching.
+    $artist = $favArtist if (!defined $artist || !length $artist) && defined $favArtist && length $favArtist;
     my $artwork = $favCover // $p{image};
-    my $year    = $p{year};
+    my $year    = $p{year} || $favYear;
     my $album   = $p{name};
     # Material appends " (YYYY)" to album display titles — strip it for a clean
     # album name (and use it as the year if none was passed).
@@ -746,15 +833,32 @@ sub _addCtxCommand {
         $ref->{album_url} = $favBandcampUrl if defined $favBandcampUrl && length $favBandcampUrl;
     }
     else {
-        # Streaming album rows carry no favorites_url; the browsing service id is
-        # passed explicitly as svc (a Material view belongs to one service). Fall back
-        # to the cover host, then the default streaming service.
+        # Streaming album rows carry no favorites_url; the browsing service id is passed
+        # explicitly as svc (a Material view belongs to one service), else inferred from
+        # the cover host. NB: do NOT invent a default service here — if svc and the cover
+        # host both come up empty we genuinely can't identify the item (e.g. an LB
+        # playlist row: hyphenated svc that fails the ^[a-z0-9]+$ test + a plugin-PNG
+        # image), so leave $source empty and let the reject gate below refuse it, rather
+        # than guessing 'qobuz' and storing an unplayable row.
         my $svc = ($p{svc} && $p{svc} =~ /^[a-z0-9]+$/i) ? lc $p{svc} : '';
-        $source = $svc
-                  || Plugins::ListenLater::Sources::sourceFromImage($artwork)
-                  || _defaultStreamingSource();
+        $source = $svc || Plugins::ListenLater::Sources::sourceFromImage($artwork) || '';
         $ref    = { _svc => $source };
+        # Qobuz browse rows carry no favurl/album id, but the cover URL embeds the album
+        # id — recover it so we replay the EXACT album by id instead of an artist/title
+        # search (the search can miss a specific same-titled edition, e.g. "American
+        # Football (LP2)", and the row has no other identity). Uses the raw $p{image}
+        # (the proxied Qobuz cover), not $artwork, which a favurl handshake could override.
+        if ($source eq 'qobuz') {
+            my $aid = Plugins::ListenLater::Sources::qobuzAlbumIdFromImage($p{image});
+            $ref = { _svc => 'qobuz', album_id => $aid, passthrough => { album_id => $aid } }
+                if defined $aid && length $aid;
+        }
     }
+
+    # Reject a source we can't replay (Deezer/Spotify/radio/…): don't store a record that
+    # would only fail at play time — reject it (silently) instead. This is the one reliable
+    # gate, so we no longer bother hiding the Material "Add" button per service.
+    return _rejectAdd($request, $source, $album) unless _isReplayableSource($source);
 
     my $rec = {
         source      => $source,
@@ -774,6 +878,17 @@ sub _addCtxCommand {
         $log->warn("LL: addctx -> $source / " . ($album // '?') . " (id=" . ($id // '?') . ", already=" . ($already // 0) . ", list=$list)");
     }
 
+    # Tidal browse rows send no $ARTISTNAME (Material doesn't map their subtitle) and the
+    # Tidal cover URL has no artist/id — but the favurl gives us the album id, so fetch the
+    # artist from the album's tracks in the background and backfill the record. Without an
+    # artist the row shows album-only and never auto-moves to Played (Played keys on
+    # source+artist+album). Fire-and-forget; only for a fresh add that has no artist yet.
+    if ($id && !$already && $source eq 'tidal'
+            && (!defined $artist || !length $artist)
+            && $ref->{album_id}) {
+        _backfillTidalArtist($request->client, $id, $ref->{album_id});
+    }
+
     if (my $client = $request->client) {
         eval { $client->showBriefly({ line => [ cstring($client, 'PLUGIN_LL'), _addedMsg($client, $list, $already, $existingSource, $source) ] }, { duration => 2 }); };
     }
@@ -781,11 +896,32 @@ sub _addCtxCommand {
     $request->setStatusDone;
 }
 
-sub _defaultStreamingSource {
-    return 'qobuz'    if Slim::Utils::PluginManager->isEnabled('Plugins::Qobuz::Plugin');
-    return 'bandcamp' if Slim::Utils::PluginManager->isEnabled('Plugins::Bandcamp::Plugin');
-    return 'qobuz';
+# Fetch a Tidal album's artist from its tracks (Tidal's getAlbum → albumTracks → each
+# rendered track carries line2 = artist name) and backfill it onto the saved record.
+# Async / best-effort; guarded so a Tidal API hiccup can never break the add.
+sub _backfillTidalArtist {
+    my ($client, $recId, $albumId) = @_;
+    return unless $client && $recId && defined $albumId && length $albumId;
+    return unless Plugins::TIDAL::Plugin->can('getAlbum');
+    eval {
+        Plugins::TIDAL::Plugin::getAlbum($client, sub {
+            my $res   = shift;
+            my $items = (ref $res eq 'HASH') ? $res->{items} : $res;
+            my $first = (ref $items eq 'ARRAY') ? $items->[0] : undef;
+            # The album artist is the tracks' line2 (or a nested artist->{name}).
+            my $artist = $first && (
+                (defined $first->{line2} && !ref $first->{line2}) ? $first->{line2}
+              : (ref $first->{artist} eq 'HASH') ? $first->{artist}{name}
+              : undef );
+            return unless defined $artist && length $artist;
+            Plugins::ListenLater::DB::updateArtist($recId, $artist);
+            $log->info("LL: backfilled Tidal artist '$artist' onto rec $recId");
+        }, {}, { id => $albumId });
+        1;
+    } or $log->warn("LL: Tidal artist backfill failed: $@");
+    return;
 }
+
 
 sub _removeCommand {
     my $request = shift;

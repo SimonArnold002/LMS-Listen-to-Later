@@ -83,7 +83,7 @@ CREATE TABLE IF NOT EXISTS albums (
     artwork     TEXT,
     ref_kind    TEXT,                                -- 'album_id' | 'url' | 'passthrough'
     ref_json    TEXT,                                -- JSON: { album_id, url, passthrough, _svc }
-    dedupe_key  TEXT    NOT NULL,                     -- normalised source|artist|album
+    dedupe_key  TEXT    NOT NULL,                     -- normalised artist|album|year
     added_at    INTEGER,
     played_at   INTEGER,
     play_count  INTEGER NOT NULL DEFAULT 0,
@@ -94,6 +94,13 @@ SQL
     $h->do('CREATE INDEX IF NOT EXISTS idx_albums_status ON albums(status)');
     # Rebrand: the "To Buy" list status was 'tobuy' before it became "Wish List".
     $h->do("UPDATE albums SET status = 'wishlist' WHERE status = 'tobuy'");
+    # 0.1.43: the dedupe key gained a trailing "|<year>" so same-title different-year
+    # albums can both be saved. Upgrade existing 1-pipe keys in place. Idempotent — a
+    # migrated key has two pipes so it's skipped; the normalised parts never contain a
+    # pipe, so a 1-pipe key is exactly the old format. Keeps existing rows dedup-stable
+    # and keeps Played's artist|album-prefix lookup matching them.
+    $h->do("UPDATE albums SET dedupe_key = dedupe_key || '|' || COALESCE(CAST(year AS TEXT), '')
+            WHERE dedupe_key NOT LIKE '%|%|%'");
     return;
 }
 
@@ -112,9 +119,16 @@ sub _norm {
     return $s;
 }
 
+# The dedupe key is source-agnostic (source is its own column) and includes the release
+# YEAR, so two same-artist/same-title albums from different years — e.g. Chanel Beads'
+# 2024 and 2026 "Your Day Will Come", titled identically — are DISTINCT saves rather than
+# one blocking the other. The album title still keeps its "(Deluxe)"/"(LP4)" qualifiers
+# (see _norm), which already separated differently-titled editions; the year separates
+# the identically-titled ones. Year is the 4-digit release year, or '' when unknown.
 sub dedupeKey {
-    my ($artist, $album) = @_;
-    return _norm($artist) . '|' . _norm($album);
+    my ($artist, $album, $year) = @_;
+    my $yr = (defined $year && $year =~ /(\d{4})/) ? $1 : '';
+    return _norm($artist) . '|' . _norm($album) . '|' . $yr;
 }
 
 sub _rowToHash {
@@ -137,7 +151,7 @@ sub add {
     $status = 'later' unless defined $status && $status =~ /^(?:later|wishlist)$/;
 
     my $source = $rec->{source} or return (undef, 0, undef);
-    my $key    = dedupeKey($rec->{artist}, $rec->{album_title});
+    my $key    = dedupeKey($rec->{artist}, $rec->{album_title}, $rec->{year});
 
     # Block duplicates across EVERY source, not just the same one: the same album
     # saved from a different streaming service (or the library) is still the same
@@ -169,6 +183,23 @@ sub get {
     return _rowToHash($row);
 }
 
+# Backfill the artist on an existing row (and recompute its dedupe_key, which now includes
+# the artist — so Played's artist|album lookup and future dedupe both work). Used when a
+# service supplies no artist at add time (Tidal) and it's fetched from the album afterwards.
+# Won't clobber an existing artist. Eval-guarded: recomputing the key could in principle hit
+# the UNIQUE(source,dedupe_key) constraint (a twin already stored with the artist) — leave
+# the row as-is if so.
+sub updateArtist {
+    my ($id, $artist) = @_;
+    return unless $id && defined $artist && length $artist;
+    my $rec = get($id) or return;
+    return if defined $rec->{artist} && length $rec->{artist};   # don't overwrite a real artist
+    my $key = dedupeKey($artist, $rec->{album_title}, $rec->{year});
+    eval { dbh()->do('UPDATE albums SET artist = ?, dedupe_key = ? WHERE id = ?', undef, $artist, $key, $id); 1 }
+        or $log->warn("ListenLater: updateArtist($id) failed: $@");
+    return;
+}
+
 # Persist a resolved value into the row's ref_json (e.g. a Bandcamp purchase URL
 # discovered on first open), so later lookups are instant. Merges into existing ref.
 sub setRefValue {
@@ -181,16 +212,25 @@ sub setRefValue {
     return;
 }
 
-sub findByKey {
-    my ($source, $key) = @_;
+# Find a saved album by artist+album REGARDLESS of year — the Played detector's lookup.
+# The dedupe key now carries the year, but a playing streaming track can't be trusted to
+# report the same year (or any), so Played matches on the artist|album prefix of the key
+# instead. The normalised parts contain only [a-z0-9 ], so they carry no LIKE
+# metacharacters (no ESCAPE needed). If two same-title different-year albums are both
+# saved, the lower id wins — Played can't tell them apart from streaming track metadata
+# alone (an accepted edge case; adding both is the point of the year in the key).
+sub findByArtistAlbum {
+    my ($source, $artist, $album) = @_;
+    my $prefix = _norm($artist) . '|' . _norm($album) . '|';
     my $row = dbh()->selectrow_hashref(
-        'SELECT * FROM albums WHERE source = ? AND dedupe_key = ?', undef, $source, $key);
+        'SELECT * FROM albums WHERE source = ? AND dedupe_key LIKE ? ORDER BY id LIMIT 1',
+        undef, $source, $prefix . '%');
     return _rowToHash($row);
 }
 
-# Like findByKey but across EVERY source — the same album from a different service
-# shares the same dedupe_key, so this is how add() spots a cross-service duplicate.
-# Returns the earliest-added match (lowest id) when more than one exists.
+# Across EVERY source — the same album saved from a different service shares the same
+# dedupe_key, so this is how add() spots a cross-service duplicate. Returns the
+# earliest-added match (lowest id) when more than one exists.
 sub findAnyByKey {
     my ($key) = @_;
     my $row = dbh()->selectrow_hashref(

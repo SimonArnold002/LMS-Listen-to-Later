@@ -53,6 +53,22 @@ sub sourceFromImage {
     return '';
 }
 
+# Recover the Qobuz album id from its cover URL. Qobuz browse rows carry NO
+# favorites_url / album id, but they DO carry a cover whose filename IS the album id:
+#   …/static.qobuz.com/images/covers/<xx>/<yy>/<ALBUMID>_<size>.jpg
+# (the <xx>/<yy> path is even derived from the id's last chars). The url usually arrives
+# via the LMS image proxy, url-encoded, so unescape first. Recovering the id lets us
+# replay the EXACT album Qobuz was showing — by id, no artist/title search (which can miss
+# a specific same-titled edition, e.g. "American Football (LP2)"). Returns the id or undef.
+sub qobuzAlbumIdFromImage {
+    my ($img) = @_;
+    return undef unless defined $img && length $img;
+    require URI::Escape;
+    my $u = URI::Escape::uri_unescape($img);
+    return $1 if $u =~ m{static\.qobuz\.com/images/covers/[^/]+/[^/]+/([A-Za-z0-9]+)_\d+\.[a-z0-9]+}i;
+    return undef;
+}
+
 # ---------------------------------------------------------------------------
 # Capture from a TrackInfo context (works for local AND remote tracks)
 #   args mirror a TrackInfo provider: ($client, $url, $track, $remoteMeta)
@@ -325,9 +341,17 @@ sub _streamingAlbumNode {
 sub _searchService {
     my ($client, $source, $rec, $cb) = @_;
 
-    my $artist = $rec->{artist} // '';
-    my $album  = $rec->{album_title} // '';
-    my $query  = _norm("$artist $album");
+    my $artist  = $rec->{artist} // '';
+    my $album   = $rec->{album_title} // '';
+    my $recYear = ($rec->{year} && $rec->{year} =~ /(\d{4})/) ? $1 : '';
+    my $query   = _norm("$artist $album");   # Bandcamp combined query (its recall needs the album title)
+    # Qobuz/Tidal: search the RAW artist only and filter by title locally. Folding
+    # "artist album" into one normalised query made the service's own fuzzy search
+    # rank/drop the target (the lesson the sibling ListenBrainz plugin learned); an
+    # artist-only search returns the discography so the year/title tiering below can pick
+    # the right same-named release. Octet-encode for the URI layer (a wide-char query warns).
+    my $artistQuery = $artist;
+    utf8::encode($artistQuery) if utf8::is_utf8($artistQuery);
 
     if ($source eq 'qobuz' && Plugins::Qobuz::Plugin->can('getAPIHandler')
                           && Plugins::Qobuz::Plugin->can('_albumItem')) {
@@ -335,14 +359,20 @@ sub _searchService {
         return $cb->(_noMatch($client)) unless $api;
         $api->search(sub {
             my $res = shift;
-            my @out;
+            my @cand;
             for my $a (@{ ($res && $res->{albums} && $res->{albums}{items}) || [] }) {
                 my $candArtist = ref $a->{artist} eq 'HASH' ? $a->{artist}{name} : '';
                 next unless _albumMatches(_norm($artist), _norm($album), $candArtist, $a->{title});
-                push @out, Plugins::Qobuz::Plugin::_albumItem($client, $a);
+                my $item = Plugins::Qobuz::Plugin::_albumItem($client, $a);
+                # Raw date field first; fall back to the year the renderer already shows on
+                # the item (e.g. "… (2026)") so we don't depend on the exact Qobuz key name.
+                my $cy = _yearOf($a->{release_date_original} // $a->{release_date_stream}
+                              // $a->{release_date_download} // $a->{year})
+                      || _yearOf($item->{name}) || _yearOf($item->{line1}) || _yearOf($item->{line2});
+                push @cand, [ $item, $a->{title}, $cy ];
             }
-            $cb->(@out ? \@out : _noMatch($client));
-        }, lc($query), 'albums');
+            $cb->(_bestMatches(\@cand, $album, $recYear) || _noMatch($client));
+        }, lc($artistQuery), 'albums');
         return;
     }
 
@@ -381,16 +411,19 @@ sub _searchService {
         return $cb->(_noMatch($client)) unless $api;
         $api->search(sub {
             my $albums = shift;
-            my @out;
+            my @cand;
             for my $a (@{ $albums || [] }) {
                 next unless ref $a eq 'HASH';
                 my $ar = $a->{artist} || ($a->{artists} && $a->{artists}[0]) || {};
                 my $candArtist = ref $ar eq 'HASH' ? $ar->{name} : '';
                 next unless _albumMatches(_norm($artist), _norm($album), $candArtist, $a->{title});
-                push @out, Plugins::TIDAL::Plugin::_renderAlbum($a);
+                my $item = Plugins::TIDAL::Plugin::_renderAlbum($a);
+                my $cy = _yearOf($a->{releaseDate} // $a->{year})
+                      || _yearOf($item->{name}) || _yearOf($item->{line1}) || _yearOf($item->{line2});
+                push @cand, [ $item, $a->{title}, $cy ];
             }
-            $cb->(@out ? \@out : _noMatch($client));
-        }, { type => 'albums', search => $query, limit => 20 });
+            $cb->(_bestMatches(\@cand, $album, $recYear) || _noMatch($client));
+        }, { type => 'albums', search => $artistQuery, limit => 20 });
         return;
     }
 
@@ -489,6 +522,54 @@ sub _artistMatch {
         return 0 unless $has{$w};
     }
     return 1;
+}
+
+# From the base-title-matched candidates, return the best-disambiguated subset as an
+# arrayref of playable nodes (undef if empty). Each candidate is [ $item, $title, $year ].
+# Tiers, best first: exact full title (keeps the "(LP4)" distinguisher) AND matching
+# year; then matching year; then exact full title; then everything (today's behaviour).
+# This is what stops a same-base-title release replaying the wrong album — "American
+# Football (LP4)" resolving to the 1999 "American Football", or one of two same-titled
+# "Your Day Will Come"s to the wrong year — which _norm (it strips ALL parens) can't tell
+# apart. The distinguishing full title and the year are both already on the saved record.
+sub _bestMatches {
+    my ($cands, $album, $recYear) = @_;
+    return undef unless $cands && @$cands;
+    my $want = _normStrict($album);
+    my (@t1, @t2, @t3, @t4);
+    for my $c (@$cands) {
+        my ($item, $title, $cy) = @$c;
+        my $te = (length $want && _normStrict($title) eq $want) ? 1 : 0;
+        my $ym = ($recYear && $cy && $cy eq $recYear) ? 1 : 0;
+        if    ($te && $ym) { push @t1, $item }
+        elsif ($ym)        { push @t2, $item }
+        elsif ($te)        { push @t3, $item }
+        else               { push @t4, $item }
+    }
+    my $best = @t1 ? \@t1 : @t2 ? \@t2 : @t3 ? \@t3 : \@t4;
+    return @$best ? $best : undef;
+}
+
+# Extract a plausible release year (19xx/20xx) from a date string (best-effort; '' if
+# none). The year-anchored, boundary-bounded pattern ignores an epoch timestamp like
+# "released_at" (a long digit run has no 4-digit year at a word boundary), so only real
+# "YYYY-MM-DD"-style dates yield a year.
+sub _yearOf {
+    my ($v) = @_;
+    return '' unless defined $v && !ref $v;
+    return $1 if $v =~ /\b((?:19|20)\d{2})\b/;
+    return '';
+}
+
+# Like _norm but KEEPS distinguishing "(...)" content (e.g. "(LP4)") as words — only
+# quality/format qualifiers are dropped — so replay can tell same-base-title releases
+# apart. (_norm strips ALL parens: right for the fuzzy title GATE, but it collapses these.)
+sub _normStrict {
+    my $s = lc($_[0] // '');
+    $s =~ s/\((?:hi-res[^)]*|explicit|mono|stereo|album|track|remaster(?:ed)?[^)]*|deluxe[^)]*)\)//g;
+    $s =~ s/[^a-z0-9]+/ /g;
+    $s =~ s/^\s+|\s+$//g;
+    return $s;
 }
 
 1;

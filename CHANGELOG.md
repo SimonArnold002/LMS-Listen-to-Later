@@ -1,5 +1,80 @@
 # Changelog
 
+## 0.1.54 — Remove the dead "not supported" reject message
+
+### Changed
+- **The reject of an unplayable add is now silent.** Earlier versions tried to show a "Can't save — this service isn't supported" message on reject, but Material never rendered it: a server-side `showBriefly` reaches a physical player's display only, never the web UI, and Material's only feedback hook for a custom-action/menu command is a generic "'…' failed" snackbar whose text can't be set. So the message could never appear where it was needed. The reject-toast code (`showBriefly` + the `PLUGIN_LL_UNSUPPORTED` string) has been removed as dead code. The gate itself is unchanged — nothing unplayable is stored; the add is simply refused without a popup. (The pre-existing "Added" confirmation toast is kept: it still shows on hardware player displays.)
+
+## 0.1.53 — Fix: unidentifiable items (e.g. ListenBrainz playlists) saved as empty albums
+
+### Fixed
+- **Adding something we can't identify — like a ListenBrainz "Created for You" playlist — no longer stores an empty, unplayable row.** Those rows carry no play URL, a plugin image (not a service cover), and a service id that isn't a real service, so the add code used to fall back to a default of "Qobuz" and save an empty album. It now leaves the source unset and the add is rejected with the "not supported" message, exactly like an unsupported service. A genuine streaming album with a real service cover (e.g. from a home shelf) is unaffected — it's still identified from the cover and saved normally. (Full playlist support would be a much larger feature and isn't planned; see below.)
+
+### Note
+- Any empty rows already saved this way can be removed from the list via the row's "…" → Remove.
+
+## 0.1.52 — Fix: "Add" missing on Qobuz/Tidal/Bandcamp/ListenBrainz after the 0.1.51 cleanup
+
+### Fixed
+- **"Add to Listen Later" was gone from every supported streaming service's browse menus.** The 0.1.46–0.1.50 experiments had written per-service categories (`qobuz-album`, `tidal-album`, `bandcamp-album`, `listenbrainzfreshreleases-album`, …) into Material's shared `actions.json`. 0.1.51 stopped *writing* them but never *deleted* them — and that file survives plugin updates, so they lingered as **empty** categories. An empty `qobuz-album` takes precedence over the generic `online-album`, so it silently suppressed "Add" on exactly the services we support. Now, on every write, any stale empty per-service category we no longer use is deleted, so those services fall back to the populated `online-*` and show "Add" again. (Verified: no other plugin writes these, so the cleanup only removes our own leftovers.)
+
+## 0.1.51 — Reject unplayable adds instead of hiding the button
+
+### Changed
+- **An album from a service we can't play back is now rejected at add time, with a clear "Can't save — this service isn't supported" message — instead of being saved and only failing later with "Could not find this album to play".** The gate is simple and reliable: we save only from the local library and services with a real replay adapter (Qobuz, Bandcamp, Tidal). Everything else — Deezer, Spotify, BBC Sounds, internet radio, anything unsupported — is refused up front. (The test is adapter support, *not* whether a link was supplied: Deezer sends a valid `deezer://album:<id>` and still can't play, because there's no Deezer adapter.)
+- **Removed all the per-service "Add"-button scoping** added in 0.1.46–0.1.50 (the scheme filter, the app/radio-menu blocklist enumeration, the home-shelf suppression attempts). Those fought Material's custom-action mechanism — which is unreliable on home shelves (leftover view state) and can't be scoped per-shelf, because Material fetches all home shelves in a single call (this has always been the case). The add-time rejection makes all of that unnecessary: the "Add" button can appear anywhere, but nothing unplayable ever enters a list, so the button is a harmless no-op on unsupported services. Much simpler, and reliable.
+
+## 0.1.50 — "Add" scoped to supported services by reading the server's own app list (removed in 0.1.51)
+
+### Changed
+- **"Add to Listen Later"/"Wish List" now appears only on services we can replay — worked out from *your* server's installed apps, not a hardcoded list.** The play-URL-scheme approach in 0.1.49 was rolled back: ListenBrainz Fresh Releases rows (and Material home-shelf cards) carry no `favorites_url`, so the scheme filter had nothing to match and showed every scheme's entry at once (the duplicate "Add" rows). Instead, on startup the plugin reads the server's own **app gallery and radio menus** and suppresses "Add" on the browse rows of every service that isn't one we support (Qobuz, Bandcamp, Tidal, ListenBrainz Fresh Releases). Because it reads the live menus, it adapts to whatever each user has installed — Deezer, Spotify, Amazon, BBC Sounds, Radio Paradise, TuneIn/internet radio, anything — with nothing to maintain. Supported services, the home-page shelves, and ListenBrainz keep "Add" (the generic `online-*` stays populated for the shelf cards, which carry no command of their own). The TrackInfo "…" menu keeps its own allowlist (library + Qobuz/Bandcamp/Tidal).
+
+### Known gaps
+- Material's **global search** puts every service's results under one `globalsearch` command, so it can't be scoped per-service — "Add" still appears there for unsupported services (blocking it would also remove it for Qobuz/Tidal). Left as-is.
+- Home-shelf cards of unsupported services can still show "Add" (they carry no command or URL, so they can't be scoped) — a Material limitation.
+
+## 0.1.49 — "Add" gated by play-URL scheme, not a service blocklist (rolled back in 0.1.50)
+
+### Changed
+- **"Add to Listen Later"/"Wish List" now shows only on services we can replay, decided by the item's play-URL scheme — no more per-service blocklist.** Blocking services one by one (Deezer, Spotify, BBC Sounds, Radio Paradise, and endless internet-radio stations) was never going to scale. Instead, the streaming `online-*` custom actions carry Material's per-action `filter`, so "Add" appears only when an item's `favorites_url` begins with a supported scheme (`qobuz://`, `bandcamp://`, `tidal://`). Everything else — Spotify, BBC Sounds, Radio Paradise, internet radio, anything new — is excluded automatically with nothing to maintain, and ListenBrainz Fresh Releases rows keep "Add" for free (their favurl *is* `qobuz://…`). Qobuz/Bandcamp/Tidal also get their own per-command category so their no-favurl "New Releases" rows still show a single "Add". The home-page shelves are unaffected (the generic `online-*` stays populated, which is what feeds the shelf cards). The TrackInfo "…" menu uses the same allowlist (library + Qobuz/Bandcamp/Tidal). Stale `deezer-*` entries from 0.1.48 are cleaned up on start. Adding a new service later is: an adapter in `Sources.pm` + its scheme in the list.
+
+## 0.1.48 — Don't clobber other plugins' actions.json entries
+
+### Fixed
+- **Suppressing "Add" on a blocked service no longer overwrites another plugin's custom actions for that service.** `actions.json` is shared with Material and every other plugin; the 0.1.47 block wrote an *empty* `<service>-album`/`-track` category with `=`, which would wipe any entry another plugin/user had put there. Now uses `||=` — it only creates the empty category when none exists, so our Add stays hidden (a defined category, even someone else's, overrides the generic `online-*`) while their entries are preserved. Our own `listenlater-*`/`LLHome-*` namespaces still reset fully.
+
+## 0.1.47 — Hide "Add" on unsupported services (e.g. Deezer) without breaking home shelves
+
+### Changed
+- **No "Add to Listen Later"/"Add to Wish List" on streaming services we don't support yet (e.g. Deezer).** It was offering an add there that stored a record which could never play. Suppressed on both surfaces it appears: Material's browse "…" action and the TrackInfo "…" provider. Implemented as a blocklist (`@BLOCKED_ONLINE`, seeded with `deezer`): for each blocked service we write an *empty* custom-action category that overrides Material's generic `online-*` for that service only. Deliberately a blocklist and **not** an allowlist — an allowlist has to stop populating the generic `online-*`, and the **home-page shelf cards depend on `online-*`** (they carry no per-service command), so that route made "Add" disappear from every home shelf. Keeping `online-*` populated leaves the home shelves and all supported services working, while Deezer alone is hidden.
+
+### Note
+- 0.1.46 shipped the allowlist version of this and regressed the home shelves; 0.1.47 supersedes it.
+
+## 0.1.45 — Tidal adds get their artist (fetched from the album in the background)
+
+### Fixed
+- **An album added straight from the Tidal plugin now gets its artist.** Tidal browse rows send no artist (`$ARTISTNAME` empty — confirmed in the add log) and, unlike Qobuz, the Tidal cover URL is a random UUID with no artist/id to recover — so the saved record showed the album with no artist and never auto-moved to Played. Replay was already correct (the Tidal favurl carries `tidal://album:<id>`). Now, right after the add, the album's artist is fetched from its tracks in the background (Tidal's own `getAlbum`) and backfilled onto the record (`DB::updateArtist`, which also recomputes the dedupe key so Played's artist+album lookup matches). Fire-and-forget and fully guarded — a Tidal API hiccup can't affect the add. The artist appears on the row a moment after adding; **re-add** any Tidal album saved before this build to fill it in.
+- Confirmed adds from the **ListenBrainz Fresh Releases** plugin already carry the artist (and year) — its match rows pack them into the favurl (`&a=`/`&y=`), verified end to end (`…qobuz://album:…&a=Temples&y=2026`).
+
+## 0.1.44 — Qobuz albums replay by their exact id (recovered from the cover), no search
+
+### Fixed
+- **An album added straight from the Qobuz plugin now replays the exact album, with no search step.** Qobuz browse rows carry no `favorites_url` and no album id (confirmed: every direct-Qobuz add arrives with `favurl=` empty, `albumid=(undef)`), so replay had to search the service by artist+title — which could miss a specific same-titled edition, e.g. "American Football (LP2) (2016)" came up empty even though the album plays fine in Qobuz. But the Qobuz **cover URL embeds the album id** as its filename (`…/covers/xx/yy/<ALBUMID>_600.jpg`), so `_addCtxCommand` now recovers the id from the cover (`Sources::qobuzAlbumIdFromImage`) and stores it — replay goes straight through Qobuz's own album by id, exact, no search. The artist+title search (with the 0.1.42 year/title ranking) remains only as a fallback for records with no recoverable id. **Re-add** any Qobuz album that was saved before this build to give it the id.
+
+## 0.1.43 — Same-titled albums from different years can both be saved
+
+### Fixed
+- **Two albums with the same artist and the same title but different release years can now both be added** — previously the second was silently dropped as a duplicate (e.g. Chanel Beads' 2024 and 2026 "Your Day Will Come", which share an identical title so nothing but the year distinguished them). The dedupe key is now `artist|album|year` (was `artist|album`). Existing saves are migrated in place (their key gains a trailing `|<year>`), so nothing already stored is affected. Albums whose titles already differed — including "(LP2)"/"(LP4)"/"(Deluxe)" editions — were never blocked and are unchanged.
+- **Played detection is unaffected by the key change.** A playing streaming track can't be relied on to report the album's year, so the Played matcher now looks up the saved album by its `artist|album` prefix (year-agnostic) instead of the full key. (If two same-title different-year albums are both saved, a play attributes to the earlier-added one — streaming track metadata can't tell them apart; adding both is the point of the fix.)
+- **Albums added from the ListenBrainz Fresh Releases plugin now carry their year** (plugin 0.9.59+ packs it into the favurl as `&y=`), so two same-titled LBF adds also save separately rather than one blocking the other. Older LBF builds send no year; those adds dedupe on `artist|album|` (empty year) as before.
+
+## 0.1.42 — Right album on replay for same-titled releases; keep the artist on ListenBrainz adds
+
+### Fixed
+- **A streaming album saved directly from Qobuz/Tidal no longer replays the wrong same-titled release.** These browse rows carry no album id, so Listen Later replays them by searching the service for the artist + album and matching the title. The matcher normalises the title, which strips distinguishing qualifiers like `(LP4)` **and** the year — so "American Football (LP4) (2026)" matched (and played) the 1999 self-titled "American Football", and one of two same-named "Your Day Will Come"s resolved to the wrong year. The replay search now (1) searches the **artist only** and filters titles locally (better recall — the combined query made the service's own search rank/drop the target), and (2) ranks the candidates: an exact full-title match that **keeps** the `(LP4)` distinguisher **and** matches the saved year wins, then a year match, then a full-title match, then today's base-title match. The distinguishing title and the year are already stored on the record — they were just being discarded at match time. Applies to Qobuz and Tidal (Bandcamp already replays by its captured album id).
+- **Albums added from the ListenBrainz Fresh Releases plugin now keep their artist.** Material sends those matched rows no artist (the row thumbnail is the streaming-service logo, and the subtitle isn't mapped), so the saved record had a blank artist — which meant it never auto-moved to **Played** (Played matching keys on source + artist + album). ListenBrainz Fresh Releases 0.9.58+ now packs the release artist into the favurl as a private `&a=` param (same handshake as the existing `?cover=`/`?b=`); Listen Later reads it as a fallback when the artist is empty, then strips it so the `album:<id>` logic sees a clean URL. Needs the plugin's 0.9.58 build; older saves can be removed and re-added to pick up the artist.
+
 ## 0.1.41 — Buy on Bandcamp opens in one tap when the URL is known
 
 ### Changed
@@ -77,7 +152,7 @@ Intermediate iterations of the Bandcamp page-URL interop work, all **superseded 
 - **The "Add to Listen Later" / "Add to Wish List" actions on a streaming service's browse list now identify the service via Material's `$SERVICE` variable** — the clean mechanism in the upstream Material change ([PR #1235](https://github.com/CDrummond/lms-material/pull/1235), now merged), replacing the earlier internal workaround.
 
 ### Compatibility
-- Adding directly from a **streaming service's browse list** requires a Material build that includes the merged custom-actions-on-streaming feature (the next Material release). On Material without it, that one entry simply doesn't appear; every other way to add (the album/track "…" menu, library, etc.) is unaffected.
+- Adding directly from a **streaming service's browse list** requires the merged custom-actions-on-streaming feature, which ships in **Material 6.4.4 and later**. On older Material that one entry simply doesn't appear; every other way to add (the album/track "…" menu, library, etc.) is unaffected.
 
 ## 0.1.27 — "More info" points to the docs page
 
