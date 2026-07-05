@@ -135,3 +135,15 @@ PLUGIN_LL_MATERIAL_ACTION
 
 PLUGIN_LL_MATERIAL_ACTION_DESC
 	EN	Adds an "Add to Listen Later" entry to Material Skin's album, track and playlist context menus (including streaming services like Qobuz, whose own menus can't otherwise be extended). Writes to Material's actions.json. Takes effect after the next restart.
+
+PLUGIN_LL_DEBUG_LOG
+	EN	Debug logging
+
+PLUGIN_LL_DEBUG_LOG_DESC
+	EN	Writes detailed diagnostics about the Material context-menu wiring — the detected Material Skin version, whether streaming "Add" is supported (needs Material 6.4.4+), and which services show or hide the entry. When on, the latest report is shown in the box below (and also written to the server log at WARN level). Turn this on if "Add to Listen Later" is missing on a streaming service (Tidal, ListenBrainz, etc.). Leave off in normal use.
+
+PLUGIN_LL_DEBUG_SNAPSHOT
+	EN	Diagnostics report
+
+PLUGIN_LL_DEBUG_SNAPSHOT_DESC
+	EN	The result of the last check (refreshed each time you save this page). Click the box to select all, then copy it and send it over — no need to dig through the server log.

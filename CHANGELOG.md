@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.1.59 — Debug logging for the Material context-menu wiring
+
+### Added
+- **A "Debug logging" setting** (Settings → Material Skin) for diagnosing "Add to Listen Later is missing on a streaming service (Tidal / ListenBrainz / …)". When on, the plugin runs a check every time it (re)writes Material's custom-actions file and shows the report **right on the settings page** in a copy-paste box — click it to select all, copy, and send it over; no need to dig through the server log (it's written there too, at WARN level). The report shows the detected **Material Skin version** and whether streaming "Add" is even supported on it (needs **Material 6.4.4+**; below that, streaming rows get no "Add" and only the local library works), whether the `online-album`/`online-track` categories are populated, any **foreign/leftover per-service category that would hide "Add"** on one service, and a per-installed-service verdict of "Add shown / hidden / not supported". The report refreshes each time you save the settings page. Leave the setting off in normal use.
+
 ## 0.1.58 — Code-review fixes (no user-facing feature change)
 
 ### Fixed

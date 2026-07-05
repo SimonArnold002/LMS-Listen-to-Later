@@ -5,6 +5,7 @@ use base qw(Slim::Web::Settings);
 
 use Slim::Utils::Prefs;
 use Slim::Utils::Log;
+use Slim::Utils::PluginManager;
 
 my $prefs = preferences('plugin.listenlater');
 my $log   = logger('plugin.listenlater');
@@ -20,7 +21,7 @@ sub page {
 sub prefs {
     return ($prefs, qw(
         sort played_threshold streaming_min_tracks watch_outside material_action
-        played_retention_days
+        played_retention_days debug_log
     ));
 }
 
@@ -48,8 +49,31 @@ sub handler {
         $ret = 3650 if $ret > 3650;
         $params->{pref_played_retention_days} = $ret + 0;
 
+        # Persist the two Material toggles straight from the form NOW (SUPER::handler saves
+        # them too, but only after it has rendered the page). We need them live so the
+        # regenerate below reflects the just-chosen values, and the fresh snapshot is in the
+        # pref before the template is rendered in this same request.
+        $prefs->set('material_action', $params->{pref_material_action} ? 1 : 0);
+        $prefs->set('debug_log',       $params->{pref_debug_log}       ? 1 : 0);
+
+        # Rewrite Material's actions.json now so the diagnostics snapshot shown on the page
+        # reflects the current state (otherwise the user would enable debug logging, save,
+        # and see nothing until the next restart). _writeMaterialActions writes the snapshot
+        # pref when debug_log is on. Guarded exactly like postinitPlugin — only touch the
+        # shared file when the feature is on and Material is installed.
+        if ( $prefs->get('debug_log')
+          && $prefs->get('material_action')
+          && Slim::Utils::PluginManager->isEnabled('Plugins::MaterialSkin::Plugin') ) {
+            eval { Plugins::ListenLater::Plugin::_writeMaterialActions(); 1 }
+                or $log->error("LL: settings-page diagnostics rewrite failed: $@");
+        }
+
         $log->info('Listen Later settings saved');
     }
+
+    # Hand the latest diagnostics snapshot to the template (copy-paste textarea). Set before
+    # SUPER::handler renders, so it's available whether this is a save or a plain page load.
+    $params->{material_debug_snapshot} = $prefs->get('material_debug_snapshot');
 
     return $class->SUPER::handler($client, $params);
 }

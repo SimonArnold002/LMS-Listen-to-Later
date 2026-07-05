@@ -36,4 +36,14 @@
 <input type="checkbox" name="pref_material_action" value="1" [% IF prefs.material_action %]checked="checked"[% END %]>
 [% END %]
 
+[% WRAPPER setting title="PLUGIN_LL_DEBUG_LOG" desc="PLUGIN_LL_DEBUG_LOG_DESC" %]
+<input type="checkbox" name="pref_debug_log" value="1" [% IF prefs.debug_log %]checked="checked"[% END %]>
+[% END %]
+
+[% IF prefs.debug_log %]
+[% WRAPPER setting title="PLUGIN_LL_DEBUG_SNAPSHOT" desc="PLUGIN_LL_DEBUG_SNAPSHOT_DESC" %]
+<textarea name="ll_debug_snapshot" rows="16" cols="100" readonly="readonly" onclick="this.select()" style="width:100%;font-family:monospace;white-space:pre;">[% material_debug_snapshot | html %]</textarea>
+[% END %]
+[% END %]
+
 [% PROCESS settings/footer.html %]

@@ -93,7 +93,7 @@ Goal: an **"Add to Listen Later"** entry on a streaming **album row while browsi
 5. Remove / Move between sections; persists across `systemctl restart`.
 
 ## Prefs Namespace
-`plugin.listenlater` — sort, played_threshold, streaming_min_tracks, watch_outside, material_action, played_retention_days.
+`plugin.listenlater` — sort, played_threshold, streaming_min_tracks, watch_outside, material_action, played_retention_days, debug_log.
 
 ## Played auto-retention (0.1.17)
 Played albums are auto-removed after `played_retention_days` (default 7; **0 = keep forever**). `DB::purgePlayed($days)` deletes `status='played'` rows with `played_at < now - days*86400` (items moved back to Listen Later (`status='later'`) or to Wish List (`status='wishlist'`) are never purged). `played_at` is set when the album is first marked Played and is **not** refreshed by replaying an already-Played album (Played detection only tracks `status='later'` rows), so the clock runs from that first mark; to restart it, Move the album back to Listen Later and replay it. Scheduled in `Plugin::postinitPlugin` via `Slim::Utils::Timers` — first run ~60s after start, re-armed every 24h (`_purgeTick`). Settings field validates 0–3650.
@@ -460,6 +460,26 @@ The "Add to Listen Later"/"Add to Wish List" custom actions appear on streaming 
   a very slow network the directory can take >60s to load → TuneIn shows "Add" until the next add/restart's write;
   acceptable (and the add is still a harmless reject). Confirmed radio-row suppression itself works — BBC Sounds
   was correctly hidden by 0.1.55, proving the empty-`<cmd>-album` override reaches radio browse rows.
+- **0.1.59** — **`debug_log` pref — diagnostics for "Add missing on a streaming service" reports we can't
+  reproduce on our own box.** A checkbox in Settings → Material Skin (`PLUGIN_LL_DEBUG_LOG`, pref
+  `debug_log`, default off); `_dbg` logs at **WARN** (so it shows regardless of the category's level — INFO
+  is invisible unless the category is at INFO). At the end of every `_writeMaterialActions` (when the pref is
+  on) `_dumpMaterialState` dumps the whole decision surface for the online "Add": the detected Material
+  version via `_materialVersion` (`Plugins::MaterialSkin::Plugin->getPluginVersion`) and whether it's **>=
+  6.4.4** (online custom actions exist — below that, streaming rows get NO Add and only local works, the
+  reported symptom); `online-album`/`online-track` entry counts (empty → no streaming Add anywhere); any
+  **NON-empty `<svc>-album`/`-track`** category, which SHADOWS `online-*` and hides Add on that one service
+  (ours are always empty, so a populated one is foreign/leftover — the thing to look at); the radio/
+  unsupported commands we suppress; and a per-enabled-app verdict (`apps 0 500`) of "Add shown via online-* /
+  HIDDEN by a per-command category / no Add (Material < 6.4.4)". Prime suspects for another user, both
+  invisible from our box: (1) Material older than 6.4.4; (2) a stale app-start-cached `customactions.json`
+  (the file is correct but an open tab shows the old one — hard-refresh once, see 0.1.57). No behaviour
+  change when off. **The report is also surfaced in the Settings page itself** (not just server.log): the
+  accumulated lines are stashed in the `material_debug_snapshot` pref and rendered in a readonly select-all
+  textarea (`PLUGIN_LL_DEBUG_SNAPSHOT`, shown only when `debug_log` is on) so a remote user can copy-paste it
+  without touching the log. `Settings::handler` persists the two Material toggles from the form and re-runs
+  `_writeMaterialActions` on save (guarded on material_action + MaterialSkin, like postinit) so the snapshot
+  reflects the just-saved state, then passes it to the template before SUPER renders.
 - **0.1.57** — **Fix: 0.1.56's deferred write hid TuneIn "Add" in the FILE but not in the live UI — a Material
   load-time cache issue, not a file issue.** Traced end-to-end over HTTP: (1) the served `customactions.json`
   correctly had `music-album`/`news-album`/… = 0 after the +60s deferred pass; (2) `browse-resp.js` L91/685/692

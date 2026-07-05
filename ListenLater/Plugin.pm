@@ -42,7 +42,27 @@ $prefs->init({
     watch_outside        => 1,         # mark Played from plays started outside the plugin
     material_action      => 1,         # add an "Add to Listen Later" entry to Material's context menus
     played_retention_days => 7,        # auto-remove Played albums after N days (0 = keep forever)
+    debug_log            => 0,         # verbose diagnostics for the Material custom-action wiring
+    material_debug_snapshot => '',     # latest debug dump (set by _dumpMaterialState; shown in Settings)
 });
+
+# Verbose diagnostics, gated on the `debug_log` pref so a user can turn them on from
+# Settings, reproduce (e.g. "Add missing on Tidal"), and paste the log — then turn it
+# back off. Logged at WARN so it appears whatever the category's configured level is
+# (INFO lines don't show unless the category is at INFO). See _dumpMaterialState.
+sub _dbg {
+    return unless $prefs->get('debug_log');
+    $log->warn('LL[dbg]: ' . shift);
+}
+
+# The running Material Skin version as an "X.Y.Z" string (undef if unavailable, or a
+# non-numeric dev/test build). The streaming/online "Add" custom action ONLY exists on
+# Material >= 6.4.4 (PR #1235, released there); below that, streaming rows get NO "Add"
+# and only the local library works — exactly the "only working for local library"
+# symptom. This tells us whether the OTHER user's box can render the online action AT ALL.
+sub _materialVersion {
+    return eval { Plugins::MaterialSkin::Plugin->getPluginVersion() };
+}
 
 # Can we actually save AND replay an album from this source? Only the local library and
 # the streaming services with an adapter in Sources.pm (Qobuz/Bandcamp/Tidal, when their
@@ -454,6 +474,113 @@ sub _writeMaterialActions {
 
     _writeMaterialActionsFile($file, $data);
     $log->warn("LL: wrote Material custom actions to $file");
+
+    _dumpMaterialState($file, $data, \@radioCats) if $prefs->get('debug_log');
+    return;
+}
+
+# Diagnostic dump of everything that decides whether "Add to Listen Later" renders on a
+# streaming/online row (Tidal, ListenBrainz Fresh Releases, home shelves). Gated on
+# `debug_log`. Written for the "works for local library only" report we can't reproduce
+# on our own box — the user enables the pref, restarts, browses Tidal/LBF, then pastes
+# the log. The three things that break online "Add", in order of likelihood:
+#   1. Material < 6.4.4          → online custom actions don't exist → local-only.
+#   2. online-album/-track empty → nothing to render on any streaming row.
+#   3. a NON-empty "<svc>-album"  → a leftover/foreign category SHADOWS "online-*" and
+#      hides Add on that one service (Material prefers a present per-command category).
+# (A separate, expected cause the log can't show is Material's app-start cache of
+# customactions.json — if the file below is correct but the UI still lacks Add, it's a
+# stale cached tab; hard-refresh Material once. See CLAUDE.md 0.1.57.)
+sub _dumpMaterialState {
+    my ($file, $data, $radioCats) = @_;
+
+    # Accumulate every line so we can BOTH log it (server.log, tagged LL[dbg]) AND stash the
+    # whole snapshot in a pref, which the Settings page renders in a copy-paste textarea — so
+    # a remote user can hand over the diagnostics without touching server.log. Latest run wins.
+    my @lines;
+    my $emit = sub { my $m = shift; push @lines, $m; _dbg($m); };
+
+    my $ver = _materialVersion();
+    my $online_ok = 0;
+    if (!defined $ver) {
+        # unknown — can't confirm either way
+    } elsif ($ver =~ /^(\d+)\.(\d+)\.(\d+)/) {
+        $online_ok = ( $1 <=> 6 || $2 <=> 4 || $3 <=> 4 ) >= 0 ? 1 : 0;
+    } else {
+        $online_ok = 1;   # dev/test build — assume it carries the feature
+    }
+
+    my $llver = eval {
+        Slim::Utils::PluginManager->dataForPlugin(__PACKAGE__)->{version};
+    };
+    $emit->('==== Listen Later Material diagnostics ('
+        . localtime() . ') ====');
+    $emit->("Listen Later version = " . ($llver // '?'));
+    $emit->("material_action pref = " . ($prefs->get('material_action') ? 'ON' : 'OFF'));
+    $emit->("MaterialSkin enabled = "
+        . (Slim::Utils::PluginManager->isEnabled('Plugins::MaterialSkin::Plugin') ? 'yes' : 'NO'));
+    $emit->("Material version = " . (defined $ver ? $ver : '(unknown)')
+        . " -> online 'Add' supported (>=6.4.4): "
+        . (defined $ver ? ($online_ok ? 'YES' : 'NO — streaming rows get NO Add on this Material; only local works')
+                        : 'UNKNOWN'));
+    $emit->("actions.json = $file");
+
+    # online-* must be populated or NO streaming row shows Add anywhere.
+    for my $c (qw(online-album online-track)) {
+        my $n = ref $data->{$c} eq 'ARRAY' ? scalar @{ $data->{$c} } : -1;
+        $emit->("category '$c' = " . ($n < 0 ? 'MISSING (!)' : "$n entr" . ($n == 1 ? 'y' : 'ies'))
+            . ($n > 0 ? ' — streaming Add active' : ' — streaming Add WILL NOT SHOW'));
+    }
+
+    # Radio browse commands we deliberately suppress Add on (empty <cmd>-album/-track).
+    my @radios = sort keys %{ { map { my $c = $_; ($c =~ s/-(?:album|track)$//r) => 1 } @$radioCats } };
+    $emit->("supported commands (Add kept) = " . join(', ', sort keys %SUPPORTED_CMD));
+    $emit->("radio/unsupported commands suppressed (Add hidden on their browse rows) = "
+        . (@radios ? join(', ', @radios) : '(none)'));
+
+    # Any NON-empty per-command "<svc>-album/-track" category shadows online-* and hides
+    # Add on that service. Ours are always empty; a populated one is foreign/leftover and
+    # is the thing to look at if Add is missing on exactly one service.
+    my @shadow;
+    for my $cat (sort keys %$data) {
+        next unless $cat =~ /^(.+)-(?:album|track)$/;
+        my $svc = $1;
+        next if $svc eq 'online' || $svc eq 'listenlater' || $svc eq 'LLHome';
+        my $n = ref $data->{$cat} eq 'ARRAY' ? scalar @{ $data->{$cat} } : 0;
+        push @shadow, "$cat($n)" if $n > 0;
+    }
+    $emit->(@shadow
+        ? "NON-EMPTY per-service categories that SHADOW online-* (hide Add there): " . join(', ', @shadow)
+        : "no non-empty per-service shadow categories (good — nothing foreign is hiding Add)");
+
+    # Cross-check every installed service against what's written, so the user sees, per
+    # service, whether its browse rows will show Add. Enumerate BOTH menus: streaming apps
+    # live under 'apps', while internet radio AND the sibling ListenBrainz Fresh Releases
+    # ("via LBF") register under 'radios' (menu=>'radios', tag=listenbrainzfreshreleases) —
+    # so a report about "LBF" is only covered if we scan 'radios' too. De-duped by command.
+    my %seen;
+    my $online_pop = ref $data->{'online-album'} eq 'ARRAY' && @{ $data->{'online-album'} };
+    for my $menu (['apps', 'appss_loop'], ['radios', 'radioss_loop']) {
+        my $loop = eval {
+            my $req = Slim::Control::Request::executeRequest(undef, [$menu->[0], 0, 500]);
+            $req ? ($req->getResult($menu->[1]) || []) : [];
+        } || [];
+        for my $a (@$loop) {
+            my $cmd = $a->{cmd} or next;
+            next if $seen{$cmd}++;
+            my $name = $a->{name} // $cmd;
+            my $shadowed = (ref $data->{"$cmd-album"} eq 'ARRAY' && @{ $data->{"$cmd-album"} })
+                || (grep { $_ eq "$cmd-album" } @$radioCats);
+            my $verdict = !$online_ok      ? "no Add (Material < 6.4.4)"
+                        : $shadowed        ? "Add HIDDEN (per-command category present)"
+                        : $online_pop      ? "Add shown (via online-*)"
+                        :                    "no Add (online-* empty)";
+            $emit->("service '$cmd' ($name) [$menu->[0]]: $verdict");
+        }
+    }
+    _dbg('==== end diagnostics ====');
+    $prefs->set('material_debug_snapshot', join("\n", @lines));
+    _dbg('==== end diagnostics ====');
     return;
 }
 
