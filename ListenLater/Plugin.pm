@@ -128,6 +128,13 @@ sub _migrateRebrandPrefs {
 # file, so it sits in the MAIN menu (next to Add to Favourites) rather than buried
 # in the providers' "More" submenu. Local item categories get it directly; the
 # per-app qobuz/bandcamp categories carry it onto streaming pages.
+sub _writeMaterialActionsDeferred {
+    return unless $prefs->get('material_action')
+        && Slim::Utils::PluginManager->isEnabled('Plugins::MaterialSkin::Plugin');
+    eval { _writeMaterialActions(); 1 }
+        or $log->error("LL: deferred Material custom-action write failed: $@");
+}
+
 sub postinitPlugin {
     my $class = shift;
 
@@ -135,6 +142,23 @@ sub postinitPlugin {
       && Slim::Utils::PluginManager->isEnabled('Plugins::MaterialSkin::Plugin') ) {
         eval { _writeMaterialActions(); 1 }
             or $log->error("LL: failed to write Material custom actions: $@");
+
+        # The internet-radio directory (TuneIn's Music/News/Sports/… categories) is
+        # fetched ASYNCHRONOUSLY from mysqueezebox.com and is usually NOT ready at
+        # postinit — so the radio enumeration in _writeMaterialActions above sees only
+        # locally-registered radio plugins (e.g. BBC Sounds) and misses TuneIn, leaving
+        # "Add" on TuneIn station rows. Re-run once the directory has had time to load
+        # so those commands get their suppressing empty categories too. Idempotent —
+        # actions.json is fully rewritten each call.
+        Slim::Utils::Timers::killTimers(undef, \&_writeMaterialActionsDeferred);
+        Slim::Utils::Timers::setTimer(undef, time() + 60, \&_writeMaterialActionsDeferred);
+    }
+    elsif ( Slim::Utils::PluginManager->isEnabled('Plugins::MaterialSkin::Plugin') ) {
+        # Pref is OFF but a previous (enabled) run may have written our actions. Strip
+        # them so turning the toggle off actually removes the "Add" entries instead of
+        # leaving them until the pref is re-enabled.
+        eval { _clearMaterialActions(); 1 }
+            or $log->error("LL: failed to clear Material custom actions: $@");
     }
 
     # Material Skin home-page shelf for the Listen Later list (guarded on the
@@ -176,11 +200,9 @@ sub _materialActionsFile {
     return File::Spec->catfile($dir, 'actions.json');
 }
 
-sub _writeMaterialActions {
-    my $file = _materialActionsFile();
-    my $dir  = File::Spec->catdir(Slim::Utils::Prefs::dir(), 'material-skin');
-    File::Path::make_path($dir) unless -d $dir;
-
+# Read the shared actions.json into a hashref (empty on missing/corrupt).
+sub _readMaterialActions {
+    my ($file) = @_;
     my $data = {};
     if (-e $file) {
         local $/;
@@ -191,6 +213,104 @@ sub _writeMaterialActions {
             $data = {} unless ref $data eq 'HASH';
         }
     }
+    return $data;
+}
+
+# Write atomically: actions.json is SHARED with Material and every other
+# plugin/user custom action, so a truncated write (crash mid-write) would
+# corrupt all of them. Write a temp file then rename() over the original.
+sub _writeMaterialActionsFile {
+    my ($file, $data) = @_;
+    my $tmp = "$file.tmp.$$";
+    open my $fh, '>:raw', $tmp or die "open $tmp: $!";
+    print $fh $JSON->encode($data) or do { close $fh; unlink $tmp; die "write $tmp: $!" };
+    close $fh                      or do {            unlink $tmp; die "close $tmp: $!" };
+    rename($tmp, $file)            or do {            unlink $tmp; die "rename $tmp -> $file: $!" };
+    return;
+}
+
+# Remove every Listen Later custom action from the shared actions.json. Used when the
+# user turns the material_action pref OFF — postinitPlugin then skips the write, so
+# without this our entries (and the empty radio suppressors) would linger and keep
+# showing "Add"/keep suppressing another plugin's online-* fallback. Strips our actions
+# from every category, drops our own + legacy namespaces, then deletes any category WE
+# wrote that is now empty. Only-empty and only-ours, so a third party's entries survive.
+sub _clearMaterialActions {
+    my $file = _materialActionsFile();
+    return unless -e $file;   # nothing ever written
+    my $data = _readMaterialActions($file);
+
+    for my $cat (keys %$data) {
+        next unless ref $data->{$cat} eq 'ARRAY';
+        $data->{$cat} = [ grep { !_isOurAction($_) } @{ $data->{$cat} } ];
+    }
+
+    delete $data->{$_} for qw(
+        listenlater-album listenlater-track listenlater-artist
+        LLHome-album LLHome-track LLHome-artist
+        listentolater-album listentolater-track listentolater-artist
+        LtLHome-album LtLHome-track LtLHome-artist
+    );
+
+    # Delete the categories we populate/suppress once they're empty: our top-level
+    # pairs (album/playlist/online-*) plus any per-command "<cmd>-album/-track/-artist"
+    # radio/scoping suppressor. Guarded on empty so another plugin's real entries stay.
+    my %ourCats = map { $_ => 1 }
+        qw(album album-track playlist playlist-track online-album online-track);
+    for my $cat (keys %$data) {
+        next unless ref $data->{$cat} eq 'ARRAY' && !@{ $data->{$cat} };
+        delete $data->{$cat} if $ourCats{$cat} || $cat =~ /-(?:album|track|artist)$/;
+    }
+
+    _writeMaterialActionsFile($file, $data);
+    $log->warn("LL: cleared Material custom actions from $file");
+    return;
+}
+
+# Commands we can save & replay. A service that also appears under the server's
+# 'radios' menu (e.g. Qobuz) is skipped by _unsupportedRadioCommands so its radio
+# rows keep "Add". BBC Sounds is dual-listed (apps + radios) but unsupported, so
+# it is NOT here and gets blocked wherever it shows.
+my %SUPPORTED_CMD = map { $_ => 1 }
+    qw(qobuz bandcamp tidal listenbrainzfreshreleases listenlater);
+
+# TuneIn's top-level radio categories are fetched ASYNC from mysqueezebox.com, so they
+# aren't in the 'radios' menu when the plugin initialises. But Material reads
+# customactions.json ONCE at app start and browser-caches it (the `?r=` cache-buster is
+# the Material version, not our writes), so a category written LATE (the deferred pass)
+# is missed by any already-loaded tab until a hard refresh. These command names are
+# stable, so seed them at INIT to guarantee the suppressing empty categories exist before
+# Material ever loads the file. Unioned with the live 'radios' enumeration
+# (_unsupportedRadioCommands) so other radio plugins are still covered.
+my @KNOWN_RADIO_CMDS =
+    qw(music news sports talk location language podcast search presets local);
+
+# Radio stations are live streams — never a valid "Listen Later" item. We hide the
+# streaming "Add" on radio BROWSE rows (see _writeMaterialActions) by giving each
+# radio browse command an empty "<cmd>-album"/"-track" category. The command list is
+# read from the server's own 'radios' menu (works with no player; every user installs
+# different radio plugins), minus the ones we actually support. Returns a de-duped list.
+sub _unsupportedRadioCommands {
+    my $req = eval {
+        Slim::Control::Request::executeRequest(undef, [ 'radios', 0, 500 ]);
+    };
+    return () unless $req;
+    my $loop = $req->getResult('radioss_loop') || [];
+    my %cmds;
+    for my $entry (@$loop) {
+        my $cmd = $entry->{cmd} or next;
+        next if $SUPPORTED_CMD{$cmd};
+        $cmds{$cmd} = 1;
+    }
+    return keys %cmds;
+}
+
+sub _writeMaterialActions {
+    my $file = _materialActionsFile();
+    my $dir  = File::Spec->catdir(Slim::Utils::Prefs::dir(), 'material-skin');
+    File::Path::make_path($dir) unless -d $dir;
+
+    my $data = _readMaterialActions($file);
 
     # `lmscommand` must be a FLAT array (verb + tag params); Material substitutes the
     # $VARS from the item and runs it fire-and-forget. $FAVURL carries the item's play
@@ -260,7 +380,18 @@ sub _writeMaterialActions {
     # (listenlater-*/LLHome-*). Only-empty so another plugin's real entries are never touched;
     # no other plugin in this stack writes empty per-command categories (LBF verified), so an
     # empty one is our own cruft. This restores fall-through to the populated "online-*".
-    my %keep = ( map { $_ => 1 } keys %cats,
+    # Radio browse commands we want to suppress "Add" on (see the empty-category
+    # write below). Union the live 'radios' enumeration with the hardcoded TuneIn
+    # seed list (@KNOWN_RADIO_CMDS — present at init even before the async directory
+    # loads), minus any command we actually support. Their "<cmd>-album"/"-track"
+    # keys are exempted from the delete-empties pass below — otherwise the very
+    # empties we write here get deleted again (the 0.1.52 rule: an empty category is
+    # not neutral, it actively suppresses, which is exactly what we want here).
+    my %radioCmd = map { $_ => 1 } _unsupportedRadioCommands(), @KNOWN_RADIO_CMDS;
+    delete @radioCmd{ keys %SUPPORTED_CMD };
+    my @radioCats = map { ("$_-album", "$_-track") } sort keys %radioCmd;
+
+    my %keep = ( map { $_ => 1 } keys %cats, @radioCats,
         qw(listenlater-album listenlater-track listenlater-artist
            LLHome-album LLHome-track LLHome-artist) );
     for my $cat (keys %$data) {
@@ -301,21 +432,27 @@ sub _writeMaterialActions {
         LLHome-album LLHome-track LLHome-artist
     );
 
-    # NB: we deliberately do NOT try to scope "Add" per streaming service here — that's
-    # unreliable (Material home-shelf cards carry no command/favurl and its custom actions
-    # are leftover-view-state flaky) and, worse, unnecessary: the add COMMANDS reject any
-    # source we can't replay (_isReplayableSource), so an unsupported service's "Add" is a
-    # harmless no-op with a clear toast rather than a stored-but-unplayable record.
+    # Hide "Add" on radio BROWSE rows. Radio stations are live streams, never a valid
+    # "Listen Later" item. An empty "<cmd>-album"/"-track" wins over "online-*" so the
+    # action doesn't render on those rows. `||=` (0.1.48): only create when absent — a
+    # "<cmd>-*" namespace isn't ours to reset, so another plugin's real entries survive
+    # (and any present category, ours or theirs, still overrides "online-*" → Add hidden).
+    # These keys are in %keep, so the delete-empties pass above leaves our empties intact.
+    for my $cat (@radioCats) {
+        $data->{$cat} ||= [];
+    }
 
-    # Write atomically: actions.json is SHARED with Material and every other
-    # plugin/user custom action, so a truncated write (crash mid-write) would
-    # corrupt all of them. Write a temp file then rename() over the original.
-    my $tmp = "$file.tmp.$$";
-    open my $fh, '>:raw', $tmp or die "open $tmp: $!";
-    print $fh $JSON->encode($data) or do { close $fh; unlink $tmp; die "write $tmp: $!" };
-    close $fh                      or do {            unlink $tmp; die "close $tmp: $!" };
-    rename($tmp, $file)            or do {            unlink $tmp; die "rename $tmp -> $file: $!" };
+    # NB: apart from the radio-browse block above, we deliberately do NOT scope "Add" per
+    # streaming service — that's unreliable (Material home-shelf cards carry no command/favurl
+    # and its custom actions are leftover-view-state flaky) and unnecessary: the add COMMANDS
+    # reject any source we can't replay (_isReplayableSource), so an unsupported service's
+    # "Add" is a harmless no-op rather than a stored-but-unplayable record. The radio block is
+    # the one exception because radios ARE cleanly command-scoped in the browse menu and are
+    # never legitimately addable. It covers browse rows only; a radio HOME-SHELF card has no
+    # per-command identity (all shelves arrive in one 'material-skin' home-extra call) and
+    # falls back to "online-*", so its Add can't be hidden here — it stays an add-time reject.
 
+    _writeMaterialActionsFile($file, $data);
     $log->warn("LL: wrote Material custom actions to $file");
     return;
 }
@@ -332,7 +469,10 @@ sub _isOurAction {
     return 1 if ref $lc eq 'ARRAY' && $isOurs->($lc->[0]);
     # legacy 0.1.7 format: { command => [...] }
     return 1 if ref $lc eq 'HASH' && ref $lc->{command} eq 'ARRAY' && $isOurs->($lc->{command}[0]);
-    # fallback: our titles (current + pre-rebrand)
+    # fallback: our titles (current + pre-rebrand). ONLY when the entry carries no
+    # lmscommand at all — an entry with its own command whose title happens to match
+    # ours belongs to someone else in this shared file, so never strip that.
+    return 0 if defined $lc;
     my %ours = map { $_ => 1 }
         ('Add to Listen Later', 'Add to Wish List', 'Add to Listen to Later', 'Add to To Buy');
     return 1 if $ours{ $entry->{title} // '' };
@@ -937,6 +1077,14 @@ sub _moveCommand {
     $status = 'later' unless $status =~ /^(?:later|played|wishlist)$/;
     eval { Plugins::ListenLater::DB::setStatus($id, $status); 1 } or $log->error("LL: move failed: $@");
     $request->setStatusDone;
+}
+
+# Tear down the play-detector's subscription on plugin disable/reload (a full server
+# restart clears it anyway, but a plain disable would otherwise leave it subscribed).
+sub shutdownPlugin {
+    eval { Plugins::ListenLater::Played->shutdown; 1 }
+        or $log->error("LL: Played shutdown failed: $@");
+    return;
 }
 
 sub getDisplayName { 'PLUGIN_LL' }

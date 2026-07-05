@@ -1,5 +1,33 @@
 # Changelog
 
+## 0.1.58 — Code-review fixes (no user-facing feature change)
+
+### Fixed
+- **Turning off "Add to Material context menus" now actually removes the entries.** Disabling the setting previously just stopped re-writing Material's custom-actions file, so the "Add to Listen Later"/"Add to Wish List" entries (and the radio suppressors) lingered until the setting was re-enabled. The plugin now strips its own entries from the shared file when the option is off — only its own, so other plugins' actions are untouched.
+- **The play-detector is now unsubscribed on plugin disable/reload**, not just on a full server restart.
+
+### Internal
+- Corrected the Played-retention docs: replaying an already-Played album does **not** reset its removal clock (auto-Played tracking only watches the Listen Later list); move it back to Listen Later and replay to restart the clock.
+- Tightened the Material custom-action cleanup so an entry that merely shares our title but carries its own command is never removed; factored the shared `actions.json` read/write into helpers; removed a dead DB helper and a stale code comment.
+
+## 0.1.57 — Fix: TuneIn "Add" suppression now works without a hard refresh
+
+### Fixed
+- **The 0.1.56 deferred write suppressed "Add" on TuneIn stations in the file, but Material didn't pick it up.** Material reads its custom-actions file only once when the web app starts (and the browser caches it), so a category written ~60s after server startup was missed by any already-open Material tab — "Add" kept showing on TuneIn until a hard refresh. TuneIn's category names are stable, so the plugin now writes their suppressing entries at startup (before Material loads the file), in addition to the live radio-menu scan. BBC Sounds and any other radio plugin are still covered by the scan. After updating you may need to reload Material once (or open it in a private window) to clear the old cached file; from then on it's correct on every restart.
+
+## 0.1.56 — Fix: "Add" still showed on TuneIn radio stations
+
+### Fixed
+- **The 0.1.55 radio block only caught BBC Sounds, not TuneIn (Music/News/Sports/…).** The block reads the server's `radios` menu at startup, but TuneIn's radio directory is fetched asynchronously from mysqueezebox.com and usually isn't ready yet when the plugin initialises — so only locally-registered radio plugins (BBC Sounds) were seen, and TuneIn's categories kept showing "Add". The plugin now re-writes Material's custom actions ~60 seconds after startup, once the radio directory has loaded, so TuneIn's stations get suppressed too. (The write is idempotent, so nothing else is affected.)
+
+## 0.1.55 — Hide "Add" on radio browse rows
+
+### Changed
+- **"Add to Listen Later"/"Add to Wish List" no longer appears on internet-radio browse rows.** Radio stations are live streams, never a valid Listen Later item, so the streaming custom action is now suppressed there. The radio commands are read dynamically from the server's own `radios` menu (so it adapts to whichever radio plugins you have installed), minus any service we actually support — e.g. Qobuz, which is also listed under radios, keeps its "Add". A dual-listed but unsupported service like BBC Sounds is blocked wherever it appears. Mechanism: an empty per-command category (`<cmd>-album`/`-track`) that Material prefers over the generic `online-*`; written non-clobbering (`||=`) so another plugin's entries for the same service are untouched, and exempted from the empty-category cleanup so it isn't deleted (the 0.1.52 rule, used here on purpose).
+
+### Note
+- This covers radio **browse** rows only. A radio card on a Material **home shelf** has no per-command identity (all shelves come in one call) and falls back to the shared `online-*`, so its "Add" can't be hidden this way — but adding it is still refused at add time, so nothing unplayable is ever stored.
+
 ## 0.1.54 — Remove the dead "not supported" reject message
 
 ### Changed

@@ -96,7 +96,7 @@ Goal: an **"Add to Listen Later"** entry on a streaming **album row while browsi
 `plugin.listenlater` — sort, played_threshold, streaming_min_tracks, watch_outside, material_action, played_retention_days.
 
 ## Played auto-retention (0.1.17)
-Played albums are auto-removed after `played_retention_days` (default 7; **0 = keep forever**). `DB::purgePlayed($days)` deletes `status='played'` rows with `played_at < now - days*86400` (items moved back to Listen Later (`status='later'`) or to Wish List (`status='wishlist'`) are never purged; re-playing resets `played_at`). Scheduled in `Plugin::postinitPlugin` via `Slim::Utils::Timers` — first run ~60s after start, re-armed every 24h (`_purgeTick`). Settings field validates 0–3650.
+Played albums are auto-removed after `played_retention_days` (default 7; **0 = keep forever**). `DB::purgePlayed($days)` deletes `status='played'` rows with `played_at < now - days*86400` (items moved back to Listen Later (`status='later'`) or to Wish List (`status='wishlist'`) are never purged). `played_at` is set when the album is first marked Played and is **not** refreshed by replaying an already-Played album (Played detection only tracks `status='later'` rows), so the clock runs from that first mark; to restart it, Move the album back to Listen Later and replay it. Scheduled in `Plugin::postinitPlugin` via `Slim::Utils::Timers` — first run ~60s after start, re-armed every 24h (`_purgeTick`). Settings field validates 0–3650.
 
 ## Streaming replay per service (Sources.pm) — the differences that bite
 Browse rows differ by service, which is why each needs handling (all confirmed from the live `addctx` log + the Tidal/Bandcamp plugin source):
@@ -433,3 +433,49 @@ The "Add to Listen Later"/"Add to Wish List" custom actions appear on streaming 
   unaffected. NB the add commands still pass an explicit `'library'` for real library items, so empty source
   never legitimately means library. (Full playlist SUPPORT was assessed as too much work — LB playlists are
   ListenBrainz recommendation lists resolved track-by-track by LBF, with no service playlist id to replay.)
+- **0.1.55** — **"Add" hidden on internet-radio BROWSE rows — a narrow, deliberate exception to the 0.1.51
+  "don't scope the button" stance.** Radio stations are live streams, never a valid Listen Later item, and —
+  unlike the general per-service scoping that 0.1.51 abandoned — radios ARE cleanly command-scoped in the
+  browse menu, so this one case is worth doing. `_unsupportedRadioCommands` runs
+  `executeRequest(undef, ['radios', 0, 500])` (works with no player), reads each `radioss_loop` entry's `cmd`,
+  and drops any in `%SUPPORTED_CMD` (`qobuz bandcamp tidal listenbrainzfreshreleases listenlater`) — so a
+  service also listed under radios (Qobuz) keeps Add, while a dual-listed but unsupported one (BBC Sounds,
+  under both `apps` and `radios`) is blocked wherever it shows. For each remaining command `_writeMaterialActions`
+  writes an **empty** `<cmd>-album`/`-track` with `||=` (0.1.48 non-clobber — the `<cmd>-*` namespace isn't
+  ours; another plugin's real entries survive and still override `online-*` → Add hidden either way), and adds
+  those keys to `%keep` so the 0.1.52 delete-empties pass leaves them — the one place we WANT an empty category
+  to persist (empty overrides `online-*`, which is exactly the suppression we want; cf. 0.1.52's lesson used in
+  reverse). **Browse rows only.** A radio HOME-SHELF card has no per-command identity (all shelves arrive in one
+  `material-skin` home-extra call → resolves via shared `online-*`), so its Add can't be hidden here — it stays
+  a harmless add-time reject (0.1.51). This does NOT resurrect the full 0.1.46–0.1.50 saga (apps blocklist,
+  scheme filter, home-shelf scoping) — only the radios slice, which is legitimate and self-contained.
+- **0.1.56** — **Fix: 0.1.55 only blocked BBC Sounds, not TuneIn.** The `radios` enumeration runs at
+  `postinitPlugin`, but **TuneIn's radio directory (Music/News/Sports/… categories) is fetched ASYNC from
+  mysqueezebox.com** and isn't ready that early — so the init write only saw the locally-registered BBC Sounds
+  plugin (verified live: served `customactions.json` had `bbcsounds-album`=0 but no `music-album`/`news-album`/…,
+  while a later `['radios',0,500]` JSON-RPC returned all 11 TuneIn cmds). Added a **deferred re-write**:
+  `_writeMaterialActionsDeferred` fires on a `Slim::Utils::Timers` timer +60s after postinit (killTimers-guarded,
+  same pattern as `_purgeTick`), by which time the directory has loaded, so the TuneIn commands get their empty
+  suppressor categories. `_writeMaterialActions` is fully idempotent so the re-run is safe. **Residual race:** on
+  a very slow network the directory can take >60s to load → TuneIn shows "Add" until the next add/restart's write;
+  acceptable (and the add is still a harmless reject). Confirmed radio-row suppression itself works — BBC Sounds
+  was correctly hidden by 0.1.55, proving the empty-`<cmd>-album` override reaches radio browse rows.
+- **0.1.57** — **Fix: 0.1.56's deferred write hid TuneIn "Add" in the FILE but not in the live UI — a Material
+  load-time cache issue, not a file issue.** Traced end-to-end over HTTP: (1) the served `customactions.json`
+  correctly had `music-album`/`news-album`/… = 0 after the +60s deferred pass; (2) `browse-resp.js` L91/685/692
+  resolves a TuneIn station to `command="music"` (from `data.params[1][0]`, confirmed via menu-mode
+  `['radios',…,'menu:radios']` → each item's `actions.go.cmd=['music','items']`; the plain `radios` query's
+  `cmd` field happens to match) and `btype="album"` (stations are `type:audio` app items → the `:"album"` else),
+  so it checks `"music-album" in customActions` → empty → no Add. The logic is correct. BUT
+  `customactions.js:25` fetches the file **once at Material app start** via `axios.get(".../customactions.json?r="
+  + LMS_MATERIAL_REVISION)` — `?r=` is the Material VERSION, not our writes — so it's browser-cached and never
+  re-fetched in-session. `bbcsounds-album` (written at INIT, before Material loads) was always present;
+  `music-album` (written +60s) was missed by already-loaded/cached tabs → fell back to populated `online-album`
+  → Add showed. **Verified**: in a fresh incognito window (cache-bypassed) TuneIn Add was correctly gone. **Fix:**
+  seed a hardcoded `@KNOWN_RADIO_CMDS` (`music news sports talk location language podcast search presets local` —
+  TuneIn's stable top-level categories) at INIT, unioned with `_unsupportedRadioCommands()` (minus
+  `%SUPPORTED_CMD`), so the empties exist before Material ever loads the file. The +60s deferred write stays
+  (catches other late radio plugins). One-time: after updating, hard-refresh Material once to drop the stale
+  cached `customactions.json`; correct on every restart thereafter. **Lesson:** Material caches
+  `customactions.json` at app start keyed on its own revision — a category MUST be on disk before Material loads
+  or an open/cached tab won't see it; deferred/async writes are invisible until a hard refresh.

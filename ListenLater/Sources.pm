@@ -1,15 +1,15 @@
 package Plugins::ListenLater::Sources;
 
-# Per-source adapters. Three jobs:
+# Per-source adapters. Two jobs:
 #   1. capture*   — turn an info-menu context (a track or a library album) into a
 #                   storable record: display metadata + a best-effort replayable ref.
-#   2. buildPlayableItems — turn a stored record back into playable album node(s)
-#                   for the list. Prefers a native album id; otherwise searches the
-#                   originating service by "artist album" (the same resilient match
-#                   the sibling ListenBrainz plugin uses), so we never hard-depend
-#                   on having captured the service album id.
-#   3. playingAlbumRef — map a currently-playing track to (source, album_id) so the
-#                   play-detector can attribute outside plays.
+#   2. buildPlayableItems / resolveTracks — turn a stored record back into playable
+#                   album node(s) / a flat track list for the list. Prefers a native
+#                   album id; otherwise searches the originating service by
+#                   "artist album" (the same resilient match the sibling ListenBrainz
+#                   plugin uses), so we never hard-depend on having captured the id.
+# (Play attribution for the Played detector lives in Played::_matchRecord, which keys
+# off source + album id / artist+album — not a helper here.)
 #
 # Streaming adapters are guarded with ->can(...) so the plugin works with any
 # subset of Qobuz / Bandcamp installed. Adding a service = one more entry.

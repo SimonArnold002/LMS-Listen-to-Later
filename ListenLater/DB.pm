@@ -275,12 +275,6 @@ sub list {
     return [ map { _rowToHash($_) } @$rows ];
 }
 
-sub count {
-    my ($status) = @_;
-    my ($n) = dbh()->selectrow_array('SELECT COUNT(*) FROM albums WHERE status = ?', undef, $status);
-    return $n || 0;
-}
-
 sub remove {
     my ($id) = @_;
     dbh()->do('DELETE FROM albums WHERE id = ?', undef, $id);
@@ -305,8 +299,11 @@ sub markPlayed {
 
 # Delete Played albums whose played_at is older than $days days. Only status='played'
 # rows are ever deleted, so albums moved back to Listen Later ('later') or to the
-# Wish List list ('wishlist') are never purged; re-playing an album resets played_at,
-# restarting its clock. Returns the number removed.
+# Wish List list ('wishlist') are never purged. played_at is set the moment an album is
+# marked Played and is NOT refreshed by replaying an already-Played album (Played
+# detection only tracks 'later' rows — see Played.pm), so the retention clock runs from
+# the first Played mark; move it back to 'later' and re-play it to restart the clock.
+# Returns the number removed.
 sub purgePlayed {
     my ($days) = @_;
     return 0 unless $days && $days =~ /^\d+$/ && $days > 0;
