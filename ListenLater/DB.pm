@@ -228,6 +228,23 @@ sub findByArtistAlbum {
     return _rowToHash($row);
 }
 
+# All saved albums for a source whose NORMALISED album title matches, regardless of artist
+# or year — Played's fallback lookup when the playing track's metadata artist doesn't equal
+# the stored album artist ("feat." track credits / album-artist vs track-artist / an
+# artist-less row a backfill never filled). The caller disambiguates by a fuzzy artist
+# compare, so a same-titled album by a genuinely different artist isn't returned by mistake.
+# The album part is normalised [a-z0-9 ] so it carries no LIKE metacharacters (no ESCAPE);
+# the '|<album>|' anchors it to the middle key segment so it can't match an artist/year.
+sub findByAlbum {
+    my ($source, $album) = @_;
+    my $alb = _norm($album);
+    return () unless length $alb;
+    my $rows = dbh()->selectall_arrayref(
+        'SELECT * FROM albums WHERE source = ? AND dedupe_key LIKE ? ORDER BY id',
+        { Slice => {} }, $source, '%|' . $alb . '|%');
+    return map { _rowToHash($_) } @$rows;
+}
+
 # Across EVERY source — the same album saved from a different service shares the same
 # dedupe_key, so this is how add() spots a cross-service duplicate. Returns the
 # earliest-added match (lowest id) when more than one exists.

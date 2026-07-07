@@ -1,6 +1,6 @@
 # Listen Later — LMS Plugin
 
-A plugin for **Lyrion Music Server (LMS)** that lets you save an album — from your **local library** or any **streaming service** (Qobuz, Tidal, Bandcamp) — into a curated list, browse it like a playlist *of albums*, and have albums move to a **Played** section once you've heard them. A separate **Wish List** sits alongside for things you mean to buy, and albums move freely between the three lists.
+A plugin for **Lyrion Music Server (LMS)** that lets you save an album — from your **local library** or any **streaming service** (Qobuz, Tidal, Bandcamp, Deezer) — into a curated list, browse it like a playlist *of albums*, and have albums move to a **Played** section once you've heard them. A separate **Wish List** sits alongside for things you mean to buy, and albums move freely between the three lists.
 
 Tested on LMS 9.x with the **Material Skin** (the classic skin works for the basics).
 
@@ -25,7 +25,7 @@ Tested on LMS 9.x with the **Material Skin** (the classic skin works for the bas
 ## Requirements
 
 - **Lyrion Music Server 9.0.0+** (tested with the Material Skin; classic skin covers add/browse/play).
-- For **streaming** albums, the matching service plugin installed and signed in: **Qobuz**, **Tidal** and/or **Bandcamp**. Library albums need nothing extra.
+- For **streaming** albums, the matching service plugin installed and signed in: **Qobuz**, **Tidal**, **Bandcamp** and/or **Deezer**. Library albums need nothing extra.
 
 Every streaming integration is optional and degrades gracefully — if a service plugin isn't present, albums from it simply can't be replayed.
 

@@ -27,6 +27,7 @@ my %SCHEME = (
     qobuz    => 'qobuz',
     bandcamp => 'bandcamp',
     tidal    => 'tidal',
+    deezer   => 'deezer',
 );
 
 # ---------------------------------------------------------------------------
@@ -39,6 +40,22 @@ sub sourceFromUrl {
     return $SCHEME{$scheme} || $scheme;   # unknown streaming scheme kept as-is
 }
 
+# Metadata for a currently-playing REMOTE track, from its protocol handler's
+# getMetadataFor — the same source LMS's status query / Material's Now Playing use.
+# Streaming services (Qobuz/Tidal/Deezer) DON'T store album/artist/cover on the LMS
+# Track row (->albumname/->artistName/->cover come back empty), so both the Now Playing
+# "Add" (Plugin::_nowPlayingFallback) and the Played auto-detector (Played::_matchRecord) have
+# to ask the handler instead. Returns the metadata hash (keys incl. album/artist/cover)
+# or {} — always a hashref, so callers can index safely. Best-effort; guarded.
+sub playingMeta {
+    my ($client, $url) = @_;
+    return {} unless defined $url && length $url;
+    my $handler = eval { Slim::Player::ProtocolHandlers->handlerForURL($url) } or return {};
+    return {} unless $handler->can('getMetadataFor');
+    my $meta = eval { $handler->getMetadataFor($client, $url) };
+    return ref $meta eq 'HASH' ? $meta : {};
+}
+
 # Best-effort service detection from an artwork/cover URL. Streaming browse rows
 # (e.g. Qobuz New Releases albums) carry a cover but no favorites_url; the LMS
 # image proxy embeds the original host (…/imageproxy/https%3A%2F%2Fstatic.qobuz.com%2F…),
@@ -49,6 +66,7 @@ sub sourceFromImage {
     return 'qobuz'    if $img =~ /qobuz\.com/i;
     return 'tidal'    if $img =~ /tidal/i;
     return 'bandcamp' if $img =~ /bcbits\.com|bandcamp/i;
+    return 'deezer'   if $img =~ /dzcdn\.net|deezer/i;
     return 'spotify'  if $img =~ /spotify|scdn\.co/i;
     return '';
 }
@@ -327,6 +345,11 @@ sub _streamingAlbumNode {
         $item{url} = \&Plugins::TIDAL::Plugin::getAlbum;
         $item{passthrough} = [ { id => $albumId } ];
     }
+    elsif ($source eq 'deezer' && Plugins::Deezer::Plugin->can('getAlbum')) {
+        # Deezer's getAlbum reads $params->{id} (like Tidal) → albumTracks → {items=>...}.
+        $item{url} = \&Plugins::Deezer::Plugin::getAlbum;
+        $item{passthrough} = [ { id => $albumId } ];
+    }
     else {
         return undef;
     }
@@ -427,6 +450,31 @@ sub _searchService {
         return;
     }
 
+    # Deezer: mirror of the Tidal branch. getAPIHandler->search(cb,{search,type=>'album'})
+    # calls back with a bare arrayref of raw album hashes; render via the plugin's own
+    # _renderAlbum (type=>playlist, url=>\&getAlbum, passthrough=>[{id}]). Type SINGULAR.
+    if ($source eq 'deezer' && Plugins::Deezer::Plugin->can('getAPIHandler')
+                            && Plugins::Deezer::Plugin->can('_renderAlbum')) {
+        my $api = Plugins::Deezer::Plugin::getAPIHandler($client);
+        return $cb->(_noMatch($client)) unless $api;
+        $api->search(sub {
+            my $albums = shift;
+            my @cand;
+            for my $a (@{ $albums || [] }) {
+                next unless ref $a eq 'HASH';
+                my $ar = $a->{artist} || ($a->{artists} && $a->{artists}[0]) || {};
+                my $candArtist = ref $ar eq 'HASH' ? $ar->{name} : '';
+                next unless _albumMatches(_norm($artist), _norm($album), $candArtist, $a->{title});
+                my $item = Plugins::Deezer::Plugin::_renderAlbum($a);
+                my $cy = _yearOf($a->{release_date} // $a->{year})
+                      || _yearOf($item->{name}) || _yearOf($item->{line1}) || _yearOf($item->{line2});
+                push @cand, [ $item, $a->{title}, $cy ];
+            }
+            $cb->(_bestMatches(\@cand, $album, $recYear) || _noMatch($client));
+        }, { search => $artistQuery, type => 'album', strict => 'off', limit => 20 });
+        return;
+    }
+
     return $cb->(_noMatch($client));
 }
 
@@ -484,6 +532,7 @@ sub _serviceCan {
     return 1 if $source eq 'qobuz'    && Plugins::Qobuz::Plugin->can('QobuzGetTracks');
     return 1 if $source eq 'bandcamp' && Plugins::Bandcamp::Plugin->can('get_album');
     return 1 if $source eq 'tidal'    && Plugins::TIDAL::Plugin->can('getAlbum');
+    return 1 if $source eq 'deezer'   && Plugins::Deezer::Plugin->can('getAlbum');
     return 0;
 }
 

@@ -103,13 +103,40 @@ sub _matchRecord {
     my $source = Plugins::ListenLater::Sources::sourceFromUrl($url);
     my $artist = eval { $track->artistName } // '';
     my $album  = eval { $track->albumname }  // '';
+    # Streaming services (Qobuz/Tidal/Deezer) don't store album/artist on the LMS Track
+    # row — it lives in the protocol handler's metadata (the same source the status query
+    # and Now Playing use). Without it $album stays '' and the play never matches, so the
+    # album never auto-moves to Played. Fill the blanks from the handler.
+    if (!length $album || !length $artist) {
+        my $meta = Plugins::ListenLater::Sources::playingMeta($client, $url);
+        $album  = $meta->{album}  if !length $album  && defined $meta->{album}  && length $meta->{album};
+        $artist = $meta->{artist} if !length $artist && defined $meta->{artist} && length $meta->{artist};
+    }
     return undef unless length $album;   # streaming best-effort
 
     # Match on artist+album regardless of year: the dedupe key now carries the release
     # year (so same-title different-year albums save separately), but a playing streaming
     # track can't be relied on to report the matching year, so Played uses the year-agnostic
     # lookup.
-    return Plugins::ListenLater::DB::findByArtistAlbum($source, $artist, $album);
+    my $rec = Plugins::ListenLater::DB::findByArtistAlbum($source, $artist, $album);
+    return $rec if $rec;
+
+    # The exact artist|album key lookup can miss when the playing track's metadata artist
+    # differs from the stored album artist — a track credited "X feat. Y" vs the album's "X",
+    # or an album-artist vs a track-artist. Fall back to an album-title match within the
+    # source, disambiguated by the SAME token-subset artist compare replay uses — so a
+    # same-titled album by a genuinely different artist is NOT wrongly marked Played. Both
+    # sides must carry an artist: with no playing artist there's nothing to disambiguate a
+    # title-only match, and an artist-LESS stored row can't be confirmed the same album as a
+    # named playing track (the artist-less/artist-less case already matched exactly above).
+    return undef unless length $artist;
+    my $na = Plugins::ListenLater::Sources::_norm($artist);
+    for my $c (Plugins::ListenLater::DB::findByAlbum($source, $album)) {
+        next unless defined $c->{artist} && length $c->{artist};
+        return $c if Plugins::ListenLater::Sources::_artistMatch(
+            $na, Plugins::ListenLater::Sources::_norm($c->{artist}));
+    }
+    return undef;
 }
 
 sub _totalTracks {

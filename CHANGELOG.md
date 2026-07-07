@@ -1,5 +1,69 @@
 # Changelog
 
+## 0.1.69 — Auto-Played and Now Playing adds survive an artist mismatch
+
+### Fixed
+- **A streaming album now auto-moves to Played even when the playing track's artist doesn't equal the stored album artist.** Auto-Played matched on the exact `artist|album` dedupe key, so a track credited "X feat. Y" (vs the album's "X"), an album-artist-vs-track-artist difference, or a row whose artist backfill never ran would miss and the album stayed in Listen Later. When the exact match fails, the detector now falls back to an album-title match **within the same source**, disambiguated by the same fuzzy artist compare replay uses (token-subset; empty-either-side counts as a match) — so a genuinely different artist with a same-titled album is still not wrongly marked Played. Only runs when the playing track actually reports an artist (a title-only match would be too loose).
+- **A streaming album added from Now Playing now keeps its artist.** Material's Now Playing action often sends an empty `$ARTISTNAME` for a streaming track, and a track URL carries no `album:<id>` to backfill an artist from — so the saved row was artist-less and would never auto-move to Played. The Now Playing add now recovers the artist from the playing track's **protocol-handler metadata** (`getMetadataFor` — the same source it already uses for the cover), in a single fetch that yields both artist and art.
+
+### Internal
+- New `DB::findByAlbum($source, $album)` — album-title lookup regardless of artist/year, the Played fallback's candidate query (anchored to the middle key segment so it can't match an artist or year).
+- `_playingCover($client, $url)` → `_coverFromMeta($meta)`: the Now Playing fallback fetches the handler metadata once and derives both the artist and the cover from it, instead of a second `getMetadataFor` call.
+
+## 0.1.68 — Auto-Played now works for streaming plays outside the plugin
+
+### Fixed
+- **A streaming album (Qobuz/Tidal/Deezer) played outside the plugin now auto-moves to Played.** The play-detector matched the playing track by `$track->albumname`/`$track->artistName`, which — exactly like the Now Playing "Add" bug — come back **empty** for those services (they keep metadata in the protocol handler, not on the LMS Track row). So the album never matched a saved record and never got marked Played. The detector now falls back to the handler's metadata (`getMetadataFor`) when the Track row is blank, the same source the Now Playing add uses. Library plays and any streaming that did report its metadata are unchanged.
+
+### Internal
+- Factored the protocol-handler metadata lookup into `Sources::playingMeta`, shared by the Played detector and the Now Playing add's cover fetch (`_playingCover`).
+
+## 0.1.67 — Streaming Now Playing add keeps the album art
+
+### Fixed
+- **A streaming album added from Now Playing now stores its cover.** Material's Now Playing action sends `$IMAGE` empty (`playerStatus.current` has no `.image` — the Now Playing cover is computed separately), and a remote track carries no art on its LMS Track row, so the saved row was art-less. The plugin now fetches the cover from the currently-playing track's **protocol handler** (`getMetadataFor` — the same source LMS's status `artwork_url` uses) and stores it. Library Now Playing adds already kept their art (added by album id).
+
+## 0.1.66 — Now Playing "Add" works for streaming tracks (the real fix)
+
+### Fixed
+- **A streaming "Add to Listen Later"/"Add to Wish List" from the Now Playing screen now actually saves the album.** Confirmed live from the log: a Qobuz Now Playing track's `->albumname`/`->artistName` come back **empty** (Qobuz — like Tidal/Deezer — serves its metadata dynamically via a provider, not on the LMS Track row), so 0.1.65's album-match sanity guard bailed and the add was rejected **even though the service URL (`qobuz://…`) was recovered correctly**. The guard now only runs when the playing track actually exposes an album title to compare against; when it doesn't, the plugin trusts the album/artist Material already sent plus the recovered URL scheme and proceeds — safe because the `track` custom action is Now-Playing-only, so the add is always for the currently-playing track. The year Material appends to the Now Playing album name (`"Album (1996)"`) is stripped for the stored title/search and kept as the record's year.
+
+## 0.1.65 — Now Playing "Add" for streaming (partial — superseded by 0.1.66)
+
+### Fixed
+- **First pass at streaming Now Playing adds.** Verified against Material's own source: the Now Playing "track" action substitutes from `playerStatus.current` and sends only the album name (with the year appended) + artist — no `favorites_url`, and `album_id` only for library tracks — targeted at the playing player. So a streaming add carries nothing that identifies the service; the plugin must recover it from the player's currently-playing track. The 0.1.64 fallback did that but matched on `$track->album->title`, which is empty for a **remote/streaming** track — so it read the album title from `->albumname` and took the service scheme from the **canonical playlist URL** (`->track`), preferring a non-`http` URL. (This wasn't enough on its own: for Qobuz even `->albumname` is empty — see 0.1.66.)
+
+### Internal
+- The Now Playing fallback logs (at WARN, so always visible) the requested album/artist, the playing track's URL/album/artist, and the exact reason it declined to adopt the track (album mismatch / artist mismatch / no metadata) — so a "still doesn't add from Now Playing" report can be pinpointed straight from `log.txt`.
+
+## 0.1.64 — Now Playing "Add" actually adds the album
+
+### Fixed
+- **"Add to Listen Later"/"Add to Wish List" from the Now Playing screen now works.** Material's Now Playing action passes only the album name and artist (no play URL, album id, or service), so the plugin couldn't tell what to save and silently rejected it. It now recovers the source — and, for a library track, the album — from the **track currently playing on that player**, matched by album/artist so it can only ever adopt the genuinely-playing track. A streaming track is saved to its service and replayed by search; a library track is added by id. (Needs the streaming service supported/installed, same as every other add.)
+
+## 0.1.63 — "Add to Listen Later" on play-queue tracks
+
+### Added
+- **"Add to Listen Later"/"Add to Wish List" now appear directly on a play-queue track's "…" menu** (top level, not only under "More"), adding that track's **album**. Material supports custom actions on queue items via its `queue-track` category — the plugin simply wasn't writing it, so the entry only showed via the "More → Add album" info-provider. Now both the top-level action and the More entry are available, matching every other track surface. (After updating, hard-refresh Material once so it reloads the actions file — see 0.1.57.)
+
+## 0.1.62 — "Add to Listen Later" back on Now Playing
+
+### Added
+- **"Add to Listen Later" and "Add to Wish List" are back on Material's Now Playing screen**, adding the **currently-playing album** — the same result as the play queue's "… → More". (They were removed from Now Playing in 0.1.34 as a design choice; restored by request.) For a streaming track the album is found by artist+title search on the same service; for a library track it's added directly.
+
+## 0.1.61 — Deezer adds keep the artist
+
+### Fixed
+- **A Deezer album added from browsing now stores its artist**, so the list row shows "Artist – Album" (not album-only) and the album can auto-move to **Played** once heard. Deezer browse rows arrive with no artist (Material doesn't map their subtitle) and a cover URL with nothing to recover it from — exactly the case the 0.1.45 Tidal fix handled — so the artist is now fetched from the album's tracks in the background straight after adding (the same generalised helper covers both Tidal and Deezer). Deezer albums saved before this update can be removed and re-added to pick up the artist. (The add itself already worked and played; this only affects the stored artist / Played tracking.)
+
+### Internal
+- Added `deezer` to the supported-command set so a Deezer row is never mistaken for an unsupported service if it ever appears under the radios menu.
+
+## 0.1.60 — Deezer support
+
+### Added
+- **Deezer albums can now be saved and replayed.** Deezer joins Qobuz / Tidal / Bandcamp as a supported streaming source: "Add to Listen Later"/"Add to Wish List" on a Deezer album (whether from Deezer's own browse or a matched ListenBrainz Fresh Releases row) now stores a playable record instead of being silently rejected, and it replays by its native album id (with an artist-search fallback for older id-less saves). Requires the Deezer plugin installed. Pairs with ListenBrainz Fresh Releases 0.9.69, which can now match releases and playlist tracks to Deezer.
+
 ## 0.1.59 — Debug logging for the Material context-menu wiring
 
 ### Added

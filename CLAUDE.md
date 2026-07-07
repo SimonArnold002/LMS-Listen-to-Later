@@ -1,7 +1,7 @@
 # Listen Later — LMS Plugin
 
 ## Project Overview
-A plugin for Lyrion Music Server (LMS) that lets you save an album — from the local library or any streaming service (Qobuz, Bandcamp, Tidal) — into a curated **Listen Later** list, browse it like a playlist *of albums*, and have albums move to a **Played** section once most of the album has been heard. A separate **Wish List** wishlist (0.1.22) sits alongside, and albums can be moved freely between the three lists. It also adds a **Material home-page shelf** for the list. Targets LMS v9.x, Material Skin preferred (classic best-effort). Storage is a plugin-owned SQLite database so the list is sortable, deduped, history-bearing, and ready for future features.
+A plugin for Lyrion Music Server (LMS) that lets you save an album — from the local library or any streaming service (Qobuz, Bandcamp, Tidal, Deezer) — into a curated **Listen Later** list, browse it like a playlist *of albums*, and have albums move to a **Played** section once most of the album has been heard. A separate **Wish List** wishlist (0.1.22) sits alongside, and albums can be moved freely between the three lists. It also adds a **Material home-page shelf** for the list. Targets LMS v9.x, Material Skin preferred (classic best-effort). Storage is a plugin-owned SQLite database so the list is sortable, deduped, history-bearing, and ready for future features.
 
 ## Server Details
 - **LMS Server**: 192.168.1.234:9000
@@ -499,3 +499,68 @@ The "Add to Listen Later"/"Add to Wish List" custom actions appear on streaming 
   cached `customactions.json`; correct on every restart thereafter. **Lesson:** Material caches
   `customactions.json` at app start keyed on its own revision — a category MUST be on disk before Material loads
   or an open/cached tab won't see it; deferred/async writes are invisible until a hard refresh.
+- **0.1.60** — **Deezer is a supported streaming source.** Deezer joins Qobuz/Bandcamp/Tidal in
+  `Sources.pm`: `%SCHEME`/`sourceFromImage` (dzcdn.net host) recognise it, `_serviceCan` returns true when
+  `Plugins::Deezer::Plugin->can('getAlbum')`, `_streamingAlbumNode` replays a captured id via
+  `Plugins::Deezer::Plugin::getAlbum` with passthrough key **`id`** (same as Tidal — confirmed
+  `getAlbum` reads `$params->{id}` → `albumTracks`), and `_searchService` gains a Deezer branch (API-handler
+  `->search(cb,{search,type=>'album',strict=>'off'})` → bare arrayref of raw album hashes → `_renderAlbum`,
+  which already returns `type=>playlist, url=>\&getAlbum, passthrough=>[{id}]`). No add-gate list changed
+  because since 0.1.51 the sole gate is `_isReplayableSource` → `_serviceCan`; adding the branch is enough,
+  so Deezer adds (its browse rows carry a clean `deezer://album:<id>` favurl — the generic
+  `m{(?:[:/])album:([A-Za-z0-9._-]+)}` capture already extracts it) are now accepted and replay by id.
+  The prior "Deezer sends a valid favurl and still can't play" reject (0.1.51) is exactly what this closes.
+  Pairs with ListenBrainz Fresh Releases 0.9.69 (Deezer matching). Deezer plugin surface confirmed against
+  michaelherger/lms-deezer.
+- **0.1.61** — **Deezer adds backfill the artist (like Tidal, 0.1.45).** Verified live: a Deezer album added
+  from browsing stored **and replayed** (id=119 Revolver → 14 `deezer://…flc` tracks), but the `addctx` log
+  showed `artist=` EMPTY — Deezer browse rows carry no `$ARTISTNAME` (Material doesn't map the subtitle) and
+  the `e-cdns-images.dzcdn.net` cover URL has nothing to recover it from (same as Tidal). So the artist-less
+  record showed album-only and would never auto-move to Played (keys on source+artist+album). Generalised
+  `_backfillTidalArtist` → **`_backfillStreamingArtist($client,$recId,$albumId,$source)`**, which picks the
+  right plugin's `getAlbum` (Tidal or Deezer — both share `($client,$cb,$args,{id})→{items}`, tracks with
+  `line2`=artist) and updates the record async/guarded; the call site now fires for `tidal` OR `deezer`. Also
+  added `deezer` to `%SUPPORTED_CMD`. **The reported "failed to add from browsing albums" was NOT a failure**
+  — the add stored (`setStatusDone` called) and the album plays; Material just shows no success toast on the
+  web UI (`showBriefly` reaches hardware players only — the 0.1.51/0.1.54 limitation), so a successful add
+  looks like nothing happened. Pre-0.1.61 Deezer saves can be removed + re-added to gain the artist.
+- **0.1.62** — **"Add to Listen Later"/"Add to Wish List" restored on Material's Now Playing screen (reverses
+  0.1.34).** `_writeMaterialActions` now writes the plain **`track`** category again (added to `%cats`, so it's
+  also in `%keep` and survives the delete-empties pass). Material's Now Playing menu is the ONLY consumer of
+  `track` (`nowplaying-page.js getCustomActions("track")`), so this puts Add there and nowhere else — the
+  queue uses `queue-track`, browse lists `album-track`/`playlist-track`. It uses the existing `$trackCmd`
+  (`name:$ALBUMNAME`), so it adds the **currently-playing ALBUM**, not the track (the `trackname`/`trackid`
+  params are logged only — `_addCtxCommand` always stores `$album`). Behaviour by source: a streaming
+  now-playing track's `$FAVURL` is the TRACK url (e.g. `deezer://<id>.flc`, no `album:<id>`), so the source is
+  read from the scheme and the album is resolved by artist+title search (`Sources::_searchService`); a library
+  track carries `$ALBUMID` and adds directly. Same end result the user already gets from the play queue's
+  "… → More". (0.1.34 had omitted `track` as a deliberate design choice — Now Playing is track-oriented, the
+  plugin saves albums — but it's wanted back.)
+- **0.1.63** — **Top-level "Add" restored on PLAY-QUEUE tracks (`queue-track` category).** The queue's track "…"
+  menu only showed Add under "… → More" (the TrackInfo info-provider), never at the top. Confirmed against the
+  SERVED main bundle: the queue component does `this.queueCustomActions = getCustomActions("queue-track", false)`
+  — so Material DOES support custom actions on queue items (the 0.1.34 note was right; a WebFetch of
+  `nowplaying-page.js` wrongly claimed queue items get none — the string `queue-track` is present twice in
+  `material.min.js`, so trust the served bundle over a summarised fetch). We just weren't writing the category.
+  Added `'queue-track' => $trackCmd` to `%cats` (so it's in `%keep` and gets the Add/Wish-List pair). Same
+  `$trackCmd` → adds the track's ALBUM. Surfaces confirmed distinct: `track` = Now Playing info panel,
+  `queue-track` = the play-queue list, `album-track`/`playlist-track` = browse lists, `online-track` = streaming
+  rows. **Method to identify a surface's category: grep the SERVED bundle (`curl …/material/html/js/material.min.js`
+  + `material-deferred.min.js`) for `getCustomActions(` — literal args are the category; the queue/nowplaying ones
+  are set via `bus.$on("customActions", …)` handlers.** Needs a Material hard-refresh after install (customactions
+  cache, 0.1.57).
+- **0.1.64** — **Now Playing "Add" now actually stores the album (the `track` category from 0.1.62 was inert).**
+  Diagnosed from the live log: a Now Playing Add arrived as `name=special, artist=Richard Orofino, albumid=,
+  favurl=, trackid=, svc=(undef)` → `rejected add — unsupported source ''`. Root cause confirmed by extracting
+  Material's `doReplacements` var map from the SERVED bundle: the Now Playing `track` action's substitution
+  object `c` = the now-playing item, which has `c.album`/`c.artist`/`c.title` but **no
+  `c.presetParams.favorites_url` and no `c.album_id`** — so `$FAVURL`/`$ALBUMID`/`$SERVICE` are all empty and
+  `$source` came up '' → the 0.1.53 reject fired. (So `track`/`queue-track` differ: a QUEUE item carries a real
+  favurl, a NOW-PLAYING panel item does not.) Fix: **`_nowPlayingFallback($client,$album,$artist)`** — when
+  `$source` is empty and there's a client, recover source + album from the player's **currently-playing track**
+  (`$client->playingSong->currentTrack->url` → scheme = source; `->album->id` for a library track), guarded by
+  matching the playing track's album (+artist when both known) to the params so a stray empty-favurl Add can't
+  adopt an unrelated playing track. A streaming NP track's url is a TRACK url (no `album:<id>`) → replay by
+  artist+title search; a library NP track adds by album id. Reuses `Sources::_norm`/`_artistMatch`. Unsupported
+  services still reject (the scheme feeds `_serviceCan`). NB: relies on `$request->client` being the playing
+  player — Material sends the current player with the custom action, so it is.

@@ -292,7 +292,7 @@ sub _clearMaterialActions {
 # rows keep "Add". BBC Sounds is dual-listed (apps + radios) but unsupported, so
 # it is NOT here and gets blocked wherever it shows.
 my %SUPPORTED_CMD = map { $_ => 1 }
-    qw(qobuz bandcamp tidal listenbrainzfreshreleases listenlater);
+    qw(qobuz bandcamp tidal deezer listenbrainzfreshreleases listenlater);
 
 # TuneIn's top-level radio categories are fetched ASYNC from mysqueezebox.com, so they
 # aren't in the 'radios' menu when the plugin initialises. But Material reads
@@ -356,18 +356,28 @@ sub _writeMaterialActions {
     my $onlineCmd = [ 'listenlater', 'addctx',
         'name:$TITLE', 'artist:$ARTISTNAME', 'svc:$SERVICE', 'favurl:$FAVURL', 'image:$IMAGE' ];
 
-    # NB: deliberately NO plain 'track' category. Material's Now Playing screen is
-    # the ONLY consumer of 'track' (nowplaying-page.js getCustomActions("track")) —
-    # browse track lists use 'album-track'/'playlist-track', the queue uses
-    # 'queue-track', streaming rows use 'online-track'. Writing 'track' would put
-    # "Add to Listen Later" on Now Playing only, which we don't want. Omitting it
-    # suppresses it there with no effect on any browse surface — and the strip pass
-    # above clears any 'track' entry a previous version wrote.
+    # Track-context categories that put a TOP-LEVEL "Add" on a track's "…" menu (each
+    # is a distinct Material surface, verified in the served bundle):
+    #   'track'       → the Now Playing screen's info panel
+    #                   (nowplaying-page.js: getCustomActions("track"))       — restored 0.1.62
+    #   'queue-track' → each item in the PLAY QUEUE list
+    #                   (getCustomActions("queue-track"))                     — added 0.1.63
+    #   'album-track' / 'playlist-track' → library album / playlist track lists
+    # (streaming rows use 'online-track'.) All map to $trackCmd (name:$ALBUMNAME), so they
+    # add the ALBUM the track belongs to, NOT the track — the trackname/trackid params are
+    # informational only (see _addCtxCommand). For a streaming track $FAVURL is the TRACK
+    # url (no album:<id>), so replay resolves the album by artist+title search
+    # (Sources::_searchService); a library track adds by $ALBUMID. Same end result as the
+    # "… → More" info-provider, just at the top of the menu. (0.1.34 had dropped 'track' as
+    # a design choice — Now Playing is track-oriented, we save albums — restored by request;
+    # 'queue-track' was simply never written, which is why the queue only showed Add in More.)
     my %cats = (
         'album'          => $albumCmd,
         'album-track'    => $trackCmd,
         'playlist'       => $albumCmd,
         'playlist-track' => $trackCmd,
+        'track'          => $trackCmd,
+        'queue-track'    => $trackCmd,
         'online-album'   => $onlineCmd,
         'online-track'   => $onlineCmd,
         # NB: deliberately NO 'online-artist' — we save albums, not artists. An
@@ -1122,6 +1132,28 @@ sub _addCtxCommand {
         }
     }
 
+    # Now Playing fallback. Material's Now Playing "track" action supplies only
+    # album+artist — its now-playing item has no presetParams.favorites_url and no
+    # album_id, so $FAVURL/$ALBUMID/$SERVICE arrive empty and $source came up ''
+    # above (which would reject). But this Add IS for the track currently PLAYING on
+    # the client, so recover the real play URL (→ source, and library album id)
+    # straight from the player's current song. Guarded inside _nowPlayingFallback by
+    # matching the playing track's album/artist to the params, so a stray empty-favurl
+    # Add (e.g. an LB playlist tile) can never adopt an unrelated playing track.
+    if (!length($source // '') && $request->client) {
+        my ($npSrc, $npRef, $npAlbum, $npArtist, $npYear, $npArt)
+            = _nowPlayingFallback($request->client, $album, $artist);
+        if ($npSrc) {
+            $source  = $npSrc;
+            $ref     = $npRef;
+            $album   = $npAlbum  if defined $npAlbum  && length $npAlbum;
+            $artist  = $npArtist if defined $npArtist && length $npArtist;
+            $year  ||= $npYear;
+            $artwork = $npArt // $artwork;
+            $log->warn("LL: now-playing fallback recovered source=$source for '" . ($album // '?') . "'");
+        }
+    }
+
     # Reject a source we can't replay (Deezer/Spotify/radio/…): don't store a record that
     # would only fail at play time — reject it (silently) instead. This is the one reliable
     # gate, so we no longer bother hiding the Material "Add" button per service.
@@ -1150,10 +1182,10 @@ sub _addCtxCommand {
     # artist from the album's tracks in the background and backfill the record. Without an
     # artist the row shows album-only and never auto-moves to Played (Played keys on
     # source+artist+album). Fire-and-forget; only for a fresh add that has no artist yet.
-    if ($id && !$already && $source eq 'tidal'
+    if ($id && !$already && ($source eq 'tidal' || $source eq 'deezer')
             && (!defined $artist || !length $artist)
             && $ref->{album_id}) {
-        _backfillTidalArtist($request->client, $id, $ref->{album_id});
+        _backfillStreamingArtist($request->client, $id, $ref->{album_id}, $source);
     }
 
     if (my $client = $request->client) {
@@ -1163,15 +1195,26 @@ sub _addCtxCommand {
     $request->setStatusDone;
 }
 
-# Fetch a Tidal album's artist from its tracks (Tidal's getAlbum → albumTracks → each
-# rendered track carries line2 = artist name) and backfill it onto the saved record.
-# Async / best-effort; guarded so a Tidal API hiccup can never break the add.
-sub _backfillTidalArtist {
-    my ($client, $recId, $albumId) = @_;
+# Fetch a streaming album's artist from its tracks and backfill it onto the saved
+# record. Some services' browse rows arrive with an empty $ARTISTNAME (Material doesn't
+# map their subtitle) and a cover URL with no recoverable artist/id — **Tidal and Deezer
+# both do this** — but the favurl carries the album id, so we fetch the album's tracks
+# (getAlbum → albumTracks → each rendered track's line2 = artist name) and update the
+# record. Without an artist the row shows album-only and never auto-moves to Played
+# (Played keys on source+artist+album). Both plugins' getAlbum share the same shape
+# ($client,$cb,$args,{id=>…} → {items=>…}), so one helper covers both. Async /
+# best-effort; guarded so an API hiccup can never break the add.
+sub _backfillStreamingArtist {
+    my ($client, $recId, $albumId, $source) = @_;
     return unless $client && $recId && defined $albumId && length $albumId;
-    return unless Plugins::TIDAL::Plugin->can('getAlbum');
+
+    my $getAlbum = ($source eq 'tidal'  && Plugins::TIDAL::Plugin->can('getAlbum'))  ? \&Plugins::TIDAL::Plugin::getAlbum
+                 : ($source eq 'deezer' && Plugins::Deezer::Plugin->can('getAlbum')) ? \&Plugins::Deezer::Plugin::getAlbum
+                 : undef;
+    return unless $getAlbum;
+
     eval {
-        Plugins::TIDAL::Plugin::getAlbum($client, sub {
+        $getAlbum->($client, sub {
             my $res   = shift;
             my $items = (ref $res eq 'HASH') ? $res->{items} : $res;
             my $first = (ref $items eq 'ARRAY') ? $items->[0] : undef;
@@ -1182,11 +1225,143 @@ sub _backfillTidalArtist {
               : undef );
             return unless defined $artist && length $artist;
             Plugins::ListenLater::DB::updateArtist($recId, $artist);
-            $log->info("LL: backfilled Tidal artist '$artist' onto rec $recId");
+            $log->info("LL: backfilled $source artist '$artist' onto rec $recId");
         }, {}, { id => $albumId });
         1;
-    } or $log->warn("LL: Tidal artist backfill failed: $@");
+    } or $log->warn("LL: $source artist backfill failed: $@");
     return;
+}
+
+# Recover source + album for a Now Playing "Add" that arrived with no favurl/id, from
+# the client's CURRENTLY-PLAYING track. Only adopts it when the playing track's album
+# (and artist, when both are known) matches the requested album+artist — so an Add that
+# is NOT actually the now-playing item (a stray empty-favurl row) never picks up whatever
+# happens to be playing. Returns () on no/again match; otherwise:
+#   library streaming: ('library', {album_id=>…}, title, artist, year, artwork)
+#   streaming service: (scheme, {_svc=>scheme, +album:<id> if the url carries one}, album, artist)
+# The scheme comes from the real play URL, so the reject gate (_serviceCan) still applies.
+sub _nowPlayingFallback {
+    my ($client, $wantAlbum, $wantArtist) = @_;
+    return () unless defined $wantAlbum && length $wantAlbum;
+
+    my $song = eval { $client->playingSong }
+        or do { $log->warn("LL: np-fallback: no playingSong"); return (); };
+
+    # Two track handles: ->track is the playlist entry (canonical service URL, e.g.
+    # qobuz://…/deezer://…), ->currentTrack can resolve to the raw http(s) stream for
+    # some plugins — which would hide the service scheme. Prefer a URL that ISN'T http
+    # so the scheme still names the service; fall back to whatever we have.
+    my $ptrack = eval { $song->track };
+    my $ctrack = eval { $song->currentTrack };
+    my $track  = $ptrack || $ctrack
+        or do { $log->warn("LL: np-fallback: no track"); return (); };
+    my $purl = eval { $ptrack->url };
+    my $curl = eval { $ctrack->url };
+    my $url  = (defined $purl && $purl !~ m|^https?://|) ? $purl
+             : (defined $curl && $curl !~ m|^https?://|) ? $curl
+             : ($purl // $curl);
+    return () unless defined $url && length $url;
+
+    # Confirm this playing track IS the one being added (guard against adopting an
+    # unrelated playing track). Album must match; artist too when both sides have it.
+    # A REMOTE/streaming track has no $track->album object (it's only set for library
+    # tracks) — its album title lives on ->albumname, which is why the play-detector
+    # reads it that way too (Played.pm). Fall back to it, or the streaming Now Playing
+    # add never matches and gets rejected.
+    my $trAlbum  = eval { $track->album ? $track->album->title : undef };
+    $trAlbum     = eval { $track->albumname } if !(defined $trAlbum && length $trAlbum);
+    my $trArtist = eval { $track->artistName }
+                // eval { $track->album && $track->album->contributor ? $track->album->contributor->name : undef };
+
+    $log->warn(sprintf("LL: np-fallback: want album='%s' artist='%s'; playing url='%s' album='%s' artist='%s'",
+        $wantAlbum // '', $wantArtist // '', $url, $trAlbum // '', $trArtist // ''));
+
+    # Sanity guard: when the playing track exposes its OWN album title, require it to
+    # match what we were asked to add — that stops a stray empty-source add from some
+    # surface OTHER than Now Playing from adopting whatever happens to be playing. But a
+    # remote/streaming Track very often exposes NO album/artist at all: Qobuz/Tidal/etc.
+    # serve metadata dynamically (via a metadata provider), not on the Track row, so
+    # ->albumname/->artistName come back empty (confirmed live: qobuz:// track → both '').
+    # The `track` custom action is Now-Playing-ONLY, and we've already recovered the real
+    # play URL of the *currently-playing* track — so when there's no track metadata to
+    # match on, trust the album/artist Material sent and proceed on the URL scheme rather
+    # than rejecting a perfectly valid add.
+    if (defined $trAlbum && length $trAlbum) {
+        my ($wa, $ta) = (Plugins::ListenLater::Sources::_norm($wantAlbum),
+                         Plugins::ListenLater::Sources::_norm($trAlbum));
+        unless ($wa eq $ta || index($ta, "$wa ") == 0 || index($wa, "$ta ") == 0) {
+            $log->warn("LL: np-fallback: album mismatch ('$wa' vs '$ta') — not adopting the playing track");
+            return ();
+        }
+        if (defined $wantArtist && length $wantArtist && defined $trArtist && length $trArtist) {
+            unless (Plugins::ListenLater::Sources::_artistMatch(
+                    Plugins::ListenLater::Sources::_norm($wantArtist),
+                    Plugins::ListenLater::Sources::_norm($trArtist))) {
+                $log->warn("LL: np-fallback: artist mismatch — not adopting the playing track");
+                return ();
+            }
+        }
+    }
+    else {
+        $log->warn("LL: np-fallback: playing track exposes no album/artist — trusting Material's album/artist + the recovered URL scheme");
+    }
+
+    my $scheme = ($url =~ m|^(\w+)://|) ? lc $1 : '';
+
+    # Local file (or db:/tmp: local schemes) → library album, added by its id.
+    if (!$scheme || $scheme eq 'file' || $scheme eq 'db' || $scheme eq 'tmp') {
+        my $alb = eval { $track->album }
+            or do { $log->warn("LL: np-fallback: local track but no album object"); return (); };
+        my $aid = eval { $alb->id }      or return ();
+        return ('library', { album_id => $aid },
+            (eval { $alb->title }),
+            (eval { $alb->contributor ? $alb->contributor->name : undef }),
+            (eval { $alb->year } || undef),
+            (eval { $alb->artwork ? 'music/' . $alb->artwork . '/cover' : undef }));
+    }
+
+    # Streaming track: source = the play-url scheme. A track url carries no album:<id>,
+    # so replay resolves the album by artist+title search (Sources::_searchService) using
+    # the album/artist we already have. (If the url ever does carry album:<id>, keep it.)
+    # Material builds the Now Playing $ALBUMNAME as "Album (YYYY)" (+ "• disc/grouping"),
+    # so strip that trailing decoration off the title we store/search — the year is
+    # carried separately, and DB dedupe keeps parens so an unstripped "(YYYY)" would skew
+    # the dedupe key and the row label.
+    my $album = $wantAlbum;
+    $album =~ s/\s*[•·].*$//;
+    $album =~ s/\s*\((?:19|20)\d{2}\)\s*$//;
+    my ($year) = $wantAlbum =~ /\((\d{4})\)/;
+    my ($aid) = $url =~ m{(?:[:/])album:([A-Za-z0-9._-]+)};
+    my $ref = $aid
+        ? { _svc => $scheme, album_id => $aid, passthrough => { album_id => $aid } }
+        : { _svc => $scheme };
+
+    # One handler metadata fetch (same source Played uses) → recover BOTH the cover AND the
+    # artist. Material's now-playing item often sends an empty $ARTISTNAME for a streaming
+    # track, and a track url carries no album:<id> to backfill from — so without this the
+    # stored row is artist-less and never auto-moves to Played (which keys on
+    # source+artist+album). Prefer the artist Material did send; fall back to the handler's.
+    my $meta   = Plugins::ListenLater::Sources::playingMeta($client, $url);
+    my $artist = (defined $wantArtist && length $wantArtist) ? $wantArtist
+               : (defined $meta->{artist} && length $meta->{artist}) ? $meta->{artist}
+               : $wantArtist;
+    return ($scheme, $ref, $album, $artist, $year, _coverFromMeta($meta));
+}
+
+# Cover art from an already-fetched handler metadata hash. Like album/artist, the art isn't
+# on the LMS Track row for a streaming service — the Now Playing cover comes from the
+# protocol handler's getMetadataFor (the very source LMS's status 'artwork_url' uses), so
+# Material's $IMAGE (playerStatus.current has no .image) arrives empty and the saved row
+# would be art-less. Take the handler's cover; store the URL as-is (a raw https CDN cover
+# renders directly in Material, no imageproxy/GD needed — keeps to the "no server image
+# libs" rule). $meta comes from Sources::playingMeta (always a hashref). Guarded.
+sub _coverFromMeta {
+    my ($meta) = @_;
+    for my $k (qw(cover image icon)) {
+        my $v = $meta->{$k};
+        return $v if defined $v && !ref $v && length $v;
+    }
+    return undef;
 }
 
 
