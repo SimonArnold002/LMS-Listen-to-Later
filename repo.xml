@@ -6,7 +6,7 @@
     <plugin name="ListenLater" version="0.1.69" minTarget="9.0.0" maxTarget="*">
       <title lang="EN">Listen Later</title>
       <desc lang="EN">Save albums from your library or any streaming service to a Listen Later list, with automatic Played tracking</desc>
-      <url>https://simonarnold002.github.io/LMS-Listen-to-Later/ListenLater.zip</url>
+      <url>https://raw.githubusercontent.com/SimonArnold002/LMS-Listen-to-Later/dev/ListenLater.zip</url>
       <link>https://simonarnold002.github.io/LMS-Listen-to-Later/README.html</link>
       <creator>CrystalGipsy</creator>
       <email></email>
