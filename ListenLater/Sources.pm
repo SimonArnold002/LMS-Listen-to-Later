@@ -555,6 +555,18 @@ sub _albumMatches {
     return 0 if length $albumNorm < 2;
 
     my $ct = _norm($candTitle);
+
+    # SELF-TITLED releases ("The Beatles", "Weezer") match on the EXACT title only:
+    # the lenient prefix rule below would let "The Beatles" swallow "The Beatles
+    # 1962-1966" (Red), "…1967-1970" (Blue), "…Anthology 1". Fires ONLY when the
+    # artist is present AND equals the album — LL's lenient empty-artist replay path
+    # (the `return 1 unless length $artistNorm` below) is deliberately untouched.
+    # (Ported from the Discography plugin 0.11.1 — fleet matcher sync.)
+    if (length($artistNorm) && $albumNorm eq $artistNorm) {
+        return 0 unless $ct eq $albumNorm;
+        return _artistMatch($artistNorm, _norm($candArtist));
+    }
+
     return 0 unless $ct eq $albumNorm || $ct =~ /^\Q$albumNorm\E\s/;
 
     return 1 unless length $artistNorm;
