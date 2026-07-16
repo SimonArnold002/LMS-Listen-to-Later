@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.1.70 — Matcher: self-titled albums replay the right record
+
+### Fixed
+- **A self-titled album ("The Beatles", "Weezer") no longer matches a differently-titled release with the same name prefix.** When replaying/matching a saved album whose title is the artist's own name, the matcher now requires an exact title (not the lenient "starts-with" rule), so "The Beatles" won't grab "The Beatles 1962-1966". Decorated editions ("(White Album)", "(Remastered)") still match. LL's lenient empty-artist replay path (streaming saves with no captured artist) is unchanged. Shared-matcher fix kept in sync with the sibling plugins (from Discography); LL's pinned variant re-pinned accordingly.
+
 ## 0.1.69 — Auto-Played and Now Playing adds survive an artist mismatch
 
 ### Fixed

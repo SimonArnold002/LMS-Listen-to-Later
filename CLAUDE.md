@@ -564,3 +564,40 @@ The "Add to Listen Later"/"Add to Wish List" custom actions appear on streaming 
   artist+title search; a library NP track adds by album id. Reuses `Sources::_norm`/`_artistMatch`. Unsupported
   services still reject (the scheme feeds `_serviceCan`). NB: relies on `$request->client` being the playing
   player — Material sends the current player with the custom action, so it is.
+- **0.1.70** — **Matcher: self-titled-album exact rule (fleet sync from Discography 0.11.1).** `_albumMatches`
+  (`Sources.pm`) now, when the album title normalises to the ARTIST name ("The Beatles", "Weezer"), requires an
+  EXACT title before the lenient "starts-with" rule — so a saved self-titled album stops matching "The Beatles
+  1962-1966" etc. `_norm` still strips brackets, so "(White Album)"/"(Remastered)" match. Fires ONLY when the
+  artist is present AND == the album; **LL's deliberate lenient empty-artist replay path is untouched** (the
+  self-titled block sits above the `return 1 unless length $artistNorm` line). Applied across the fleet
+  (LBF 0.9.90, PFR 0.7.5, DSC already had it); LL's pinned `_albumMatches` variant re-pinned
+  `5d270440af5a→2bf38f346e0f` in `matcher_sync_check.py` (exits 0). No cache (LL matches live). `perl -c`
+  clean; validated by the shared self-titled matcher test incl. the LL empty-artist leniency preserved. (0.1.65–0.1.69 detail is in CHANGELOG.md.)
+
+## Shared Matching Engine — FLEET SYNC RULE (2026-07-10)
+
+The artist/album/track matcher (`_norm`, `%FOLD`, `_artistMatch`, `_albumMatches`,
+fallback helpers `_stripFmt`/`_asciiNorm`/`_punctNorm`/`_stripArtistPrefix`; LBF also
+`_trackMatches`) is ONE engine with a copy in each of these four repos:
+
+- `LMS-ListenBrainz-New-Releases/ListenBrainzFreshReleases/Browse.pm` (origin, canonical)
+- `LMS-Pitchfork-Reviews/PitchforkReviews/Browse.pm`
+- `LMS-Discography/Discography/Sources.pm`
+- `LMS-Listen-to-Later/ListenLater/Sources.pm` (hash-pinned LENIENT variant — empty-artist
+  saved-item replay must still match; do NOT blindly align it)
+
+**THE RULE: a matching fix in ANY of these repos must be applied to ALL repos carrying the
+affected sub, in the SAME work session.** Enforcement — this must exit 0 before any matcher
+change is called done:
+
+    python3 LMS-ListenBrainz-New-Releases/tools/matcher_sync_check.py
+
+It diffs the comment-stripped CODE of every copy across all four repos. Deliberate variants
+are sha1-pinned inside the script with a reason, and FAIL the check if they change without a
+conscious re-pin (`--print-hashes` prints current hashes). After aligning: bump every touched
+repo's plugin version AND its match/decision cache versions (LBF: `lbf:stream` + `lbf:track` +
+`lbf:pl:resolved` — ALL layers; PFR: `pfr:stream`; DSC: `dsc:cand` only if the cached candidate
+shape changed — matching runs live there; LL: none — matching is live), rebuild zips + repo.xml
+sha. Never leave a matcher fix in one repo "to port later" — that is exactly how the 2026-07
+drift happened (LBF missed the P!nk/EP/ascii rules for months).
+
