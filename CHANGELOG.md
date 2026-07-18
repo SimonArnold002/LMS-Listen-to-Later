@@ -1,5 +1,17 @@
 # Changelog
 
+## 0.1.72 — Hardening of the 0.1.71 title cleanup
+
+### Fixed
+- **The one-off "Artist - Album" title cleanup no longer re-runs on every restart.** It was called from the DB migration on each server start — a full scan of every streaming row plus a per-row match — and a row that couldn't be cleaned (a title collision with an already-clean copy of the same album) logged a warning on every boot. It now runs exactly once, gated on the database's schema version, and is still safe to re-run after a partial upgrade.
+- **The cleanup no longer risks corrupting a legitimately hyphenated album title.** It now only strips the artist prefix when the label has the spaced `"Artist - Album"` shape, so a hyphenated single-token title (e.g. `Jay-Z`, `Sunn O)))-Monoliths`) is left untouched.
+- **More separators recognised.** The prefix strip now handles the full dash family (hyphen, figure/en/em dash, horizontal bar, minus), not just hyphen/en/em, so sibling labels using any dash variant are cleaned.
+
+## 0.1.71 — Clean album titles added from "Artist - Album" plugin rows
+
+### Fixed
+- **Albums added from a sibling plugin that labels its rows "Artist - Album" (Pitchfork Reviews) are stored with a clean album title, and now auto-move to Played.** Material forces the album name to the whole row label for online items, so the album was stored with the artist prefixed ("Will Sheff - Extra Mile") — it showed doubled in the list AND broke Played auto-detection (the playing track's clean album never matched). The sibling now packs the clean album into the favurl (`&al=`), the symmetric partner of the existing `&a=` artist handshake, and the add path prefers it over the row label. A one-off idempotent migration cleans already-saved rows (streaming rows only; guarded against a collision with a clean copy). Needs both plugins updated; older sibling builds send no `&al=` and their new adds stay prefixed until updated (existing rows are still cleaned by the migration).
+
 ## 0.1.70 — Matcher: self-titled albums replay the right record
 
 ### Fixed

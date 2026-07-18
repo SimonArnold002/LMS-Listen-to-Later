@@ -101,6 +101,64 @@ SQL
     # and keeps Played's artist|album-prefix lookup matching them.
     $h->do("UPDATE albums SET dedupe_key = dedupe_key || '|' || COALESCE(CAST(year AS TEXT), '')
             WHERE dedupe_key NOT LIKE '%|%|%'");
+    # 0.1.71: streaming rows added from a sibling plugin that labels its rows "Artist - Album"
+    # (Pitchfork Reviews) were stored with the artist prefixed into the album title, so the
+    # list showed it doubled AND Played auto-detection never matched (the key's album segment
+    # carried the artist, so the playing track's clean album name never lined up). Clean the
+    # already-saved rows to match the fixed add path (which now reads the clean album from the
+    # favurl '&al='). See _migrateArtistPrefix.
+    #
+    # Run it ONCE, gated on the SQLite PRAGMA user_version (0 = never run: a fresh db or an
+    # upgrade from < 0.1.72). Unlike the self-limiting SQL migrations above, this one is a
+    # full non-library SELECT + a per-row Perl loop, so re-running it on every start is pure
+    # wasted work; worse, a row that can't be cleaned (a UNIQUE(source,dedupe_key) collision
+    # with an already-clean twin) would re-log its skip WARN on every boot forever. The gate
+    # makes both one-off. Idempotent regardless, so a re-run after a partial upgrade is safe.
+    my ($schemaVer) = $h->selectrow_array('PRAGMA user_version');
+    if (!$schemaVer) {
+        _migrateArtistPrefix($h);
+        $h->do('PRAGMA user_version = 1');
+    }
+    return;
+}
+
+# One-off cleanup for rows whose album title begins with the artist name + " - " (a sibling
+# plugin's "Artist - Album" row label stored verbatim as the album). Strip the redundant
+# "<artist> - " prefix and recompute the dedupe_key so Played's artist|album lookup matches.
+# Streaming rows only — a LOCAL album can legitimately be titled "Artist - Title", and library
+# adds never came through the polluting path. Per-row guarded against a UNIQUE(source,
+# dedupe_key) collision with an already-clean twin (that row is left as-is). Naturally
+# idempotent: a cleaned title no longer begins with "<artist> - ". Gated to run once (see
+# _migrate / PRAGMA user_version).
+#
+# The prefix must be the SPACE-PADDED "<artist> <dash> <album>" shape Material renders for a
+# two-part row label — requiring whitespace on both sides of the dash keeps a hyphenated
+# single-token title ("Jay-Z", "Sunn O)))-Monoliths") from being misread as a prefix. The
+# dash may be any of the dash family (hyphen, figure/en/em/horizontal-bar, minus) since
+# sibling labels differ. Residual (accepted, now bounded to one run): a streaming album whose
+# REAL title genuinely is "<its own artist> - <rest>" with spaces is indistinguishable from
+# the pollution by stored content alone and is still stripped — vanishingly rare, and library
+# rows (where it's most plausible) are excluded outright.
+sub _migrateArtistPrefix {
+    my ($h) = @_;
+    my $rows = eval {
+        $h->selectall_arrayref(
+            "SELECT id, artist, album_title, year FROM albums
+              WHERE source != 'library' AND artist IS NOT NULL AND artist != ''
+                AND album_title IS NOT NULL",
+            { Slice => {} });
+    } or return;
+    for my $r (@$rows) {
+        my $clean = $r->{album_title};
+        next unless $clean =~ s/^\s*\Q$r->{artist}\E\s+[-\x{2012}\x{2013}\x{2014}\x{2015}\x{2212}]\s+//i
+                 && length $clean;
+        my $key = dedupeKey($r->{artist}, $clean, $r->{year});
+        eval {
+            $h->do('UPDATE albums SET album_title = ?, dedupe_key = ? WHERE id = ?',
+                undef, $clean, $key, $r->{id});
+            1;
+        } or $log->warn("Listen Later: artist-prefix cleanup skipped id $r->{id}: $@");
+    }
     return;
 }
 

@@ -1038,6 +1038,19 @@ sub _addCtxCommand {
     if ($p{favurl} && $p{favurl} =~ s{[?&]y=([^&]*)}{}) {
         $favYear = $1;
     }
+    # Some sibling plugins label their browse rows "Artist - Album" (e.g. Pitchfork
+    # Reviews' review rows), and Material forces $ALBUMNAME/$TITLE to that whole label for
+    # online items — so the album name arrives with the artist prefixed. Those plugins pack
+    # the CLEAN album title into the favurl as '&al=' (the symmetric partner of the '&a='
+    # artist above); prefer it over $TITLE below so the stored album is clean ("Extra Mile",
+    # not "Will Sheff - Extra Mile"). The list display AND Played auto-detection both key on
+    # the album name, so a polluted title shows doubled and never auto-moves to Played.
+    # ([?&]a= above can't match '&al=' — it needs '=' right after 'a'.) Strip before the log.
+    my $favAlbum;
+    if ($p{favurl} && $p{favurl} =~ s{[?&]al=([^&]*)}{}) {
+        require URI::Escape;
+        $favAlbum = URI::Escape::uri_unescape($1);
+    }
 
     my $list = _wantedList($request->getParam('list'));
 
@@ -1050,7 +1063,8 @@ sub _addCtxCommand {
     $artist = $favArtist if (!defined $artist || !length $artist) && defined $favArtist && length $favArtist;
     my $artwork = $favCover // $p{image};
     my $year    = $p{year} || $favYear;
-    my $album   = $p{name};
+    # Prefer the clean album packed in the favurl (&al=) over the "Artist - Album" row label.
+    my $album   = (defined $favAlbum && length $favAlbum) ? $favAlbum : $p{name};
     # Material appends " (YYYY)" to album display titles — strip it for a clean
     # album name (and use it as the year if none was passed).
     if (defined $album && $album =~ s/\s*\((\d{4})\)\s*$//) {

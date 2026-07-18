@@ -573,6 +573,37 @@ The "Add to Listen Later"/"Add to Wish List" custom actions appear on streaming 
   (LBF 0.9.90, PFR 0.7.5, DSC already had it); LL's pinned `_albumMatches` variant re-pinned
   `5d270440af5a→2bf38f346e0f` in `matcher_sync_check.py` (exits 0). No cache (LL matches live). `perl -c`
   clean; validated by the shared self-titled matcher test incl. the LL empty-artist leniency preserved. (0.1.65–0.1.69 detail is in CHANGELOG.md.)
+- **0.1.71** — **Clean album title on adds from a sibling plugin that labels rows "Artist - Album"
+  (Pitchfork Reviews) — fixes those albums never auto-moving to Played.** A Pitchfork row's `name`/`line1`
+  is `"Artist - Album"`, and Material forces `$ALBUMNAME`/`$TITLE` to that whole label for online items, so
+  `_addCtxCommand` stored the album title with the artist prefixed ("Will Sheff - Extra Mile"). That showed
+  DOUBLED in the list ("Will Sheff – Will Sheff - Extra Mile") AND broke **Played auto-detection**: its
+  dedupe-key album segment then included the artist, so the playing Qobuz track's clean album ("Extra Mile")
+  never matched via `Played::_matchRecord` → `DB::findByArtistAlbum` (nor the `findByAlbum` fallback). Fixed as
+  the symmetric partner of the existing `&a=` artist handshake, NOT an LL-side strip of bad input: **PFR
+  (0.7.6) packs the CLEAN album into the favurl as `&al=`** (`Browse::_attachFavUrl`), and `_addCtxCommand`
+  reads `[?&]al=` and prefers it over `$TITLE` (`[?&]a=` can't match `&al=` — it needs `=` right after `a`).
+  Already-saved polluted rows are cleaned by a one-off idempotent DB migration `DB::_migrateArtistPrefix`
+  (strip a leading `"<artist> - "`/en/em-dash from the title + recompute the dedupe_key; **streaming rows
+  only** — a local album can legitimately be titled "Artist - Title"; per-row guarded against a
+  UNIQUE(source,dedupe_key) collision with a clean twin). No matcher change (`_attachFavUrl` is outside the
+  shared engine). `perl -c` clean. NB the fix needs BOTH plugins updated; an older PFR sends no `&al=` and new
+  adds from it stay polluted until it's updated (existing rows are still cleaned by the migration).
+- **0.1.72** — **Code-review hardening of the 0.1.71 `_migrateArtistPrefix` cleanup** (behaviour of the add-path
+  `&al=` fix unchanged). Three fixes, all verified against a real in-memory SQLite DB
+  (`scratchpad/verify_migration.pl`, all pass): **(1) run ONCE** — the migration was called from `_migrate` on
+  every server start (a full non-library `SELECT` + per-row Perl loop each boot, and a row that can't be cleaned
+  — a `UNIQUE(source,dedupe_key)` collision with a clean twin — re-logged its skip WARN forever). Now gated on
+  the SQLite `PRAGMA user_version` (0 ⇒ run + stamp `1`), so it's genuinely one-off; still idempotent so a
+  re-run after a partial upgrade is safe. **(2) narrower prefix match** — the strip now requires the
+  SPACE-PADDED `"<artist> <dash> <album>"` shape Material actually renders (`\s+[dash]\s+`, was `\s*[dash]\s*`),
+  so a hyphenated single-token title (`Jay-Z`, `Sunn O)))-Monoliths`) can no longer be misread as an artist
+  prefix and corrupted. Residual (accepted, now bounded to the single run): a streaming album whose REAL title
+  genuinely is `"<own artist> - <rest>"` with spaces is indistinguishable from the pollution by stored content
+  alone and is still stripped — vanishingly rare, and library rows (where it's most plausible) are excluded.
+  **(3) full dash family** — separator class broadened from hyphen/en/em to also cover figure dash (U+2012),
+  horizontal bar (U+2015) and minus (U+2212), so sibling labels using any dash variant are cleaned. `perl -c`
+  clean (logic validated standalone — Slim modules absent on the Mac). No matcher change.
 
 ## Shared Matching Engine — FLEET SYNC RULE (2026-07-10)
 
