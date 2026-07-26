@@ -1,5 +1,58 @@
 # Changelog
 
+## 0.1.86 — One wording for every menu
+
+### Changed
+- **The Add entries now read simply *Add to Listen Later* / *Add to Wish List* everywhere.** The row you're on already tells you what you're saving, and the skin can only word the menu per *list*, not per row — so naming a type got it wrong on any mixed list (a favourites list holding albums, tracks and podcasts called all of them albums). The one place the wording still names a type is Material's **Now Playing** screen: there's no surrounding list to make it obvious there, so it offers **Add track to Listen Later** with **Add album to Listen Later** in **"… → More"**.
+
+## 0.1.85 — Podcast episodes save from anywhere, not just the Podcasts app
+
+### Fixed
+- **Saving a podcast episode from a favourited feed said "Add album" and did nothing.** The skin picks the menu from the *list* you're browsing, so an episode inside a favourited feed — probably the most natural way to reach one — never got the podcast entry and was refused. Episodes are now resolved wherever they're found: a favourited feed, the home screen, search results. Adding an album is unaffected; the extra work only happens on an add that was about to be refused anyway.
+- **No *Add to Wish List* for podcasts** — you don't buy podcast episodes. In a mixed list where the menu can't tell a podcast from an album the entry may still appear; saving from it puts the episode in *Listen Later* rather than somewhere meaningless.
+
+## 0.1.84 — Podcast episodes
+
+### Added
+- **Save a podcast episode to Listen Later.** Episodes from LMS's built-in **Podcasts** app can be added from their **"…"** menu, appear in your list as **Podcast · &lt;show&gt;**, and play back through the Podcasts plugin so its resume position keeps working. They're marked Played once actually listened to, like any other single item.
+- Episodes are matched against **the shows you subscribe to**. An episode from a show you haven't subscribed to (found via *Search feeds*) can't be identified, and is refused rather than saved as something that would never play — subscribe to the show first.
+
+## 0.1.83 — Played means played, not started
+
+### Fixed
+- **A single, a saved track or a podcast episode no longer moves to *Played* the moment it starts.** Anything that's one track had nothing to count, so merely skipping past it marked it Played — and *Auto-remove played albums* would then delete it days later. It's now marked only once you've actually listened to ~90% of it. Pausing doesn't count towards that either: it follows real playback, not elapsed time.
+
+## 0.1.82 — Singles and short EPs can reach Played
+
+### Fixed
+- **A single could never move to *Played*.** Singles are stored as releases, so they were judged by the *Streaming track count* setting (4 distinct tracks by default) — which a one-track release can never reach, so it sat in *Listen Later* forever no matter how often you played it. A single now needs its one track, and an EP's requirement is capped so a two- or three-track EP can complete. Albums are unchanged.
+
+## 0.1.81 — Correctness fixes for tracks
+
+### Fixed
+- **The same track saved from two different places no longer appears twice.** A track saved from a streaming browse list and the same track saved from the play queue were treated as different items, because one carried its album name and the other didn't.
+- A **single** saved once with a release year and once without is likewise recognised as the same recording.
+- Removed an unused half-built code path and its unused menu strings.
+
+## 0.1.80 — Singles added from a browse list
+
+### Fixed
+- **Adding a single from a streaming browse list stored it as a plain track** instead of recognising it as a Single, because those rows carry no album name. The name was never needed to classify it — only to label it — so browse-list singles are now detected like any other.
+
+## 0.1.79 — A single and its track are the same recording
+
+### Fixed
+- **Adding a single gave you two rows** — one *Track*, one *Single* — that never reconciled. A streaming track whose release is a single is now stored as the Single, and a single and its lone track are recognised as the same recording whichever order you add them in.
+
+## 0.1.74–0.1.78 — Individual tracks, and singles & EPs
+
+### Added
+- **Save an individual track**, not just a whole album. A track row's **"…"** menu saves that track; it plays on tap rather than opening a tracklist. Track and album Played states are independent, so neither affects the other. *(Material Skin; on the classic skin a track's menu offers the album, as before.)*
+- **Rows say what they are** — *Album*, *EP*, *Single* or *Track*, with **♫** for a multi-track release and **♪** for a single track. Streaming releases are classified as they're added, so the label is correct immediately rather than changing on a later refresh.
+
+### Fixed
+- Settings checkboxes were invisible on the Material Skin, and a default-on toggle couldn't be switched off.
+
 ## 0.1.72 — Hardening of the 0.1.71 title cleanup
 
 ### Fixed

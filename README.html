@@ -114,9 +114,9 @@
 
 <header class="hero">
   <h1>Listen Later — LMS Plugin</h1>
-  <p class="tagline">A plugin for <strong>Lyrion Music Server (LMS)</strong> that lets you save an album — from your <strong>local library</strong> or any <strong>streaming service</strong> (Qobuz, Tidal, Bandcamp, Deezer) — into a curated list, browse it like a playlist <em>of albums</em>, and have albums move to a <strong>Played</strong> section once you've heard them. A separate <strong>Wish List</strong> sits alongside for things you mean to buy, and albums move freely between the three lists.</p>
+  <p class="tagline">A plugin for <strong>Lyrion Music Server (LMS)</strong> that lets you save an album, an individual track or a podcast episode — from your <strong>local library</strong>, any <strong>streaming service</strong> (Qobuz, Tidal, Bandcamp, Deezer) or your <strong>podcast subscriptions</strong> — into a curated list, browse it like a playlist, and have things move to a <strong>Played</strong> section once you've heard them. A separate <strong>Wish List</strong> sits alongside for things you mean to buy, and items move freely between the three lists.</p>
   <div class="badges">
-    <span class="badge accent">v0.1.72</span>
+    <span class="badge accent">v0.1.86</span>
     <span class="badge">LMS 9.0.0+</span>
     <span class="badge">Material Skin</span>
     <span class="badge">Library + Streaming</span>
@@ -132,9 +132,11 @@
 <h2>Features at a glance</h2>
 <div class="feature-cards">
 <div class="card"><h4>Add from the "…" menu</h4><p><em>Add to Listen Later</em> and <em>Add to Wish List</em> on any album or track</p><span class="needs">Needs: nothing</span></div>
+<div class="card"><h4>Albums, tracks or podcasts</h4><p>Save a whole release, a single track, or a podcast episode</p><span class="needs">Needs: nothing</span></div>
+<div class="card"><h4>Knows what it saved</h4><p>Each row is marked <em>Album</em>, <em>EP</em>, <em>Single</em>, <em>Track</em> or <em>Podcast</em></p><span class="needs">Needs: nothing</span></div>
 <div class="card"><h4>Three lists</h4><p><em>Listen Later</em>, <em>Wish List</em> and <em>Played</em>, each with a live count and icon</p><span class="needs">Needs: nothing</span></div>
 <div class="card"><h4>Plays from the original source</h4><p>Library albums play locally; streaming albums replay through their service</p><span class="needs">Needs: The matching service plugin</span></div>
-<div class="card"><h4>Automatic Played tracking</h4><p>A saved album moves to <em>Played</em> once you've heard most of it — from the list or anywhere</p><span class="needs">Needs: nothing</span></div>
+<div class="card"><h4>Automatic Played tracking</h4><p>A saved item moves to <em>Played</em> once you've heard most of it — from the list or anywhere</p><span class="needs">Needs: nothing</span></div>
 <div class="card"><h4>Move &amp; remove</h4><p>Move an album between any two lists, or remove it, from the row's "…" menu</p><span class="needs">Needs: Material Skin</span></div>
 <div class="card"><h4>Buy on Bandcamp</h4><p>Opens a Bandcamp album's purchase page in your browser</p><span class="needs">Needs: Bandcamp plugin</span></div>
 <div class="card"><h4>Auto-tidy Played</h4><p>Played albums clear themselves after a set number of days</p><span class="needs">Needs: nothing</span></div>
@@ -165,19 +167,34 @@ sudo systemctl restart lyrionmusicserver</code></pre>
 <section id="quick-start">
 <h2>Quick start</h2>
 <ol>
-<li>Browse to any album or track — in your library or a streaming service.
+<li>Browse to any album, track or podcast episode — in your library, a streaming service or your podcast subscriptions.
 </li>
 <li>Open its <strong>"…"</strong> menu and choose <strong>Add to Listen Later</strong> (or <strong>Add to Wish List</strong>).
 </li>
-<li>Open <strong>Apps → Listen Later</strong> to see your lists. Tap an album to play it.
+<li>Open <strong>Apps → Listen Later</strong> to see your lists. Tap a row to play it.
 </li>
-<li>Play most of an album and it moves itself to <strong>Played</strong>.
+<li>Play most of it and it moves itself to <strong>Played</strong>.
 </li></ol>
 </section>
 <section id="using-it">
 <h2>Using it</h2>
-<h3>Adding albums</h3>
-<p><em>Add to Listen Later</em> and <em>Add to Wish List</em> appear in the <strong>"…"</strong> context menu of albums and tracks — local library and streaming alike. Adding an album that's already saved (in any list) does nothing, so an accidental tap can't disturb your lists or bounce a Played album back.</p>
+<h3>Adding things</h3>
+<p><em>Add to Listen Later</em> and <em>Add to Wish List</em> appear in the <strong>"…"</strong> context menu of albums and tracks — local library and streaming alike. Adding something that's already saved (in any list) does nothing, so an accidental tap can't disturb your lists or bounce a Played item back.</p>
+<p>The menu wording is the same everywhere, because the row you're on already tells you what you're saving: an album row saves the album, a track row saves that track. The one exception is Material's <strong>Now Playing</strong> screen, where there's no surrounding list to make it obvious — there the menu says <strong>Add track to Listen Later</strong>, and <strong>Add album to Listen Later</strong> sits in <strong>"… → More"</strong> if you want the whole release instead.</p>
+<h3>Albums, tracks and podcasts</h3>
+<p>Each saved row is labelled with what it is, and carries a small glyph — <strong>♫</strong> for a multi-track release, <strong>♪</strong> for a single track:</p>
+<ul>
+<li><strong>Album</strong> / <strong>EP</strong> / <strong>Single</strong> — a whole release. Streaming releases are classified when you add them, so the label is right straight away rather than changing later.
+</li>
+<li><strong>Track</strong> — one song, saved from a track row. It plays on tap rather than opening a tracklist.
+</li>
+<li><strong>Podcast</strong> — one episode (see below).
+</li></ul>
+<p>Saving a streaming <strong>single</strong> stores it as the Single release rather than a loose track, so adding "the single" and "the track" can't leave you with two rows for the same recording.</p>
+<h3>Podcasts</h3>
+<p>Episodes from LMS's built-in <strong>Podcasts</strong> app can be saved to <em>Listen Later</em> — which is, after all, exactly what a podcast queue is for. Add one from its <strong>"…"</strong> menu just like anything else; it appears in your list as <strong>Podcast · &amp;lt;show&amp;gt;</strong> and plays back through the Podcasts plugin, so its resume position keeps working.</p>
+<p>There's no <em>Add to Wish List</em> for a podcast — you don't buy podcast episodes. (In a mixed list such as Favourites the entry can still appear, because the menu is built per list rather than per row; saving from it puts the episode in <em>Listen Later</em> anyway.)</p>
+<p><strong>Episodes are matched against the podcasts you subscribe to.</strong> A podcast browse row carries no playable link of its own, so the plugin identifies the episode by its artwork and title in your subscribed feeds. That means an episode from a show you've subscribed to can be saved from anywhere — the Podcasts app, a favourited feed, the home screen — but an episode you found through <strong>Search feeds</strong> on a show you <em>haven't</em> subscribed to can't be, and is refused rather than saved as something that would never play. Subscribe to the show first.</p>
 <h3>The three lists</h3>
 <p>Open <strong>Apps → Listen Later</strong> and you'll see one page with three headed sections, each showing a live count:</p>
 <ul>
@@ -194,7 +211,12 @@ sudo systemctl restart lyrionmusicserver</code></pre>
 <h3>Buy on Bandcamp</h3>
 <p>For a Bandcamp album, the <strong>"… → More"</strong> menu has <strong>Buy on Bandcamp</strong>, which opens the album's Bandcamp page in your browser. The page link is found on first use and cached; if the exact page can't be matched it falls back to a Bandcamp search.</p>
 <h3>Automatic Played tracking</h3>
-<p>With <strong>Automatically move albums to Played</strong> on (the default), a <strong>Listen Later</strong> album moves to <strong>Played</strong> once you've heard most of it — whether you started playback from the list or anywhere else (Material, the app, a streaming page). Only <em>Listen Later</em> albums are watched; <em>Wish List</em> albums are left alone. See the thresholds in Settings.</p>
+<p>With <strong>Automatically move albums to Played</strong> on (the default), a <strong>Listen Later</strong> item moves to <strong>Played</strong> once you've heard most of it — whether you started playback from the list or anywhere else (Material, the app, a streaming page). Only <em>Listen Later</em> items are watched; <em>Wish List</em> items are left alone.</p>
+<ul>
+<li>A <strong>multi-track release</strong> is judged on how many of its tracks you've played — see the thresholds in Settings.
+</li>
+<li>Anything that's a <strong>single track</strong> (a saved track, a Single, or a podcast episode) is marked Played once you've actually listened to ~90% of it. Skipping past it doesn't count, and pausing doesn't either — it goes on real playback, not elapsed time — so something you skimmed past won't quietly move to <em>Played</em> and then be tidied away.
+</li></ul>
 <h3>Material home shelf</h3>
 <p>On the Material Skin home screen you can show a horizontal <strong>Listen Later</strong> row of your saved albums, each playable/tappable. It uses Material's standard home-extra mechanism (no skin patching). If it isn't shown, enable it under Material's home-screen customisation.</p>
 <h3>Sorting</h3>
@@ -213,7 +235,7 @@ sudo systemctl restart lyrionmusicserver</code></pre>
 <tr><td><strong>Default sort order</strong></td><td>Ordering for all three lists</td><td>Recently added</td></tr>
 <tr><td><strong>Automatically move albums to Played</strong></td><td>Master switch for auto-marking</td><td>On</td></tr>
 <tr><td><strong>Played threshold</strong></td><td>Percent of a <em>library</em> album's tracks that must play before it's Played</td><td>60%</td></tr>
-<tr><td><strong>Streaming track count</strong></td><td>Distinct <em>streaming</em> tracks before a streaming album is Played (no reliable track total exists)</td><td>4</td></tr>
+<tr><td><strong>Streaming track count</strong></td><td>Distinct <em>streaming</em> tracks before a streaming album is Played (no reliable track total exists). Capped for an EP, which may have fewer tracks than this</td><td>4</td></tr>
 <tr><td><strong>Auto-remove played albums after</strong></td><td>Days a Played album is kept before being removed (<strong>0 = keep forever</strong>). Re-playing it resets the clock</td><td>7</td></tr>
 <tr><td><strong>Add to Material context menus</strong></td><td>Adds the <em>Add to Listen Later</em> / <em>Add to Wish List</em> entries to Material's menus (takes effect after a restart)</td><td>On</td></tr>
 </tbody></table>
@@ -230,6 +252,10 @@ sudo systemctl restart lyrionmusicserver</code></pre>
 <li><strong>Material custom actions on home-shelf cards</strong> only appear after you've opened a streaming browse page in the same session — a Material limitation in how the home shelves render menus.
 </li>
 <li>**Internet-radio stations don't show <em>Add</em>.** Radio is a live stream, not something you can save and replay, so the <em>Add to Listen Later</em> / <em>Add to Wish List</em> entries are deliberately hidden on radio browse rows (BBC Sounds, TuneIn's Music/News/Sports/… categories, etc.). This applies to radio <em>browse</em> rows; a radio card on a Material home shelf can't be suppressed the same way, but adding one there is simply ignored. <em>(After updating, reload Material once — Ctrl/Cmd+Shift+R — so it re-reads its custom-actions file.)</em>
+</li>
+<li><strong>Podcast episodes must belong to a show you subscribe to</strong> — that's how the plugin identifies them (see <em>Podcasts</em> above). Episodes found via <em>Search feeds</em> on an unsubscribed show are refused rather than saved unplayable.
+</li>
+<li><strong>Saving an individual track needs the Material Skin.</strong> On the classic skin a track's "…" menu offers the <em>album</em> it belongs to, which is what that menu has always been able to reach.
 </li>
 <li><strong>Storage</strong> is a SQLite database in the server cache directory, so your lists survive restarts and rescans.
 </li></ul>

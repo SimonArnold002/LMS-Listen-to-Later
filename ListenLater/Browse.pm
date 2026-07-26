@@ -78,7 +78,7 @@ sub _section {
     # view toggle for the whole page if any item is type => 'text' (browse-resp.js:
     # `types.has("text")`), whereas type => 'header' is fine. An empty section just
     # shows its "(0)" header. (The header count conveys emptiness.)
-    push @items, map { _albumRow($client, $_) } @$rows;
+    push @items, map { _row($client, $_) } @$rows;
 
     return @items;
 }
@@ -110,29 +110,104 @@ sub _renderSection {
     my ($client, $callback, $status) = @_;
     my $rows = Plugins::ListenLater::DB::list($status, $prefs->get('sort') || 'added');
     my @items = @$rows
-        ? map { _albumRow($client, $_) } @$rows
+        ? map { _row($client, $_) } @$rows
         : ({ name => cstring($client, 'PLUGIN_LL_EMPTY'), type => 'text' });
     $callback->({ items => \@items });
+}
+
+# Leading glyphs, chosen by how many tracks the row represents so the symbol matches the
+# label — both plain text glyphs (not colour emoji) so they render consistently everywhere:
+#   ♫ (two beamed notes) = a MULTI-track release (Album / EP)
+#   ♪ (one note)         = a SINGLE track: a Single release OR an individual saved Track
+# (Single vs Track is then told apart by the subtitle word, not the glyph.)
+use constant GLYPH_MULTI  => "\x{266b}";
+use constant GLYPH_SINGLE => "\x{266a}";
+use constant SEP          => " \x{00b7} ";   # " · " subtitle separator
+
+# The glyph for a row: ♪ for an individual track or a single release, else ♫.
+sub _glyphFor {
+    my ($rec) = @_;
+    return GLYPH_SINGLE if ($rec->{kind} || '') eq 'track';
+    return GLYPH_SINGLE if ($rec->{rel_type} || '') eq 'single';
+    return GLYPH_MULTI;
+}
+
+# Dispatch a stored row to the right renderer.
+sub _row {
+    my ($client, $rec) = @_;
+    return (($rec->{kind} || '') eq 'track')
+        ? _trackRow($client, $rec)
+        : _albumRow($client, $rec);
+}
+
+# The type word shown as the first segment of a row's subtitle. A podcast episode says
+# "Podcast"; any other track says "Track"; a release is its classified type (Album / EP /
+# Single), defaulting to Album until it's been resolved and classified (see _albumTracks /
+# relTypeFor).
+sub _typeLabel {
+    my ($client, $rec) = @_;
+    return cstring($client, 'PLUGIN_LL_TYPE_PODCAST') if ($rec->{source} || '') eq 'podcast';
+    return cstring($client, 'PLUGIN_LL_TYPE_TRACK') if ($rec->{kind} || '') eq 'track';
+    my $rt = $rec->{rel_type} || 'album';
+    my %str = (album => 'PLUGIN_LL_TYPE_ALBUM', ep => 'PLUGIN_LL_TYPE_EP', single => 'PLUGIN_LL_TYPE_SINGLE');
+    return cstring($client, $str{$rt} || 'PLUGIN_LL_TYPE_ALBUM');
 }
 
 # A directly-playable album row. type => 'playlist' + a url coderef that resolves
 # the album's tracks gives Material the play button and Play/Play Next/Add in the
 # "…". itemActions→info adds the "…" → More context entry → our Remove/Move menu
-# (refreshes the list in place; see Plugin::_contextMenuQuery).
+# (refreshes the list in place; see Plugin::_contextMenuQuery). The ♫ glyph + the
+# type word ("Album"/"EP"/"Single" · source) in the subtitle mark it as a release.
 sub _albumRow {
     my ($client, $rec) = @_;
 
-    my $name = '';
+    my $name = _glyphFor($rec) . ' ';
     $name .= $rec->{artist} . " \x{2013} " if $rec->{artist};
     $name .= $rec->{album_title} // cstring($client, 'PLUGIN_LL_UNKNOWN_ALBUM');
     $name .= " ($rec->{year})" if $rec->{year};
 
     return {
         name        => $name,
-        line2       => ucfirst($rec->{source} || ''),
+        line2       => _typeLabel($client, $rec) . SEP . ucfirst($rec->{source} || ''),
         image       => $rec->{artwork} || _iconFor($rec->{status}),
         type        => 'playlist',
         url         => \&_albumTracks,
+        passthrough => [ { id => $rec->{id} } ],
+        itemActions => {
+            info => {
+                command     => [ 'listenlater', 'contextmenu' ],
+                fixedParams => { id => $rec->{id} },
+            },
+        },
+    };
+}
+
+# A directly-playable single-track row. Unlike a release it plays on click (type =>
+# 'audio' with the stored play url) rather than drilling into a tracklist — a saved
+# track is one song. The ♪ glyph + "Track · <album> · <source>" subtitle distinguish it.
+# Same itemActions→info "…" → More (Remove/Move) as a release row.
+sub _trackRow {
+    my ($client, $rec) = @_;
+
+    my $ref = (ref $rec->{ref} eq 'HASH') ? $rec->{ref} : {};
+
+    my $name = _glyphFor($rec) . ' ';
+    $name .= $rec->{artist} . " \x{2013} " if $rec->{artist};
+    $name .= $rec->{track_title} // $rec->{album_title} // cstring($client, 'PLUGIN_LL_UNKNOWN_ALBUM');
+
+    my $sub = _typeLabel($client, $rec);
+    $sub .= SEP . $rec->{album_title} if defined $rec->{album_title} && length $rec->{album_title};
+    # The source segment is dropped for a podcast: the type word already reads "Podcast",
+    # so appending it again would give "Podcast · <show> · Podcast".
+    $sub .= SEP . ucfirst($rec->{source} || '')
+        if $rec->{source} && $rec->{source} ne 'podcast';
+
+    return {
+        name        => $name,
+        line2       => $sub,
+        image       => $rec->{artwork} || _iconFor($rec->{status}),
+        type        => 'audio',
+        url         => $ref->{url},
         passthrough => [ { id => $rec->{id} } ],
         itemActions => {
             info => {
@@ -151,7 +226,7 @@ sub _albumRow {
 sub homeShelf {
     my ($client, $callback, $args) = @_;
     my $rows = Plugins::ListenLater::DB::list('later', $prefs->get('sort') || 'added');
-    $callback->({ items => [ map { _albumRow($client, $_) } @$rows ] });
+    $callback->({ items => [ map { _row($client, $_) } @$rows ] });
 }
 
 # Resolve the tracks for an album row (drill-in and play both call this).
@@ -173,6 +248,17 @@ sub _albumTracks {
             ref $_ eq 'HASH' && !$_->{weblink} && (($_->{type} // '') ne 'text')
         } @$tracks;
         @playable = @$tracks unless @playable;
+
+        # First-resolve release-type backfill: a streaming release is saved before we
+        # know its track count (the row carries no tracklist), so classify it now from
+        # the resolved count and persist it (updateRelType is a no-op once set / for a
+        # track row / when the count is unusable). Library releases were classified at
+        # add time. See Sources::relTypeFor.
+        if (($rec->{kind} || '') ne 'track' && !$rec->{rel_type} && @playable) {
+            my $rt = Plugins::ListenLater::Sources::relTypeFor(count => scalar @playable);
+            Plugins::ListenLater::DB::updateRelType($rec->{id}, $rt) if $rt;
+        }
+
         $callback->({ items => \@playable });
     });
 }

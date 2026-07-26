@@ -40,6 +40,37 @@ sub sourceFromUrl {
     return $SCHEME{$scheme} || $scheme;   # unknown streaming scheme kept as-is
 }
 
+# Does this favurl point at a single TRACK (vs an album)? The reliable album-vs-track
+# discriminator for streaming adds: Material collapses a streaming album's track rows onto
+# the 'online-album' custom-action category (verified live — a Qobuz album-drill track fires
+# online-album, not online-track), so the category can't be trusted; the play url can.
+# Order: a container ref ('album:' etc.) is a decisive NO; a media-file extension (Qobuz
+# .flac, Deezer .flc, Tidal .flac/.m4a, …) or a '/track/' path (Bandcamp/SoundCloud) is a
+# decisive YES; anything else falls through to a logged fail-open YES (see below).
+sub favurlIsTrack {
+    my ($u) = @_;
+    return 0 unless defined $u && length $u;
+    return 0 unless $u =~ m{^\w+://};      # must be a scheme url to say anything
+    # A CONTAINER ref is decisive → not a track. 'album:' is the one the services actually
+    # emit; the others cost nothing and stop a playlist/artist/mix row being replayed as a
+    # single audio url.
+    return 0 if $u =~ m{(?:[:/])(?:album|playlist|artist|mix):};
+    # Explicit track shapes: a media-file extension (Qobuz .flac, Deezer .flc, Tidal
+    # .flac/.m4a, …) or a '/track/' path (Bandcamp/SoundCloud).
+    return 1 if $u =~ m{\.(?:flac|flc|mp3|m4a|mp4|aac|ogg|oga|opus|wav|alac|aiff?)(?:[?#].*)?$}i;
+    return 1 if $u =~ m{/track/};
+    # Otherwise: for every service we support, an ALBUM favurl is either EMPTY or carries
+    # 'album:' — so a remaining non-empty scheme url with neither is a track (e.g. an
+    # extension-less tidal://<id>). This is a fail-OPEN default and nothing enforces the
+    # invariant: if a supported service ever starts emitting an album favurl in a shape we
+    # don't recognise, its albums would be stored as kind='track' rows pointing a
+    # type => 'audio' item at a non-audio url — i.e. rows that can't play. Log it so that
+    # shows up in log.txt as a named suspect instead of silently. (An UNsupported service
+    # breaking the invariant still costs nothing — it's rejected by _isReplayableSource.)
+    $log->warn("LL: favurlIsTrack — assuming TRACK for an unrecognised favurl shape: $u");
+    return 1;
+}
+
 # Metadata for a currently-playing REMOTE track, from its protocol handler's
 # getMetadataFor — the same source LMS's status query / Material's Now Playing use.
 # Streaming services (Qobuz/Tidal/Deezer) DON'T store album/artist/cover on the LMS
@@ -186,6 +217,13 @@ sub buildPlayableItems {
 
     my $source = $rec->{source} || 'library';
 
+    # A saved TRACK is a single, self-contained play URL — no album node, no matcher,
+    # no search. The stored url plays directly (a library file://, or a streaming
+    # qobuz://…/tidal://…/deezer://…/bandcamp track url).
+    if (($rec->{kind} || '') eq 'track') {
+        return $cb->(_trackPlayableItems($rec));
+    }
+
     if ($source eq 'library') {
         return $cb->(_libraryPlayable($rec));
     }
@@ -248,6 +286,11 @@ sub resolveTracks {
 
     my $source = $rec->{source} || 'library';
 
+    # Track saves resolve to the one stored audio item (no service round-trip).
+    if (($rec->{kind} || '') eq 'track') {
+        return $cb->(_trackPlayableItems($rec));
+    }
+
     if ($source eq 'library') {
         return $cb->(_libraryTrackItems($rec->{ref}{album_id}));
     }
@@ -293,6 +336,125 @@ sub _libraryTrackItems {
         push @items, { name => $t->title, type => 'audio', url => $t->url };
     }
     return \@items;
+}
+
+# One playable audio item for a saved TRACK, from its stored play URL. The URL is the
+# canonical service/library url captured at add time (qobuz://…flac, file://…, etc.), so
+# replay is a direct handoff to the protocol handler — the same shape as a library album's
+# track items. Returns a "no match" text row if the url is somehow missing (older/corrupt
+# record) so the view is never blank.
+sub _trackPlayableItems {
+    my ($rec) = @_;
+    my $ref = (ref $rec->{ref} eq 'HASH') ? $rec->{ref} : {};
+    my $url = $ref->{url};
+    return [{ name => cstring(undef, 'PLUGIN_LL_NO_MATCH'), type => 'text' }]
+        unless defined $url && length $url;
+    return [{
+        name  => $rec->{track_title} // $rec->{album_title} // '',
+        type  => 'audio',
+        url   => $url,
+        image => $rec->{artwork},
+    }];
+}
+
+# Classify a release as 'album' | 'ep' | 'single'. Prefers an explicit type the SOURCE
+# supplied (e.g. the ListenBrainz Fresh Releases favurl '&rt=' handshake, which carries
+# the true MusicBrainz release-group type) — since the LMS streaming plugins' track
+# coderefs don't expose a release type, that handshake is the only *authoritative* signal.
+# Falls back to a track-count heuristic (1 = single, 2-6 = ep, else album), which is what
+# library and direct-streaming adds use. Returns undef when neither signal is available
+# (label then defaults to "Album" until a resolve fills in the count).
+sub relTypeFor {
+    my (%a) = @_;
+    my $svc = _normRelType($a{service});
+    return $svc if $svc;
+    my $n = $a{count};
+    return undef unless defined $n && $n =~ /^\d+$/ && $n > 0;
+    return $n == 1 ? 'single' : $n <= 6 ? 'ep' : 'album';
+}
+
+# Map a free-text release-type token (from a service / MB handshake) to our vocabulary.
+sub _normRelType {
+    my $t = lc($_[0] // '');
+    return undef unless length $t;
+    return 'single' if $t =~ /single/;
+    return 'ep'     if $t =~ /\bep\b/ || $t eq 'ep';
+    return 'album'  if $t =~ /album|^lp$|compilation|mixtape/;
+    return undef;
+}
+
+# Determine a STREAMING release's type ('album'|'ep'|'single') async → $cb->($relType|undef).
+# Qobuz exposes an AUTHORITATIVE release_type on its album object (getAPIHandler->getAlbum
+# → $album->{release_type}, values 'album'/'ep'/'single'), so we use that; every other
+# service (and Qobuz when the field is absent) falls back to the track-count heuristic on the
+# resolved tracklist. Called BEFORE the row is inserted (Plugin::_classifyThenAdd) so the
+# list never shows a wrong "Album" that flips on refresh. Guarded; always fires $cb.
+sub classifyRelType {
+    my ($client, $source, $albumId, $rec, $cb) = @_;
+
+    if ($source eq 'qobuz' && defined $albumId && length $albumId
+            && Plugins::Qobuz::Plugin->can('getAPIHandler')) {
+        my $api = eval { Plugins::Qobuz::Plugin::getAPIHandler($client) };
+        if ($api && $api->can('getAlbum')) {
+            my $ok = eval {
+                $api->getAlbum(sub {
+                    my $album = shift;
+                    my $rt = relTypeFor(service => (ref $album eq 'HASH' ? $album->{release_type} : undef));
+                    return $cb->($rt) if $rt;
+                    _classifyByCount($client, $rec, $cb);   # release_type absent → count
+                }, $albumId);
+                1;
+            };
+            return if $ok;
+        }
+    }
+    return _classifyByCount($client, $rec, $cb);
+}
+
+# Release-type fallback: classify by the resolved playable track count.
+sub _classifyByCount {
+    my ($client, $rec, $cb) = @_;
+    my $ok = eval {
+        resolveTracks($client, $rec, sub {
+            my $items = shift || [];
+            my @playable = grep {
+                ref $_ eq 'HASH' && !$_->{weblink} && (($_->{type} // '') ne 'text')
+            } @$items;
+            $cb->(relTypeFor(count => scalar @playable));
+        });
+        1;
+    };
+    $cb->(undef) unless $ok;
+    return;
+}
+
+# Best-effort native album id for a STREAMING track url, read SYNCHRONOUSLY from the
+# service's already-cached playing-track metadata (no network) — used to classify a
+# track-add's release (single vs album). Qobuz caches 'albumId', Tidal 'album_id'; Deezer's
+# getMetadataFor flattens the album to a title (dropping the id), so it yields undef there
+# and the caller stores the individual track. Guarded — any failure just returns undef.
+sub trackAlbumId {
+    my ($client, $url) = @_;
+    return undef unless defined $url && length $url;
+    my $meta = eval {
+        my $handler = Slim::Player::ProtocolHandlers->handlerForURL($url);
+        ($handler && $handler->can('getMetadataFor'))
+            ? $handler->getMetadataFor($client, $url) : undef;
+    };
+    return undef unless ref $meta eq 'HASH';
+    my $id = $meta->{albumId} || $meta->{album_id}
+        || (ref $meta->{album} eq 'HASH' ? $meta->{album}{id} : undef);
+    return (defined $id && length $id) ? $id : undef;
+}
+
+# The number of library tracks on an album id (for release-type classification at add
+# time — cheap, the count is local). 0/undef on any error.
+sub libraryTrackCount {
+    my ($albumId) = @_;
+    return 0 unless $albumId;
+    return eval {
+        Slim::Schema->search('Track', { 'album.id' => $albumId }, { join => 'album' })->count;
+    } || 0;
 }
 
 sub _libraryPlayable {
@@ -533,7 +695,21 @@ sub _serviceCan {
     return 1 if $source eq 'bandcamp' && Plugins::Bandcamp::Plugin->can('get_album');
     return 1 if $source eq 'tidal'    && Plugins::TIDAL::Plugin->can('getAlbum');
     return 1 if $source eq 'deezer'   && Plugins::Deezer::Plugin->can('getAlbum');
+    # A podcast EPISODE needs no service adapter at all — it's a single self-contained
+    # enclosure url, stored podcast://-wrapped, and replay is a straight handoff to the
+    # Podcast plugin's own protocol handler (which also keeps its resume-position
+    # tracking). So the only question is whether that handler exists on this server.
+    return 1 if $source eq 'podcast'  && _hasPodcastHandler();
     return 0;
+}
+
+# Is the built-in Podcast plugin's podcast:// protocol handler registered? Asked with a
+# representative url because handlerForURL parses the scheme off one (the same call
+# trackAlbumId already relies on).
+sub _hasPodcastHandler {
+    return eval {
+        Slim::Player::ProtocolHandlers->handlerForURL('podcast://https://example.com/e.mp3')
+    } ? 1 : 0;
 }
 
 # Normalise for fuzzy MATCHING. NB: intentionally differs from DB::_norm — this one

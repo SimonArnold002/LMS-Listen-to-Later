@@ -604,6 +604,223 @@ The "Add to Listen Later"/"Add to Wish List" custom actions appear on streaming 
   **(3) full dash family** — separator class broadened from hyphen/en/em to also cover figure dash (U+2012),
   horizontal bar (U+2015) and minus (U+2212), so sibling labels using any dash variant are cleaned. `perl -c`
   clean (logic validated standalone — Slim modules absent on the Mac). No matcher change.
+- **0.1.74–0.1.78** — **Individual TRACK + single/EP support** (the plugin previously saved albums only).
+  New `kind` column (`album`|`track`) with a `user_version < 2` migration; a track gets a 4-segment dedupe key
+  (`artist|album|year|t:<track>`) so a track and its parent album never collide. Distinguish album vs track by
+  **context** (album vs track menus differ) rather than a chooser. Visual distinction is **glyph + type word in
+  the subtitle** (Material can't badge artwork, and the no-image-libs rule bars server compositing): `♫` (U+266B)
+  = multi-track release (Album/EP), `♪` (U+266A) = single track (Single release OR individual Track); subtitle
+  reads Album/EP/Single/Track. **Release-type classification is "service type, count fallback"** — prefer Qobuz's
+  authoritative `getAlbum→release_type`, else a resolved-track-count heuristic (1=Single, 2–6=EP, 7+=Album) — and
+  is done **before** the row is inserted (`_classifyThenAdd`, async + `setStatusProcessing`) so the list never
+  shows a wrong "Album" that flips to EP/Single on refresh. Track/album Played states are independent (a saved
+  track marks Played on newsong via `findTrackByUrl`/`findSavedTrack`). **Streaming-track detection is favurl-based,
+  not category-based**: Material collapses a Qobuz album-drill track row onto `online-album` (its `wa` is-track flag
+  is false), so `Sources::favurlIsTrack` (a `.flac`/`/track/` play url with no `album:`) is the reliable tiebreaker.
+  **Now Playing** (Material can't drill from a top-level custom action — `getSectionActions` renders a FLAT list):
+  top-level default = **Add track** (the `track` category, `[$trackBase]`); **Add album** lives in the TrackInfo
+  "… → More" (`_trackInfoHandler`, album-only). Classic skin therefore reaches only Add album from a track row.
+- **0.1.79** — **A streaming track whose release is a SINGLE is stored AS the Single, and track↔single never
+  duplicate.** Two coupled fixes to "adding a single from Now Playing gave two rows (a Track, then a Single) that
+  didn't reconcile". **(1) Track-add classification** — `_saveTrackRecord` now, for a Qobuz/Tidal/Deezer track with
+  a recoverable album id, classifies the release and, if `single`, stores it in the **album (Single) form** instead
+  of `kind='track'` (`_saveTrackClassify`, async + `setStatusProcessing` + 6s timeout). The album id comes
+  SYNCHRONOUSLY from the service's cached playing-track metadata via `Sources::trackAlbumId`
+  (`ProtocolHandlers->handlerForURL->getMetadataFor` → `albumId`/`album_id`); Qobuz uses the authoritative
+  `release_type`, Tidal the resolved-track count. **Deezer** (its `getMetadataFor` flattens the album object to a
+  bare title, dropping the id) and **Bandcamp** (no native album id) can't classify from Now Playing, so they
+  degrade to storing a plain Track. Because the Single form shares the album 3-segment dedupe key, a later "Add
+  album" of the same single is a natural no-op. **(2) Cross-kind single reconcile (all services, no extra API
+  calls)** — for the degraded/reverse cases: `_finishAlbumAdd`, when inserting a `single`, no-ops if a matching
+  track already exists (`DB::findTrackByArtistTitle`, a `artist|%|t:title` LIKE), and `_insertTrackRow` no-ops if a
+  matching `single` album already exists (`DB::findByArtistAlbum` + `rel_type eq 'single'`); both guarded on a
+  known artist so a bare-title match across artists can't misfire. So a single and its lone track are treated as
+  the same recording and never both stored; a genuine multi-track album's track still coexists with its album (an
+  accepted edge: a 2-track single's A-side track + the single release are treated as the same release). Per-service
+  album-id + release-type signals verified from plugin source — see memory
+  `streaming-track-album-id-signatures`. `perl -c` clean; no matcher change (matcher_sync_check LL variants still
+  pass; the DSC-vs-others drift it reports is pre-existing and unrelated).
+- **0.1.80** — **Fix: 0.1.79 skipped classification for STREAMING BROWSE-track singles (reported: "Tidal singles
+  add purely as tracks").** A browse track row carries no `$ALBUMNAME` (and a browse add has no Now-Playing
+  fallback), so the 0.1.79 classify gate `defined $album && length $album` was false → it stored a plain Track,
+  never detecting the single. The album NAME was never needed to classify (that needs only the album ID, recovered
+  inside `_saveTrackClassify` from the service's cached metadata); it's only needed to LABEL the stored Single, and
+  a single's release title is the track title. Fix: gate on `_canClassifyTrack($source) && $request->client` only,
+  and default the Single record's `album_title` to the track title when no album name arrived. Affected Tidal AND
+  Qobuz browse-track adds equally (the earlier Qobuz confirmation was via LBF Now Playing, which DID carry an album
+  name). Added a WARN diagnostic (`LL: track-classify source=… url=… albumId=…`) so a live add can be traced via
+  `curl http://plex:9000/log.txt`.
+- **0.1.81** — **Code-review fixes on the 0.1.74–0.1.80 track work** (no new feature). **(1) The same track saved
+  from two SURFACES no longer makes two rows.** The track dedupe key carries the PARENT ALBUM, and the album name
+  depends on where the add came from: a queue / Now Playing row sends `$ALBUMNAME`, a streaming BROWSE track row
+  sends none (`online-track` has no `name:` param), so the same track landed as `artist|the album||t:x` one way and
+  `artist|||t:x` the other — different keys, which `DB::add`'s exact-key `findAnyByKey` can't reconcile.
+  `_insertTrackRow`'s existing cross-kind single guard now also runs **`DB::findTrackByArtistTitle`** (`artist|%|t:title`
+  — album segment wild), catching it in either order. Same class of hole on the YEAR segment for singles:
+  `_finishAlbumAdd` now also checks `DB::findByArtistAlbum` (year-agnostic) and no-ops when that row is **also**
+  `rel_type='single'` — the rel_type gate is what keeps 0.1.43 (two same-titled ALBUMS from different years still
+  coexist). Verified against real in-memory SQLite (`scratchpad/verify_track_dedupe.pl`, 10/10: both orderings
+  caught, no false positive on a sibling track or a same-titled track by another artist, 0.1.43 preserved).
+  **(2) A saved track is no longer marked Played the instant it starts.** `Played::_markPlayedTrack` marked on
+  `newsong` with no threshold (unlike albums), so merely SKIPPING PAST a saved track marked it Played — and
+  `purgePlayed` (which filters on `status='played'` alone, no `kind`) then deleted it `played_retention_days`
+  later. The record is still LOOKED UP at newsong (metadata is freshest there) but the mark is deferred by
+  **`_armTrackMark`**: a `Slim::Utils::Timers` timer at `played_threshold`% of `$song->duration` (the same pref the
+  album path uses), falling back to 60s when the song reports no duration, floor 5s. At fire time it re-checks that
+  the same url is still playing, that `watch_outside` is still on, and re-reads the row's status. One pending mark
+  per player, cancelled on new song / stop / clear / `shutdown`. **(3) Dead code removed:** the info-provider track
+  path was fully written but never wired — `Sources::captureTrackFromTrack` had no callers, so nothing ever
+  produced a `kind='track'` record, making `_addItemFor`'s kind block and `_addCommand`'s `kind:track` branch
+  unreachable and `PLUGIN_LL_ADD_TRACK`/`_WISHLIST` unused. All deleted; the `_saveTrackRecord` header (which
+  claimed two callers) corrected to say the Material `addctx` action is the only entry point — **so Classic skin
+  has no individual-track add**, as 0.1.74–0.1.78 already documents. **(4) `Sources::favurlIsTrack` hardened:** the
+  decisive-negative test now covers `playlist:`/`artist:`/`mix:` as well as `album:`, and the fail-open `return 1`
+  logs a WARN naming the url — nothing enforces the "an album favurl is empty or carries `album:`" invariant, so if
+  a SUPPORTED service ever emits an album favurl in an unrecognised shape its albums would be stored as
+  `kind='track'` rows pointing a `type => 'audio'` item at a non-audio url (rows that can't play); now that shows
+  up in `log.txt` as a named suspect instead of silently. `perl -c` clean on all five modules. No matcher change
+  (`matcher_sync_check.py` reports `LL variant OK`; its non-zero exit is the pre-existing DSC-vs-PFR
+  `_albumMatches` drift noted in 0.1.79).
+- **0.1.82** — **Fix: a streaming SINGLE (or short EP) could NEVER auto-move to Played.** Reported as "played a
+  track through and it's still in my LL list"; diagnosed from `curl http://plex:9000/log.txt` — the row logged as
+  `_finishAlbumAdd … rel=single`, i.e. `kind='album'`, so the individual-track Played path was never involved.
+  **Root cause, opened by 0.1.79:** that release stores a streaming single in ALBUM form, so it goes down the album
+  Played path — where `_totalTracks` returns undef for anything not `library`, and `_maybeMark` therefore falls to
+  the `streaming_min_tracks` floor (default **4** distinct tracks). A single has ONE track, so `$seen` maxes at 1
+  and `1 >= 4` is never true. EPs with fewer than `streaming_min_tracks` tracks were broken identically. The
+  `rel_type` column added in 0.1.74–0.1.80 was exactly the missing signal but Played never read it. **Fix:**
+  `_totalTracks` returns **1** for a `rel_type='single'` record (that is what the classification means — Qobuz's
+  authoritative `release_type` or a resolved count of 1), so it takes the known-total branch and needs
+  `ceil(60% × 1) = 1` track; and `_maybeMark` caps the streaming floor at **2** for `rel_type='ep'` so a 2-track EP
+  can still complete. `%tracking` now carries `rel_type`. Streaming ALBUMS and legacy `rel_type IS NULL` rows keep
+  the 4-track floor unchanged; library albums are untouched. **Also: the Played marking log lines are WARN, not
+  INFO** — INFO is invisible in `log.txt` unless the category is raised, which is precisely what made this
+  undiagnosable from a log dump (see the CLAUDE.md testing note). Existing rows need no re-add: the fix reads
+  `rel_type` at play time. Verified with `scratchpad/verify_played_threshold.pl` (12/12 across single / EP /
+  album / unknown-type / library).
+- **0.1.83** — **A one-track release moves to Played when it has actually been PLAYED THROUGH, not when it
+  starts.** 0.1.82 gave a Single a real total of 1, which made the counter say "1 of 1 seen" on the very first
+  `newsong` — so a Single was marked the instant it started, the same "skip past it and purgePlayed deletes it"
+  flaw 0.1.81 removed from individual tracks. **Unified:** anything whose Played status rests on ONE track — a
+  saved `kind='track'` row, a Single, or a 1-track library release (`_totalTracks == 1`) — now bypasses the
+  distinct-track counter entirely and takes the deferred played-through check. `_onChange` routes it to
+  **`_armDeferredMark`** (the generalised `_armTrackMark`), which fires at **`TRACK_MARK_FRACTION` = 90%** of
+  `$song->duration` — NOT the actual end, because the last seconds are usually fade/silence and with crossfade or
+  gapless the next song's `newsong` (which cancels the pending mark) arrives BEFORE the current track's audio
+  truly ends; 90% always lands before that hand-off. Was `played_threshold`%, which is documented as a % of an
+  album's TRACK COUNT — a conflation. **Pause-correct:** the timer body **`_deferredMarkTick`** re-reads
+  `$client->songElapsedSeconds` and, if actual playback is short of the target (paused, or seeked back), re-arms
+  for the shortfall instead of marking — so the wall clock coming round is never mistaken for listening. It's a
+  NAMED sub, not a closure, so `setTimer`/`killTimers` pair on the coderef and a re-arm can't build a
+  self-referencing closure chain. Still guarded on `watch_outside` and the same-url check at fire time, still one
+  pending mark per player, cancelled on new song / stop / clear / shutdown. Streams reporting no duration keep the
+  flat `TRACK_MARK_FALLBACK_SECS` (60s) wait. **EPs and albums are untouched** — they keep the distinct-track
+  counter (EP floor capped at 2 per 0.1.82). Verified with `scratchpad/verify_played_flow.pl` (19/19: routing per
+  release type, skip-after-2s and halfway both held, 90% and end-of-track both marked, pause re-arms, and the
+  counter path unchanged).
+- **0.1.84** — **Podcast episodes.** An episode from the built-in **Podcasts app** can be saved from its browse
+  row, storing as an ordinary `kind='track'` record — so replay, dedupe and the 0.1.83 played-through Played
+  check all come from the existing track machinery unchanged. The menu entry reads **"Add podcast to Listen
+  Later" / "… to Wish List"**. See "Podcast episodes" below for the measured constraints.
+  New `Podcast.pm` (feed fetch/parse/resolve), `kind:podcast` add path (`_savePodcastEpisode`),
+  `Sources::_serviceCan('podcast')`, "Podcast" type word in the row subtitle (source segment dropped so it
+  doesn't read "Podcast · <show> · Podcast"). Verified against the live server + the real Darko.Audio feed:
+  parser returns **129 episodes, exactly matching the 129 the browse query reports**; the row's `$IMAGE`
+  unwraps to the RSS `itunes:image` byte-for-byte; the title key matches too; duration 3485s == the row's
+  "(58:05)".
+- **0.1.85** — **Podcast episodes save from ANY container, not just the Podcasts app** (reported: "context
+  still says add album and it doesn't add it" — the add was coming from a favourited FEED, `svc=favorites`).
+  Last-resort resolve before `_addCtxCommand` rejects; type-neutral wording on `favorites-*`; and **no Wish
+  List entry for podcasts** (you don't buy podcasts) with a generic-container wishlist add redirected to
+  Listen Later. Detail in "0.1.85 — episodes reached through OTHER containers" below.
+- **0.1.86** — **One plain wording for every row: "Add to Listen Later" / "Add to Wish List".** A browse ROW
+  already tells you what it is (you're looking at an album, a track, a podcast episode), so naming the type in
+  the menu is noise — and Material can only name it per CONTAINER, which gets it wrong on any mixed list. The
+  ONE exception is Material's **Now Playing** panel: there you're outside any listing, so "this track" and
+  "the album it's from" are both plausible and the entry has to say which — it keeps **"Add track to Listen
+  Later" / "Add track to Wish List"**, with the album option qualified alongside it in "… → More"
+  (`PLUGIN_LL_ADD`/`_WISHLIST`, the TrackInfo provider, which can drill). Roles collapse to
+  **plain / nowplaying / podcast**. Podcasts use the plain wording with **no Wish List entry** (0.1.85).
+  **`favorites-*` is dropped again**: it existed in 0.1.85 solely to get neutral wording there, and now that
+  every row-level entry is neutral, favourites inherit exactly the right wording from the `online-*` fallback
+  (the last-resort podcast resolve supplies the behaviour). A leftover empty from the 0.1.85 build is cleared
+  by the strip pass and then removed by the delete-empties pass, so it can't linger and SUPPRESS `online-*`
+  (the 0.1.52 rule). Wording map verified by extracting `%roleTitle` + `%cats` from the source and printing
+  every category's entries.
+
+## Podcast episodes (0.1.84) — what a browse row actually carries, and why resolution works this way
+
+Measured over JSON-RPC (`["podcasts","items",0,2,"item_id:<feed>","menu:1","useContextMenu:1","wantMetadata:1"]`),
+for BOTH a search result and a SUBSCRIBED feed — they are identical:
+
+- An episode row has **no `presetParams`, no `favorites_url`, no `metadata`** — only a positional
+  `item_id` ("3.0"). So `$FAVURL` and `$ALBUMID` are both empty on a custom action.
+- That `item_id` is **not durable**: it's an index into the feed, so today's `3.0` becomes `3.1` when the next
+  episode drops. An upstream Material change exposing it would therefore NOT help — this was checked before
+  being ruled out.
+- Its "… → More" is the Podcast plugin's **own OPML info window** (Description / Duration), NOT a `trackinfo`
+  menu — so `Slim::Menu::TrackInfo` providers can't appear there either. On a browse row the plugin has no
+  other reach.
+- So an add arrives with only: `$TITLE` (episode title), `$ARTISTNAME` (= the row subtitle, e.g.
+  "Monday, July 6, 2026 (58:05)"), `$SERVICE`="podcasts", `$IMAGE` (episode artwork).
+
+**Resolution.** The Podcast plugin keeps subscriptions — with their real RSS urls — in its own prefs
+(`plugin.podcast:feeds` → `[{name, value}]`). `Podcast.pm` fetches those feeds (SimpleAsyncHTTP +
+`Slim::Utils::Cache`, 1h TTL / 7d fallback, the PFR API.pm idiom) and finds the episode. **The artwork url is
+the primary key** — it appears verbatim in the RSS as `<itunes:image href>` and is unique per episode; the
+Material `$IMAGE` is the LMS image proxy wrapping it (`/imageproxy/<escaped>/image.png`), so `_realImageUrl`
+unwraps it back. Normalised title is the fallback. The matched `<enclosure url>` is stored **podcast://-
+prefixed**, so the Podcast plugin's own protocol handler plays it AND keeps its resume-position tracking. RSS
+is parsed with a tolerant regex scan, not an XML parser — podcast feeds are machine-generated, only four
+fields per item are needed, and a strict parser would die on the malformed-but-common ones.
+
+**Category.** Confirmed from the SERVED bundle, not inferred: `ba = fb?"artist":wa?"track":"album"`, and `wa`
+is only set when the parent view is an online ALBUM and the item has `metadata.type=="track"`. Podcast rows
+have no metadata, so `wa` is false → `ba`="album" → the category is **`podcasts-album`** (`k` = the browse
+command). Material prefers a PRESENT per-command category over `online-*`, so writing a POPULATED
+`podcasts-album` is what swaps the generic "Add album …" for "Add podcast …" there and nowhere else — the same
+per-app override used EMPTY for suppression elsewhere (0.1.55); populated, it can only add, never hide.
+`podcasts-track` is written with the same pair as insurance if a future Material reclassifies these rows.
+
+**Limits (accepted, by measurement not choice):**
+- **Only SUBSCRIBED feeds resolve.** An episode found via "Search feeds" on an unsubscribed show has nothing
+  to match against and is rejected (no row) rather than stored as something that could never play.
+- The categories are written **only when `plugin.podcast:feeds` is non-empty** — with no subscriptions the
+  generic "Add album" stays and keeps rejecting as before, rather than offering a podcast add we can't honour.
+  If the user later unsubscribes from everything, `podcasts-*` leaves `%cats`, so the 0.1.52 delete-empties
+  pass removes it and the `online-*` fallback is restored (an empty category would otherwise SUPPRESS).
+- The override applies to **everything under the `podcasts` command** — show rows, Search feeds, New episodes,
+  Recently played — so "Add podcast" appears there too and rejects on anything that isn't an episode. It can't
+  be scoped finer: Material's per-action `filter` keys on the favurl, and these rows have none (0.1.50).
+- **Now Playing / queue adds were deliberately NOT pursued** — a podcast is saved to hear it later, so the
+  moment that matters is the browse list, not playback.
+
+### 0.1.85 — episodes reached through OTHER containers (the route users actually take)
+
+0.1.84 only covered the Podcasts app. Diagnosed live: the add logged `svc=favorites, favurl=` and
+`rejected add — unsupported source 'favorites'`. Material picks the custom action from the **container's**
+browse command, so a favourited FEED (verified: `favorites items item_id:<id>` lists its episodes, rows
+identical in shape — no favurl, no metadata, positional item_id, same artwork key) is browsed under
+`favorites` and never reaches the kind:podcast action. Home-shelf cards and search hits behave the same.
+
+Fix is one **last-resort resolve** in `_addCtxCommand`, immediately before `_rejectAdd`: if the source isn't
+replayable AND there's no favurl/albumid AND there are subscribed feeds, try `_savePodcastEpisode`. That
+catches every such container at once instead of chasing them one category at a time, and costs nothing on a
+working add — it only runs on one already destined to be rejected, against cached feeds. A rejection from
+this path reports the ORIGINAL source, not 'podcast'.
+
+**Wording.** `favorites-album`/`-track` are now written with a type-NEUTRAL "Add to Listen Later" / "Add to
+Wish List" (same `$onlineCmd`, so behaviour is identical). A favourites list is heterogeneous — albums,
+tracks, podcasts, radio — so "Add album" was already the wrong word there, podcasts aside. It cannot be made
+per-item: the category comes from the container's command, and the per-action `filter` that could
+discriminate is bypassed on a favurl-less row (0.1.50) — which is exactly what these are. So in the Podcasts
+app the entry reads "Add podcast"; elsewhere it reads the neutral "Add to Listen Later".
+
+**No Wish List for podcasts.** The Wish List is for things you might BUY. The `podcast` role has no wishlist
+title, and the writer loop only emits the Wish List entry when the role defines one — so the Podcasts app
+shows a single "Add podcast to Listen Later". An episode arriving through a GENERIC container's "Add to Wish
+List" (where the menu can't know it's a podcast) is saved to Listen Later instead, with a WARN, rather than
+dropped into a list where it's meaningless.
 
 ## Shared Matching Engine — FLEET SYNC RULE (2026-07-10)
 

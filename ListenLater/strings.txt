@@ -10,6 +10,21 @@ PLUGIN_LL_ADD
 PLUGIN_LL_ADD_WISHLIST
 	EN	Add album to Wish List
 
+PLUGIN_LL_TYPE_ALBUM
+	EN	Album
+
+PLUGIN_LL_TYPE_EP
+	EN	EP
+
+PLUGIN_LL_TYPE_SINGLE
+	EN	Single
+
+PLUGIN_LL_TYPE_TRACK
+	EN	Track
+
+PLUGIN_LL_TYPE_PODCAST
+	EN	Podcast
+
 PLUGIN_LL_ADDED
 	EN	Added to Listen Later
 
@@ -99,6 +114,9 @@ PLUGIN_LL_SORT_YEAR
 
 PLUGIN_LL_SORT_PLAYED
 	EN	Recently played
+
+PLUGIN_LL_ENABLED
+	EN	Enabled
 
 PLUGIN_LL_WATCH_OUTSIDE
 	EN	Automatically move albums to Played
