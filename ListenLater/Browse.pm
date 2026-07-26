@@ -115,20 +115,30 @@ sub _renderSection {
     $callback->({ items => \@items });
 }
 
-# Leading glyphs, chosen by how many tracks the row represents so the symbol matches the
-# label — both plain text glyphs (not colour emoji) so they render consistently everywhere:
+# Leading glyphs, chosen so the symbol matches what the row actually is. All are plain
+# text glyphs (NOT colour emoji) so they render identically on every client — these are
+# drawn by the viewer's browser, not the server, so anything that resolves to an emoji font
+# would look different per device (and be a missing-glyph box where there's no emoji font):
 #   ♫ (two beamed notes) = a MULTI-track release (Album / EP)
 #   ♪ (one note)         = a SINGLE track: a Single release OR an individual saved Track
+#   ❝ (heavy turned comma) = a PODCAST episode — speech rather than music
 # (Single vs Track is then told apart by the subtitle word, not the glyph.)
-use constant GLYPH_MULTI  => "\x{266b}";
-use constant GLYPH_SINGLE => "\x{266a}";
-use constant SEP          => " \x{00b7} ";   # " · " subtitle separator
+# NB there is no plain-text MICROPHONE to use for podcasts: the only ones (U+1F3A4,
+# U+1F399) live in the emoji planes, and though U+1F399 defaults to text presentation
+# almost no font ships a monochrome glyph for it, so it renders in colour from the emoji
+# font — or not at all. The quote mark is the closest speech symbol that behaves.
+use constant GLYPH_MULTI   => "\x{266b}";
+use constant GLYPH_SINGLE  => "\x{266a}";
+use constant GLYPH_PODCAST => "\x{275d}";
+use constant SEP           => " \x{00b7} ";   # " · " subtitle separator
 
-# The glyph for a row: ♪ for an individual track or a single release, else ♫.
+# The glyph for a row: ❝ for a podcast episode, ♪ for an individual track or a single
+# release, else ♫.
 sub _glyphFor {
     my ($rec) = @_;
-    return GLYPH_SINGLE if ($rec->{kind} || '') eq 'track';
-    return GLYPH_SINGLE if ($rec->{rel_type} || '') eq 'single';
+    return GLYPH_PODCAST if ($rec->{source} || '') eq 'podcast';
+    return GLYPH_SINGLE  if ($rec->{kind}   || '') eq 'track';
+    return GLYPH_SINGLE  if ($rec->{rel_type} || '') eq 'single';
     return GLYPH_MULTI;
 }
 

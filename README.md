@@ -71,11 +71,11 @@ sudo systemctl restart lyrionmusicserver
 The menu wording is the same everywhere, because the row you're on already tells you what you're saving: an album row saves the album, a track row saves that track. The one exception is Material's **Now Playing** screen, where there's no surrounding list to make it obvious — there the menu says **Add track to Listen Later**, and **Add album to Listen Later** sits in **"… → More"** if you want the whole release instead.
 
 ### Albums, tracks and podcasts
-Each saved row is labelled with what it is, and carries a small glyph — **♫** for a multi-track release, **♪** for a single track:
+Each saved row is labelled with what it is, and carries a small glyph — **♫** for a multi-track release, **♪** for a single track, **❝** for a podcast episode:
 
 - **Album** / **EP** / **Single** — a whole release. Streaming releases are classified when you add them, so the label is right straight away rather than changing later.
 - **Track** — one song, saved from a track row. It plays on tap rather than opening a tracklist.
-- **Podcast** — one episode (see below).
+- **Podcast** — one episode, marked with a quote glyph rather than a note (see below).
 
 Saving a streaming **single** stores it as the Single release rather than a loose track, so adding "the single" and "the track" can't leave you with two rows for the same recording.
 

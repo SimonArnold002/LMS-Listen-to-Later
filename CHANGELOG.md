@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.1.87 — A glyph of its own for podcasts
+
+### Changed
+- **Podcast episodes now show ❝ instead of the ♪ music note**, so speech is distinguishable from music at a glance in a mixed list. (There's no plain microphone symbol to use — the only ones are emoji-plane characters that render in colour on some devices and not at all on others, whereas these glyphs are drawn by your browser and need to look the same everywhere.)
+
 ## 0.1.86 — One wording for every menu
 
 ### Changed

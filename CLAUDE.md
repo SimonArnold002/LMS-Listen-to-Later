@@ -733,6 +733,7 @@ The "Add to Listen Later"/"Add to Wish List" custom actions appear on streaming 
   Last-resort resolve before `_addCtxCommand` rejects; type-neutral wording on `favorites-*`; and **no Wish
   List entry for podcasts** (you don't buy podcasts) with a generic-container wishlist add redirected to
   Listen Later. Detail in "0.1.85 — episodes reached through OTHER containers" below.
+- **0.1.87** — **Podcast rows use ❝ (U+275D) instead of the ♪ note**, so speech is distinguishable from music at a glance; `GLYPH_PODCAST` in `Browse::_glyphFor`, keyed on `source eq "podcast"`. No plain-text microphone exists — see "Glyph" in the Podcast section below for why.
 - **0.1.86** — **One plain wording for every row: "Add to Listen Later" / "Add to Wish List".** A browse ROW
   already tells you what it is (you're looking at an album, a track, a podcast episode), so naming the type in
   the menu is noise — and Material can only name it per CONTAINER, which gets it wrong on any mixed list. The
@@ -793,7 +794,18 @@ per-app override used EMPTY for suppression elsewhere (0.1.55); populated, it ca
   Recently played — so "Add podcast" appears there too and rejects on anything that isn't an episode. It can't
   be scoped finer: Material's per-action `filter` keys on the favurl, and these rows have none (0.1.50).
 - **Now Playing / queue adds were deliberately NOT pursued** — a podcast is saved to hear it later, so the
-  moment that matters is the browse list, not playback.
+  moment that matters is the browse list, not playback. (They should nonetheless WORK for free: a queued /
+  playing episode's track url IS the `podcast://` enclosure, so the ordinary track path handles it with no
+  feed resolution — and would therefore even cover an unsubscribed show. Untested.)
+- **You cannot favourite an individual EPISODE, only the feed** — an episode row has no `favorites_url`,
+  which is exactly what favouriting requires. An earlier note here speculated the opposite; it was wrong.
+
+**Glyph (0.1.87).** A podcast row uses **❝** (U+275D) rather than the ♪ music note, so speech reads as
+distinct from music in a mixed list. There is **no plain-text microphone** to use: the only ones (U+1F3A4,
+U+1F399) are emoji-plane characters, and although U+1F399 defaults to text presentation, virtually no font
+ships a monochrome glyph for it — so it resolves from the colour emoji font, or renders as a missing-glyph
+box where there is no emoji font. These glyphs are drawn by the VIEWER'S browser, not the server, so anything
+emoji-backed varies per device. U+275D is Dingbats, BMP, no emoji variant — same coverage class as ♪/♫.
 
 ### 0.1.85 — episodes reached through OTHER containers (the route users actually take)
 
