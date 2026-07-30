@@ -55,7 +55,7 @@ Section/app icons (see "Icon system"): `ListenLaterIcon.{svg,_svg.png,.png}` (ap
 - **Register defensively**: `require Slim::Menu::TrackInfo`/`AlbumInfo` and wrap each `registerInfoProvider` in `eval` — an unguarded call dies and aborts the whole plugin if the module isn't loaded yet.
 - **Storage**: SQLite over prefs (prefs give no query/sort/dedupe). One `albums` table; display metadata denormalised so the list renders without re-hitting any service; `ref_json` carries only what's needed to replay (album_id / passthrough / `_svc`). `UNIQUE(source, dedupe_key)` prevents duplicate adds; re-adding an album already saved in **any** section is a no-op (0.1.21) — it is not moved. `status` is `later` | `played` | `wishlist`; `add($rec,$status)` sets the target list for a new album (`later` default, or `wishlist`).
 - **Replay**: library → load album tracks by `album.id`. Streaming → if a native album id was captured, rebuild the service's own album node (reattach `Qobuz…QobuzGetTracks` / `Bandcamp…get_album`, the same coderef round-trip the sibling uses); otherwise **search the originating service** by "artist album" and keep the title+artist match (resilient — no hard dependence on capturing the album id).
-- **Played detection**: subscribe to `[['playlist'],['newsong','stop','clear']]`; per player, count distinct tracks of the currently-playing saved album. Library uses real track count × `played_threshold`% (default 60); streaming has no reliable total so falls back to `streaming_min_tracks` distinct tracks (default 4, best-effort). Same path for inside- and outside-plugin plays; `watch_outside` is the master toggle.
+- **Played detection**: subscribe to `[['playlist'],['newsong','stop','clear']]`; per player, count distinct tracks of the currently-playing saved album. A release with a MEASURED length (library live count, or a stored streaming `track_count`) uses `Played::tracksNeeded` = `played_threshold`% of it, **rounded DOWN**, floored at 2 for a multi-track release (default 90 — see "The Played threshold"); only a release whose length can't be measured falls back to `streaming_min_tracks` distinct tracks (default 4, best-effort). Same path for inside- and outside-plugin plays; `watch_outside` is the master toggle.
 - **Remote vs local detection gotcha**: trust `$track->remote`; do **not** treat a `file://` URL as remote (`$url =~ m|://|` matches `file://`). And `$remoteMeta` is **undef** for local tracks — dereferencing it under `use strict` dies and the menu wrapper swallows the error → no item appears. Always `$remoteMeta = {} unless ref $remoteMeta eq 'HASH'`.
 - **install.xml**: `<extension>` singular (manual installs). `<icon>` → `…Icon_svg.png` (Material `_svg.png` convention loads the sibling `.svg` and recolours it; the SVG must use `#000`, not `#000000`). PNGs are real transparent RGBA (Pillow), not JPEGs misnamed `.png`.
 
@@ -93,7 +93,45 @@ Goal: an **"Add to Listen Later"** entry on a streaming **album row while browsi
 5. Remove / Move between sections; persists across `systemctl restart`.
 
 ## Prefs Namespace
-`plugin.listenlater` — sort, played_threshold, streaming_min_tracks, watch_outside, material_action, played_retention_days, debug_log.
+`plugin.listenlater` — sort, played_threshold, streaming_min_tracks, watch_outside, material_action, played_retention_days, debug_log, threshold_90_migrated.
+
+## The Played threshold: 90%, rounded DOWN (0.1.93)
+
+`played_threshold` defaults to **90** (was 60) and the arithmetic lives in **`Played::tracksNeeded($total)`**,
+split out of `_maybeMark` so it is directly testable — see the note below, it matters.
+
+**Why 90.** 60% was a hedge from when a release's length was half-inferred from its TYPE. Since 0.1.90
+a length is only ever MEASURED, so there is nothing left to hedge against and 60% moved an album to
+Played well before it had been heard.
+
+**Why rounded DOWN, and why that isn't a detail.** `ceil` is fine at 60% and punishing at 90%:
+`0.9*N > N-1` for every `N < 10`, so ceil lands back on `N` and "90%" becomes arithmetically identical
+to "100%" for any release under ten tracks. A skipped track — or one not licensed in the user's
+region — would leave such a release permanently unmarkable. `floor` always leaves a track of slack:
+
+| tracks | 2 | 3 | 5 | 9 | 10 | 12 |
+|---|---|---|---|---|---|---|
+| need | 2 | 2 | 4 | 8 | 9 | 10 |
+
+**The 2-track guard is load-bearing.** `floor(0.9*2) = 1`, and "1 of 2 seen" is true on the very first
+newsong — so a 2-track release would be marked the instant it started and auto-purged days later,
+which is **0.1.83's bug arriving by a new route**. `tracksNeeded` never returns below 2 for
+`$total > 1`, at ANY threshold (pinned at 90/60/10). A genuine 1-track release never reaches this
+path — `_onChange` routes `total == 1` to `_armDeferredMark`'s played-through check.
+
+**Existing installs are migrated once.** `$prefs->init` only fills an ABSENT pref, so every existing
+user would have kept 60 silently and the change would have looked like it hadn't worked. `Plugin.pm`
+bumps it unconditionally, gated on its own `threshold_90_migrated` flag so it runs once and can never
+fight a user who then chooses their own value. Deliberately not "only if it's still 60" — this is a
+change of default for everyone, not a repair of one setting.
+
+**`tracksNeeded` exists because the test used to MIRROR the formula.** `t_played.pl` restated
+`_maybeMark`'s arithmetic alongside it (on the grounds that `_maybeMark` needs `%tracking` and writes
+to the DB), and a copied formula passes just as happily when the original is wrong — the exact hazard
+that file exists to catch. It earned itself immediately: the first 90% assertion written was
+`12 tracks -> 11`, carried over from the ceil table; the suite said 10 and the suite was right. Under
+the old mirror that error would have been copied into both sides and passed. **Rule: pin the sum by
+CALLING the code, never by restating it.**
 
 ## Played auto-retention (0.1.17)
 Played albums are auto-removed after `played_retention_days` (default 7; **0 = keep forever**). `DB::purgePlayed($days)` deletes `status='played'` rows with `played_at < now - days*86400` (items moved back to Listen Later (`status='later'`) or to Wish List (`status='wishlist'`) are never purged). `played_at` is set when the album is first marked Played and is **not** refreshed by replaying an already-Played album (Played detection only tracks `status='later'` rows), so the clock runs from that first mark; to restart it, Move the album back to Listen Later and replay it. Scheduled in `Plugin::postinitPlugin` via `Slim::Utils::Timers` — first run ~60s after start, re-armed every 24h (`_purgeTick`). Settings field validates 0–3650.
@@ -613,7 +651,10 @@ The "Add to Listen Later"/"Add to Wish List" custom actions appear on streaming 
   reads Album/EP/Single/Track. **Release-type classification is "service type, count fallback"** — prefer Qobuz's
   authoritative `getAlbum→release_type`, else a resolved-track-count heuristic (1=Single, 2–6=EP, 7+=Album) — and
   is done **before** the row is inserted (`_classifyThenAdd`, async + `setStatusProcessing`) so the list never
-  shows a wrong "Album" that flips to EP/Single on refresh. Track/album Played states are independent (a saved
+  shows a wrong "Album" that flips to EP/Single on refresh. **AMENDED 2026-07-29 — this classify-before-insert
+  rule now applies ONLY to an UNKNOWN type; a type a SOURCE ASSERTS inserts immediately and is corrected in the
+  background. See "Release type: why an asserted type is not classified before insert" below. Do not re-argue
+  it from this paragraph.** Track/album Played states are independent (a saved
   track marks Played on newsong via `findTrackByUrl`/`findSavedTrack`). **Streaming-track detection is favurl-based,
   not category-based**: Material collapses a Qobuz album-drill track row onto `online-album` (its `wa` is-track flag
   is false), so `Sources::favurlIsTrack` (a `.flac`/`/track/` play url with no `album:`) is the reliable tiebreaker.
@@ -733,7 +774,7 @@ The "Add to Listen Later"/"Add to Wish List" custom actions appear on streaming 
   Last-resort resolve before `_addCtxCommand` rejects; type-neutral wording on `favorites-*`; and **no Wish
   List entry for podcasts** (you don't buy podcasts) with a generic-container wishlist add redirected to
   Listen Later. Detail in "0.1.85 — episodes reached through OTHER containers" below.
-- **0.1.87** — **Podcast rows use ❝ (U+275D) instead of the ♪ note**, so speech is distinguishable from music at a glance; `GLYPH_PODCAST` in `Browse::_glyphFor`, keyed on `source eq "podcast"`. No plain-text microphone exists — see "Glyph" in the Podcast section below for why.
+- **0.1.87** — **Podcast rows use ❝ (U+275D) instead of the ♪ note**, so speech is distinguishable from music at a glance; `GLYPH_PODCAST` in `Browse::_glyphFor`, keyed on `source eq "podcast"`. No plain-text microphone exists — see "Glyph" in the Podcast section below for why. *(Glyph PLACEMENT changed in 0.1.93: it now leads `line2` beside the type word, not the title.)*
 - **0.1.86** — **One plain wording for every row: "Add to Listen Later" / "Add to Wish List".** A browse ROW
   already tells you what it is (you're looking at an album, a track, a podcast episode), so naming the type in
   the menu is noise — and Material can only name it per CONTAINER, which gets it wrong on any mixed list. The
@@ -748,6 +789,612 @@ The "Add to Listen Later"/"Add to Wish List" custom actions appear on streaming 
   by the strip pass and then removed by the delete-empties pass, so it can't linger and SUPPRESS `online-*`
   (the 0.1.52 rule). Wording map verified by extracting `%roleTitle` + `%cats` from the source and printing
   every category's entries.
+
+- **0.1.88** — **A claimed 'single' is verified, and every streaming release remembers its track
+  count.** Two failure modes of the same root cause: LL reads `rel_type='single'` as "this release
+  has exactly ONE track" (`Played::_totalTracks` returns 1 → 0.1.83's played-through mark), but the
+  sources that ASSERT a type don't mean it that way. MusicBrainz (via LBF's `&rt=` handshake, LBF
+  0.9.141) types a release group Single however many B-sides/remixes/radio edits it carries, and
+  **Qobuz's `release_type` does the same** — so a 3-track single was marked Played after track one.
+  Mirror case: a release MB correctly calls an Album that holds ONE track fell on the
+  `streaming_min_tracks` floor of 4, which it can never reach, so it could never be marked at all.
+  **Fix, in three parts.** (1) `Sources::singleIsWrong($type,$count)` — a claimed single with a
+  count > 1 isn't one; `relTypeFor` applies it (library adds settle synchronously, the count is
+  free) and `_settle` applies it to every async classify. Demotion goes to the COUNT's verdict
+  (2-6 = ep, 7+ = album), NOT unconditionally to 'ep' — calling a 9-track release an EP just
+  re-runs the same early-mark bug against the EP's 2-track floor. A claim with NO resolvable count
+  stands (unchanged behaviour beats a guess). (2) New **`track_count`** column (`user_version < 3`
+  migration, `DB::updateTrackCount`, which OVERWRITES — unlike `updateRelType` — since it's a
+  re-measurement). `Played::_totalTracks` now reads library live → stored count → the `single`⇒1
+  fallback, so a resolved streaming release gets the same `played_threshold`% rule as a library
+  album and the flat floor applies only to unresolved ones. (3) `Browse::_albumTracks` refreshes
+  the count on every resolve and force-corrects a stored single that resolves to >1 track — this is
+  what repairs rows saved before 0.1.88, free, from a resolve that was happening anyway.
+  **Performance shape (the point that was iterated on):** the add must NOT wait on a service. A
+  known type (library or `&rt=`) inserts immediately as before; `_verifyRelease` then chases the
+  count fire-and-forget AFTER the insert (same pattern as `_backfillStreamingArtist`), gated on the
+  row having a native album ID — without one the lookup would fall back to `_searchService`, and
+  the SEARCH is the expensive half, so those rows just wait for their first play. Only an UNKNOWN
+  streaming type still blocks (pre-existing `_classifyThenAdd`; a row that flips label on refresh
+  is worse). **Qobuz costs zero extra calls**: its album object carries `tracks_count` alongside
+  `release_type`, so `Sources::albumTrackCount` reads both off the one fetch and NO tracklist is
+  resolved (verified: 0 tracklist fetches on every Qobuz path with a count). Tidal/Deezer/Bandcamp
+  have no album-object surface on their ID path — `getAlbum` returns the TRACKLIST — so they cost
+  one background call, which is the same call the first play would have made anyway. **This is
+  settled, not assumed**: per `streaming-track-album-id-signatures` (verified 2026-07-25 from each
+  plugin's source), Tidal album objects DO carry `type`+`numberOfTracks` and Deezer's carry
+  `record_type`+`nb_tracks`, but only on the raw `albums/<id>` / `album/<id>` endpoints the plugins
+  don't surface — and **reaching into those private internals was DECLINED (Simon, 2026-07-25:
+  breaks on plugin updates), so catalogue-side single/EP detection is Qobuz-only BY DECISION.
+  Don't re-attempt it.** What is legitimately reachable is those plugins' own public SEARCH
+  results, whose raw album hashes carry the counts (`_searchService`'s Tidal/Deezer branches) —
+  unused here only because the search is the expense being avoided. Hence those two field names in
+  `albumTrackCount` are inert today, kept because they're verified and reachable without going
+  private. **Catalogue vs
+  playable — CORRECTED 2026-07-30, this was a real bug:** Qobuz's `tracks_count` is the catalogue
+  count and can exceed what's playable in a region. 0.1.88 stored it as the total and called it
+  "provisional, overwritten by the first drill/play" — but that overwrite only happens on a
+  drill/play **from the LL list**, so a release heard from Qobuz's own pages (i.e. what
+  `watch_outside` exists for) kept the inflated total indefinitely, needing 60% of tracks that don't
+  exist for that user — **strictly worse than the 4-track floor it replaced.** Now
+  `classifyRelType` returns a THIRD value marking a catalogue count PROVISIONAL; it settles the
+  type (what the fetch is for, and the `singleIsWrong` demotion still works) but is never stored as
+  the total. A total now comes only from a resolved TRACKLIST, which the service has already
+  region-filtered. Provisional counts are still passed back so `_verifyRelease` can tell "the
+  service answered" from "unreachable" — otherwise every Qobuz add would spend a pointless retry
+  and log a failure that never happened. `_finishAlbumAdd` also skips the background verify when a
+  classify already saw a provisional count (`_provisionalCount` on the rec, not a DB column), since
+  re-fetching the same album object would return the same number. Residual, accepted: a release
+  Qobuz explicitly asserts is an `album` while holding 2-6 tracks now waits on the floor until its
+  first play — narrow, because a small count classifies itself (1 → single → total 1; 2-6 unasserted
+  → ep → floor capped at 2). If it bites, the fix is to let a provisional total only ever LOWER the
+  bar (`need = min(pct of it, floor)`), never raise it — sound because a catalogue count can only
+  exceed the playable one. Covered by `t_reltype.pl` (producer) and `t_verify_retry.pl` (consumer);
+  both were checked against the unflagged code and fail there.
+  Podcasts are untouched (episodes insert as `kind='track'`, never the album path). Verified by
+  four scratch suites (61 checks): `relTypeFor`/`singleIsWrong` truth table, the full
+  `classifyRelType` decision table against a stubbed service, the Qobuz zero-tracklist path, and
+  real-SQLite migration/persistence + every `_totalTracks` branch. No matcher change
+  (`matcher_sync_check.py` still reports LL variant OK on all three pinned subs).
+
+- **0.1.89** — **`&tc=` handshake: the sibling sends the release's TRACK COUNT, so 0.1.88's
+  background lookup disappears for LBF adds.** Completes what LBF 0.9.141's `&rt=` should have
+  carried: LBF already reads a count off the streaming service's own album hash while matching
+  (`_candReleaseType`, since 0.9.89), on the same items, ~11 lines before `_attachFavUrl` builds the
+  favurl — so the number was in hand and unused, and `&rt=`'s bare MusicBrainz "Single" is exactly
+  what needed checking against it. **Receiver ships FIRST** (this release): an updated LBF must
+  never meet an LL that can't strip `tc=`, or the param is left in the favurl. With no sender
+  present this release is behaviourally identical to 0.1.88. Reader sits with the other private
+  params in `_addCtxCommand`: `s{[?&]tc=([^&]*)}{}` — strips ANY value so nothing is left behind,
+  THEN validates `^\d{1,3}$ && > 0` (a bogus/huge count would set an unreachable Played threshold
+  at 60% of nonsense; junk → undef → falls back to resolving). Feeds `relTypeFor(service => rt,
+  count => tc)`, so `singleIsWrong` fires at INSERT time with **zero service calls**; stored as
+  `track_count` (streaming only — library counts live), which automatically suppresses
+  `_verifyRelease` via its existing `!$rec->{track_count}` gate (no new logic). Bonus: the type is
+  correct BEFORE `_finishAlbumAdd`'s single-dedupe block, so a mislabelled single can no longer
+  be wrongly no-op'd against a saved track of the same name. `DB::add`'s `_sane()` is a second
+  guard. **The receiver did NOT work as shipped** — it discarded every count; see the `&tc=` lesson
+  in the regression-tests section, including why the 24-check `verify_favurl_params.pl` (since lost
+  to a scratchpad) could not have caught it. Fixed 2026-07-30, and the extraction now lives in
+  `_stripPrivateParams` with `tools/t_favurl.pl` calling it: real LBF Qobuz/Bandcamp/`&al=` favurl
+  shapes, tc first/last/alone, `a=` still not eating `al=`, junk values stripped-then-rejected, and
+  native Qobuz/Tidal/Deezer favurls byte-for-byte untouched. **Bandcamp gets no `&tc=`** (no count
+  until its page is fetched) and falls back to the background resolve. **Catalogue-vs-playable —
+  CLOSED 2026-07-30, `&tc=` no longer fills `track_count`.** LBF reads its count off a service
+  ALBUM HASH, so it is a catalogue count — exactly what the Qobuz path now refuses — and it arrives
+  as a bare integer with no provenance, so LL can't tell a resolved count from a catalogue one and
+  must assume the unsafe case. The rule is now uniform: **only a count resolved from a real
+  TRACKLIST ever becomes Played's total, whichever door it came in by.** `&tc=` is still read and
+  still fed to `relTypeFor`, because disproving a claimed 'single' AT INSERT is the one job only an
+  add-time count can do — a 'single' still standing at insert can be swallowed by `_finishAlbumAdd`'s
+  cross-kind dedupe against an already-saved track of the same name, and no background correction
+  repairs a row that was never inserted. Consequence, accepted: `&tc=` no longer suppresses the
+  background `_verifyRelease`, so it stops being a saved service call — on Tidal/Deezer that verify
+  now yields a REAL total, on Qobuz it returns a provisional one it won't store and the total waits
+  for the first play. That is the same call an add without `&tc=` always made, so nothing regressed.
+  Mostly moot in practice anyway: per `streaming-search-no-track-count` the SEARCH payloads LBF
+  matches against carry no count at all, so `&tc=` rarely arrives. **No LBF change is needed or
+  wanted** — don't ask the sibling to start sending counts for Played; if it ever sends one it is
+  used for the type check and nothing else. Covered by `t_addpath.pl`.
+
+- **0.1.90** — **A failed release-verify is retried once, and never fails silently.** 0.1.88's
+  `_verifyRelease` is fire-and-forget; its callback did nothing AND logged nothing when no count came
+  back, so a service briefly unreachable at add time left the unverified `single` claim standing →
+  `Played::_totalTracks` reads it as a real total of 1 → marked Played after ONE track → purged days
+  later. That is 0.1.88's own bug, reachable through its own failure path. **Fix:** both failure
+  routes (a callback with no count, and a synchronous die — the latter previously didn't retry at
+  all) go through `_armVerifyRetry`, which arms ONE retry at `VERIFY_RETRY_SECS` (60s) via
+  `_verifyRetryTick` and logs whichever it does. `VERIFY_MAX_ATTEMPTS` = 2 caps it: an unbounded
+  retry hammering a service would be worse than the bug. `_verifyRetryTick` is a **NAMED sub** (the
+  0.1.83 `_deferredMarkTick` lesson) and RE-READS the row, so a removed row or one already resolved
+  by a drill/play is left alone; no live client → give up rather than pretend.
+  **The corroboration alternative was REJECTED, do not build it:** gating the single fast-path on
+  `rel_type='single' AND track_count=1` would put every pre-0.1.88 single (no stored count) back on
+  the 4-track floor, re-opening **0.1.82**. Heal the row; don't punish rows that predate the check.
+  Covered by `tools/t_verify_retry.pl`. **Not covered offline:** the timer actually FIRING — that
+  needs the server.
+
+  **0.1.90 also carries a full code review of the 0.1.88–0.1.90 work (2026-07-30). Five findings,
+  all fixed before release — none of this ever shipped:**
+  1. **The `&tc=` receiver was completely inert.** `$1 =~ /^\d{1,3}$/ && $1 > 0` — the validation
+     match is capture-less, and a SUCCESSFUL match resets `$1` to undef, so every count was
+     discarded. Silent, because `Plugin.pm` has no `use warnings`. Fixed by copying the capture out
+     first; the extraction moved to `_stripPrivateParams` so it is testable at all. See the lesson
+     in the regression-tests section — it shipped "verified" by a suite that could not fail.
+  2. **A FAILED resolve stamped `track_count=1`** (`Browse::_albumTracks`): the display fallback put
+     the "no match" text row back and it was counted as a playable track, so a 10-track album whose
+     resolve merely failed was marked Played after one track, and a real stored count was clobbered.
+     Now counted before the fallback can restore anything.
+  3. **Qobuz's CATALOGUE count became Played's total** — see the corrected "Catalogue vs playable"
+     note in the 0.1.88 entry. Now flagged provisional and never stored; the same rule was then
+     applied to `&tc=`, which is the same kind of number arriving by a different door.
+  4. **A resolved type was thrown away** unless it demoted a wrong 'single', so a row inserted NULL
+     by `_classifyThenAdd`'s timeout showed "Album" for good. Now fills a NULL, unforced.
+  5. **The verify gate asked "is there an album id"**, which is the wrong question for Bandcamp
+     (`get_album` scrapes the album PAGE url) — an id-only Bandcamp row spent the full service
+     SEARCH the gate exists to refuse. Predicate unified into `Sources::hasDirectAlbumRef`.
+
+  **A SECOND review pass then found three more, all fixed (2026-07-30). All three came from
+  the same mistake in the first fix — a rule applied to one consumer of a number and not the
+  other:**
+  6. **`$prov` gated `updateTrackCount` but not the single→ep demotion**, so a claimed single
+     contradicted by a CATALOGUE count became `rel_type='ep'` with `track_count` NULL → the EP
+     floor of 2 → a release with one playable track could never be marked, where **0.1.87
+     marked it**. (The demotion itself arrived with 0.1.88, which failed the same case by the
+     other route — `ceil(60% × 3)`; the provisional fix moved the failure, it didn't cause it.)
+  7. **Same inconsistency at add time** (`&tc=`): the comment refuses to store the count as a
+     total because it "can only ever be >= the playable count", then hands it to `relTypeFor`
+     anyway.
+  8. **`_verifyRelease` had a third failure route**: a callback that never ARRIVES fired
+     neither the no-count branch nor the die branch, so no retry and no log — the silent
+     give-up 0.1.90 claims to have removed. Now guarded by a `VERIFY_TIMEOUT_SECS` (6s) timer,
+     the shape `_classifyThenAdd` already used, with a `$done` flag so a late answer can't act
+     after the timeout has.
+
+  **The fix for 6 and 7 is one line, at the source rather than at the two call sites**, and it
+  rests on a rule worth keeping: **a provisional count may LOWER the Played bar, never RAISE
+  it.** Deriving a type from a count only ever lowers it (1 → single needs 1, 2-6 → ep needs 2,
+  both below the 4-track floor); the ONE exception is demoting a claimed single, which goes
+  1 → 2. So `classifyRelType` short-circuits on a catalogue count *except* when it would
+  demote a single, where it resolves the real tracklist instead — one extra call, only in the
+  ambiguous case, and it returns a REAL count (storable) plus a type settled from it.
+  **The rejected alternative:** gating `singleIsWrong` on `$prov` (i.e. never demote on a
+  catalogue count) re-opens 0.1.88's bug for the COMMON case — most MB "singles" of 2-3 tracks
+  are fully playable, and they would all mark Played after one track and be purged. Don't.
+
+  **The test that defended the bug.** `t_reltype.pl` asserted `a 3-track "single" is still
+  demoted → 'ep'` — the buggy behaviour, pinned as correct. Rewritten. A suite that encodes the
+  wrong invariant is worse than no suite, because it argues for the defect.
+
+  **The tests are the other half of this release.** The repo went from 5 suites / 128 checks to
+  **8 / 267**, adding `t_favurl.pl`, `t_resolve_count.pl` and `t_addpath.pl` — the last covering the
+  ADD PATH end to end, which had no coverage at all and is the route finding 1 walked through. Every
+  new suite was run against the bug it claims to catch before being called done; that check is now a
+  documented rule, because two of these bugs shipped past tests that could not fail.
+
+- **0.1.92** — **The SERVICE's own label is kept beside the clean title, so Played can still
+  find the row (`ref.svc_title`).** The hole `&al=` opened, found while code-reviewing LBF
+  0.9.144 and confirmed against Simon's live list before building.
+  **The premise `&al=` rests on is only half true.** It hands us the MusicBrainz release name
+  as the authoritative title, which is right for DISPLAY and for the dedupe key. But MB
+  deliberately keeps a release's distinguisher **outside** the title: all four American
+  Football LPs are titled exactly `American Football`, and `LP2`/`LP3`/`LP4` live in MB's
+  `disambiguation` field — verified against the MB API and against the live mirror. Qobuz
+  prints `American Football (LP2)`. So the stored title and the PLAYING title genuinely differ.
+  **Why that breaks Played and nothing else.** `Played::_matchRecord`'s streaming branch has no
+  album-id anchor — it matches on artist + album TITLE only — and `DB::_norm` deliberately KEEPS
+  `(LP2)` (that is what lets the dedupe key tell editions apart). Bare name stored + qualified
+  name playing = never marked, **silently**: the album plays perfectly and just never leaves the
+  list. Replay is NOT affected — `buildPlayableItems` prefers the captured album id
+  (`hasDirectAlbumRef`) and LBF/PFR rows always carry one, so `_bestMatches`' `(LP4)`-preserving
+  ranking never even runs for them. Display degrades (three rows reading "American Football",
+  separated only by the year) — accepted, see below.
+  **Fix: keep both.** `_addCtxCommand` stores Material's raw row label as `ref.svc_title` when
+  it differs from the title actually saved (JSON, no migration, no schema change — and NOT an
+  input to `dedupeKey`, so the whole point of `&al=` is undisturbed). `Played::_matchRecord`
+  gains a THIRD and LAST pass over `DB::findBySourceRefTitle`, with the same `_artistMatch`
+  guard the existing fallback uses. Being last, it can only ever rescue a miss — it cannot
+  change which record an already-matching play resolves to.
+  **APPENDING MB'S `disambiguation` WAS THE FIRST PLAN AND IT IS WRONG — do not build it.**
+  Sampling **120 release-groups straight from a live LB fresh-releases feed** against the mirror:
+  exactly **1** carries a disambiguation, and it is `The Vampire Lestat OST` — editorial PROSE,
+  not a service-style qualifier. Appending it yields `The Failures (The Vampire Lestat OST)`,
+  which matches nothing on any service and breaks the key it was meant to fix. It is also not
+  free: the LB feed carries no such field (confirmed — 12 keys, none of them disambiguation), so
+  it needs one MB lookup per release-group, and the trending path resolves in bulk. American
+  Football's `LP2` happening to be exactly Qobuz's spelling is a COINCIDENCE, and generalising
+  from it was the error the sample caught.
+  **Accepted limits:** future adds only (nothing exists to repair older rows from — the
+  population was zero at ship time); and Bandcamp coverage is unverified, since its search rows
+  read `Title (Album)` but what a PLAYING Bandcamp track reports as its album wasn't checked.
+  Neither is a correctness risk — the new pass is an OR, so it can only add matches.
+  Covered by `t_addpath.pl`, which drives the real add path into SQLite and then the real
+  `_matchRecord` over it; **anti-tested both ways** (sender removed → 2 failures, receiver
+  removed → 1), with the decisive assertion failing `NO MATCH` in both.
+
+- **0.1.93** — **The Played threshold moves to 90% rounded DOWN; the length measure can no
+  longer get permanently stuck; the row glyph moves off the title.**
+  (1) **Threshold 60 → 90**, arithmetic extracted to `Played::tracksNeeded`, rounded with
+  `floor` and never below 2 for a multi-track release, plus a one-off `threshold_90_migrated`
+  bump so existing installs actually move. Full reasoning in "The Played threshold" above —
+  **read it before changing either the percentage or the rounding**, the two interact and
+  `ceil` at 90% silently means 100% for anything under ten tracks.
+  (2) **`Played::_learnTrackCount`'s in-flight guard is a TIMESTAMP, not a flag**
+  (`COUNT_STALE_SECS` = 60). Found by code review and CONFIRMED by probe: a request the
+  service accepts and never answers runs none of our code, so the boolean was never cleared
+  and that release could never be measured again for the life of the server — it sat on the
+  flat `streaming_min_tracks` floor permanently, so anything shorter than the floor could
+  never reach Played. **That is 0.1.90's own bug returning through 0.1.90's own failure
+  route.** Deliberately NOT a timer: nothing has to HAPPEN on expiry and it is read in one
+  place, so a lazy check at the single read site avoids the arm/kill/pair machinery and the
+  ordering-bug class that 0.1.83's re-arm chain and 0.1.90's `$done` flag both had to fix. It
+  also covers a failure no `$cb`-based guard can see — a die inside the SERVICE's own async
+  handler, where nothing of ours runs. 60s because it must exceed the services' own HTTP
+  timeout (Qobuz's `SimpleAsyncHTTP` uses 15s) or a slow-but-live request gets duplicated.
+  Covered by `t_learn_count.pl`, anti-tested (2 failures against the boolean guard).
+  (3) **The ♫/♪/❝ glyph moved from the NAME line to `line2`**, ahead of the type word and
+  source (`♫ Album · Qobuz`); the title is a plain `Artist – Album (Year)` again. 0.1.86 had
+  put it on the name line. Beyond reading wrong, it was a live hazard: an LL home-shelf card's
+  `$ALBUMNAME` is the row's DISPLAYED name and the `LLHome-album` suppressor never worked on
+  the carousel, so an add from there would have stored the glyph verbatim in `album_title` —
+  the 0.1.71 pollution shape. Checked live before changing: no stored title carried a glyph
+  (each of 49 rows rendered exactly one, and the renderer always prepends exactly one), so
+  nothing needs repairing. Pinned in `t_resolve_count.pl` on BOTH lines, in both directions.
+  (4) **Both siblings now send the SERVICE's album title in `&al=`** — see the fleet rule
+  above — and `tools/add_naming_check.py` is the harness for verifying it.
+  (5) `tools/t_stubs.pl` gains **`TestClock`**, a `CORE::GLOBAL::time` override, so
+  elapsed-time behaviour is testable without sleeping. The override must be installed before
+  any plugin module compiles; the existing `require`-then-`ll_require()` order guarantees it,
+  **so don't move `ll_require()` above the stub require**. `Slim::Schema` also gains
+  `find('Album')`, defaulting to NOT FOUND so a year test can't pass vacuously.
+  (6) **Years on native and library adds** — `Sources::serviceYear` (hash-wide, epoch-aware,
+  ported from PFR) and `Sources::libraryAlbumYear` (local DB, because Material has no `$YEAR`
+  variable). See "Year backfill" for the per-source table and why Tidal/Deezer/Bandcamp
+  natives stay yearless BY DECISION.
+
+## Regression tests — RUN THESE BEFORE ANY BUILD (added 2026-07-29)
+
+    sh tools/t_all.sh          # one line per suite, non-zero exit on any failure
+    sh tools/t_all.sh -v       # every case, for when one fails
+
+Needs only perl + DBD::SQLite. **No LMS install and no server** — `tools/t_stubs.pl` fakes just
+enough of the `Slim::*` tree to load the plugin's real modules, and `ll_require()` in there works
+around the fact that the package names (`Plugins::ListenLater::*`) match the INSTALLED layout while
+a checkout has no `Plugins/` parent.
+
+**Why this exists.** Until 0.1.90 this repo had no committed tests at all. The invariants lived only
+as prose in this file, every round of work re-derived them by hand, and 0.1.88 broke one that had
+been settled in 0.1.74–0.1.80. Verification scripts WERE written in earlier rounds
+(`verify_played_flow.pl`, `verify_track_dedupe.pl`, `verify_played_threshold.pl`) but lived in
+session scratchpads and are gone — so nothing carried forward. Anything worth verifying belongs in
+`tools/`, committed, named after the behaviour it protects.
+
+| suite | protects |
+|---|---|
+| `t_db.pl` | dedupe keys and migrations against real SQLite: 0.1.43 (same title, different year), 0.1.33 (cross-source), 0.1.74+ (track vs album keys), 0.1.81 (same track from two surfaces), 0.1.88 (`track_count`, forced `rel_type`), and an old schema file upgrading with its rows intact |
+| `t_played.pl` | the thresholds that keep regressing in both directions: 0.1.82 (a single/short EP CAN reach Played), 0.1.83 (a one-track release does NOT mark when it starts), 0.1.88 (a real total beats the 4-track floor), plus the live-library-count rule |
+| `t_reltype.pl` | 0.1.88's classification: `singleIsWrong`, the full `relTypeFor` table, `classifyRelType` end to end, that the Qobuz album-object path fetches **no** tracklist, and that a CATALOGUE count comes back flagged provisional while a resolved one doesn't (the flag is the only thing stopping an inflated Played total) |
+| `t_verify_retry.pl` | 0.1.90's retry: that it retries, retries EXACTLY once (an unbounded retry would be worse than the bug), never gives up silently, and re-reads the row first — plus the three distinct answers `_verifyRelease` must keep apart (real count → store; provisional → neither store nor retry; no count → retry) |
+| `t_learn_count.pl` | 0.1.93's in-flight guard on `Played::_learnTrackCount` and specifically its EXPIRY: that a lost request stops blocking after `COUNT_STALE_SECS`, that it is logged rather than swallowed, that an answered request stays immediately re-askable, that records don't block each other, and that a library release is never asked at all. Uses `TestClock::advance()` |
+| `t_favurl.pl` | the private favurl handshake (`Plugin::_stripPrivateParams`): `?cover=`/`?b=`/`&a=`/`&y=`/`&al=`/`&rt=`/`&tc=` — what each yields, that junk is stripped-but-rejected, that `&a=` can't eat `&al=`, that `&rt=`+`&tc=` really do reach `singleIsWrong`, and that a NATIVE favurl comes back byte-for-byte unchanged with no field set. Calls the real sub — see the `&tc=` lesson below |
+| `t_addpath.pl` | the ADD PATH end to end — a Material action into `_addCtxCommand`, out as a row in SQLite. Also 0.1.92's `ref.svc_title`: that the service label is kept when it differs and not when it doesn't, that a play of the QUALIFIED title finds the row while a different artist's doesn't, and that the dedupe key still ignores the label. What the handshake params become on the stored row, that `&tc=` settles the type but never fills `track_count`, that the cross-kind single dedupe eats a REAL single but not a disproved one, that an UNKNOWN type defers instead of inserting a guess, and that unreplayable/unidentifiable adds are refused. Needs no service: the whole path asks only `client`/`getParam`/`setStatusDone`/`setStatusProcessing`/`addResult`/`addResultLoop`, and `client => undef` makes the background jobs no-op. **The service plugins must be declared** (`_serviceCan`) or the gate rejects everything and every assertion passes against an empty DB |
+| `t_resolve_count.pl` | what a resolve writes BACK to the row (`Browse::_albumTracks`): a FAILED resolve records nothing and never clobbers a real `track_count`/`rel_type`, Bandcamp helper-only rows count as a failure too, and 0.1.88's successful-resolve refresh + forced single-correction still work. Plus `Sources::hasDirectAlbumRef` — whether a row's tracklist costs one album call or a whole service SEARCH (the Bandcamp page-url case), which is what gates background work |
+| `t_load.pl` | every shipped module compiles AND loads, plus a called-vs-defined sweep — `perl -c` passes on a call to a sub that doesn't exist, which nearly shipped a runtime crash in 0.1.83 |
+
+Two rules that follow from how this suite is built:
+
+- **Assertions must not be able to pass vacuously.** The stubs are deliberately dumb; anything a
+  test depends on (a library track count, a pref, a tracklist) is set IN the test. The `&tc=`
+  episode in the sibling ListenBrainz plugin is the cautionary case: every test for it SUPPLIED the
+  field it was meant to be checking for, so all of them passed while the feature was inert.
+  **This side of the same handshake then did it too** — see below.
+- **A test of extraction must CALL the extraction.** 0.1.89's `&tc=` receiver shipped with
+  `$favTracks = $1 + 0 if $1 =~ /^\d{1,3}$/ && $1 > 0`. The strip works and `$1` holds the count,
+  but the validation match has no capture group of its own and **a successful match still resets
+  `$1` to undef** — so every count was discarded and the whole handshake was inert on this side as
+  well. It shipped "verified by 24 checks": that script pulled the seven strip regexes out of
+  Plugin.pm *by grep* and applied them standalone, which sounds like the strongest possible test and
+  was in fact incapable of failing, because the bug was in the four lines of validation NEXT to the
+  regexes. `Plugin.pm` has `use strict` but **not** `use warnings` (unlike Browse/DB/Played/
+  Sources), so the "uninitialized value $1" warning was never emitted either — completely silent on
+  the server. Fixed by copying the capture into a lexical first; the extraction now lives in its own
+  sub (`_stripPrivateParams`) purely so a test can call it, and `t_favurl.pl` does. Both new suites
+  were checked against the pre-fix code and fail there (11 and 7 failures) — **a new suite is not
+  done until it has been run against the bug it claims to catch.**
+  *(Adding `use warnings` to Plugin.pm/Podcast.pm/Settings.pm/HomeExtras.pm would have caught this
+  on the first add. Not done here — it's a change to a 2000-line module that could surface a pile of
+  pre-existing benign warnings in `server.log`, so it wants its own pass.)*
+- **A test that needs the server says so.** The retry's timer FIRING, and anything touching a real
+  service, is not covered here — `tools/t_all.sh` proves logic, not integration. Live checks go
+  through `curl http://plex:9000/log.txt` (see the testing note above) and their results belong in
+  this file.
+
+## `&al=` carries the SERVICE's album title — FLEET RULE (SETTLED 2026-07-30)
+
+**Whatever a sibling plugin packs into `&al=`, it must be the title the STREAMING SERVICE uses, not
+the one the sibling prefers.** This was got wrong independently in both senders and cost a whole
+debugging session; it is the single most important thing on this page about plugin interop.
+
+**Why the service's name and nothing else.** `Played::_matchRecord`'s streaming branch has **no
+album-id anchor** — it matches on artist + album TITLE, because a playing track's metadata is all
+there is to go on. So the stored title has to be the string the service will report at playback.
+Store anything else and the release **plays perfectly and silently never leaves the list**: no
+tracking, no measure, no mark, and *nothing in the log*, because `_matchRecord` returning undef is
+not an error. It is the hardest failure mode in this plugin to notice.
+
+**How each sender got it wrong, and what each now sends:**
+
+| sender | row label Material sends as `$ALBUMNAME` | was in `&al=` | now in `&al=` |
+|---|---|---|---|
+| **LBF** | the album name | MusicBrainz's release name | the service's own title |
+| **PFR** | `"Artist - Album"` | Pitchfork's album title | the matched service item's title |
+
+- **LBF** sent MB's name because it is the better name for DISPLAY and for the dedupe key. But MB
+  keeps a release's distinguisher OUTSIDE the title (all four American Football LPs are titled
+  `American Football`), and its name can differ outright: MB `Radio: Fourth Space (Original Music
+  from Big Walk)` vs Qobuz `Radio: Fourth Space (Original Music from the Game "Big Walk")` — verified
+  live, rec 205. **PFR** legitimately NEEDS `&al=` (its label really is `"Artist - Album"`, so
+  `$ALBUMNAME` is polluted) — it just has to put the right title in it: the service item's title was
+  sitting right there next to `_albumid` in the match loop and was being discarded.
+- **An intermediate LBF fix over-corrected** and sent the service's ROW LABEL, which carries the
+  artist — Qobuz labels artist-first (`aksfx - Radio: …`, rec 207), Bandcamp artist-last
+  (`Radio: … - aksfx`, rec 208). Both unmatchable. The target is the album TITLE alone.
+
+**Why the matcher can't be loosened to paper over this.** The shared matcher's `_norm` strips
+brackets so it CAN match across an edition qualifier; `DB::_norm` deliberately KEEPS them so the
+dedupe key can tell editions apart. Both are right. The consequence is that precisely the cases where
+the matcher's leniency does useful work (`Extra Mile` matched against `Extra Mile (Deluxe Edition)`)
+are the cases where a sibling's own title can never match at playback. **Fix it at the SENDER.**
+
+**Checking it: `tools/add_naming_check.py`.** Every add logs both halves — Material's label and the
+title actually stored — so the whole matrix is checkable from one log fetch, no DB access:
+
+    python3 tools/add_naming_check.py            # non-zero exit if anything mismatches
+
+Three verdicts: `OK` (identical), `strip(...)` (stored == label minus something `_addCtxCommand`
+removes on purpose — a trailing `(YYYY)`, a format qualifier like `(Album)`/`(Hi-Res)`, a sibling's
+`Artist - ` prefix), and `** MISMATCH` (a genuinely different title — the bug). It pairs each
+`addctx` with the NEXT `add ->` in log order rather than zipping the two streams, because a rejected
+add and an `already=1` re-add both break a positional zip silently.
+
+**Its one blind spot, and it is not small: for PFR the check is VACUOUS.** On every other surface
+Material's label IS the service title, so label-vs-stored is a valid proxy. PFR's label is
+Pitchfork's own string, so `strip(artist-prefix)` proves only that the prefix came off — it says
+nothing about whether the remainder is what the service calls the release. Post-fix LBF is partly the
+same. **The only non-proxy test is playback**: play a track and read the log — a match logs
+`measured on first play` / `marked album rec`; a miss logs nothing at all, and that silence IS the
+diagnosis.
+
+**Verified live 2026-07-30**, after both senders were fixed: Qobuz/Tidal/Deezer native `OK`, Bandcamp
+via LBF `strip(qualifier)`, Qobuz via PFR `strip(artist-prefix)`. Rows saved before the fixes (205,
+207, 208, 212, 215) are unrepairable — `svc_title` is captured at add time from a label that is gone —
+and need a re-add.
+
+**Two things the check surfaced that are worth knowing.** (1) `svc=` is EMPTY on some sibling adds
+(rec 205, 207) and `listenbrainzfreshreleases` on others, so the `via` column tells you which Material
+CATEGORY fired, not which plugin sent it — `$SERVICE` doesn't populate on every surface. (2) Bandcamp
+appends `(Album)` to its browse titles and `_addCtxCommand` strips it.
+
+**SETTLED by playback 2026-07-30: stripping `(Album)` is correct.** A Bandcamp release added via LBF
+was played and moved to Played, so the stripped title DOES match what Bandcamp reports while playing —
+i.e. `(Album)` is a browse-row decoration, not part of the album name. Nothing offline could have
+predicted this; only playing it could.
+
+**Status of `ref.svc_title` (0.1.92) after that.** Its two candidate justifications are now both gone:
+the senders were the real bug and are fixed, and the qualifier-strip case turns out not to need
+rescuing. **It has no known live case.** Keeping it anyway, deliberately: it is the LAST pass in
+`_matchRecord`, guarded by the same `_artistMatch` as the pass above, so it can only ever rescue a
+miss and never redirect a play that already matches — and the failure it guards against is the silent
+one (a release that plays perfectly and never leaves the list). Cheap insurance against a future
+sender regression or a service that starts decorating titles. Don't spend effort removing it; equally,
+don't cite it as load-bearing.
+
+**Played status is believed COMPLETE as of 2026-07-30** — verified end to end across native
+Qobuz/Tidal/Deezer, Bandcamp via LBF, Qobuz via PFR, and Now Playing (both the counter path and
+`_armDeferredMark`'s played-through path, including correctly NOT marking a track that was skipped
+partway).
+
+## Played length: MEASURE it, never infer it from the release type (DECIDED 2026-07-30)
+
+**The rule: a release's length is only ever a COUNT of its real playable tracks. The release
+TYPE never decides anything about Played.** Reported by Simon and rebuilt the same day, after
+a saved release (adieu — *Wanna me*) was played through and refused to move to Played.
+
+**Why the type can't be trusted, ever.** `rel_type` comes from MusicBrainz (via LBF's `&rt=`)
+or a service catalogue. It is a BIBLIOGRAPHIC LABEL, not a count — MB calls a lead track plus
+B-sides a *Single*, and calls a 1-track release an *EP*. **LBF cannot fix this**: it passes on
+what ListenBrainz/MusicBrainz give it. Every threshold derived from the label was a guess
+dressed as a fact, and it was wrong in both directions — a "single" of 3 tracks marked Played
+after one (0.1.88's bug), and an "EP" of 1 track that could never be marked because the EP
+floor asked for 2 tracks it doesn't have (the reported bug). Both were patched repeatedly;
+the patches were the problem.
+
+**The counting bug underneath it, VERIFIED LIVE 2026-07-30.** The resolved item list was
+filtered with a DENY-list — not `type => 'text'`, no `weblink` — so anything a service invents
+fails it OPEN. Qobuz returns 5-6 info rows with every album (`Artist: …`, `Add Release … to
+Qobuz favourites`, `Credits`, `Description`, `Music Label: …`, `Copyright`, and one `Artist:`
+row PER credited artist), and **none of them carries a `type` key at all** — confirmed over
+`jsonrpc.js` against four releases, and against `Slim::Control::XMLBrowser`, which emits
+`type` verbatim when present. So every one was counted as a track:
+
+| release | rows | counted | real |
+|---|---|---|---|
+| adieu — Wanna me | 6 | **6** | 1 |
+| 3OH!3 — MY FRIENDS | 8 | **8** | 3 |
+| Cola — Cost Of Living Adjustment | 17 | **17** | 11 |
+| Will Sheff — Extra Mile | 15 | **15** | 9 |
+
+Wanna me therefore needed `ceil(60% × 6)` = 4 of its 1 track — impossible — and Cola needed
+all 11 instead of 7.
+
+**The four parts, all shipped in 0.1.90:**
+1. **`Sources::isPlayableTrack`** — a port of LMS's own `hasAudio` (`Slim/Control/
+   XMLBrowser.pm`), the predicate the server itself sets `isaudio` with. An ALLOW-list, so an
+   unanticipated row fails CLOSED. **Note it accepts `playlist` as well as `audio`, plus
+   `play` and audio `enclosure` — filtering on `type eq 'audio'` alone would be wrong.**
+   Counting and DISPLAY are now separate: the drill view still shows the info rows.
+2. **`Played::_totalTracks` returns only a MEASURED length** — library live count, or a stored
+   resolved count. The `single ⇒ 1` inference is gone, and so is `_maybeMark`'s EP floor cap
+   (dropping the floor to 2 for an "EP" still asks for a track a 1-track release lacks).
+3. **`Played::_learnTrackCount`** — on the first play of a saved streaming release with no
+   measured length, resolve the tracklist, count it and store it. Fired only in the branch
+   that STARTS tracking, plus an in-flight guard, so an album asks once. If the answer arrives
+   mid-play it updates the live `%tracking` total; **if it comes back 1 it cancels the counter
+   and hands over to `_armDeferredMark`**, or the release would be marked the instant it
+   started (0.1.83's bug).
+4. **`user_version < 4` migration** — clears `track_count` on every non-library row. Wrong
+   counts CANNOT heal on their own (Played only measures a length it doesn't have), so without
+   this nothing already saved gets better. Library rows are untouched.
+
+**The safety principle that falls out, and should govern anything similar: when the length is
+unknown, fail towards NOT marking.** Failing to mark is recoverable and merely annoying;
+marking wrongly moves the row to Played and auto-tidy then DELETES it. Uncertainty must never
+destroy a saved row. That is why an unmeasurable release sits on the flat floor rather than
+getting a smaller, friendlier guess.
+
+**Consequence, accepted:** a release whose length can never be measured (service permanently
+unreachable) and which holds fewer tracks than `streaming_min_tracks` won't auto-mark. Before,
+the label rescued some of those — at the cost of wrongly marking others. Measuring is right;
+guessing was not.
+
+## Year backfill from the Qobuz album object (0.1.91)
+
+A streaming BROWSE row carries no year. The only add-time sources are the siblings' `&y=`
+handshake, an explicit `year` param, and Material's Now Playing `"Album (YYYY)"` label — so
+measured on the live list, **14 of 45 rows had no year** (9 Qobuz, 4 Bandcamp, 1 other).
+
+**It is not cosmetic.** The year is a segment of the dedupe key (`artist|album|year`), so a
+yearless row keys as `artist|album|` and the SAME album added later from a source that does
+supply one keys differently → a second row that dedupe cannot see. Same class as the
+year-in-title pollution, from the opposite direction.
+
+**Free on Qobuz, unavailable on Tidal/Deezer/Bandcamp.** Qobuz is the one service whose ID
+call returns an album OBJECT rather than a tracklist, and that object states the date.
+`classifyRelType` fetches that object anyway (for `release_type` + `tracks_count`), so the
+year rides back as a FOURTH callback value at no extra cost, on both the short-circuit and
+the resolve-fallback paths.
+
+### WHICH SOURCES CAN SUPPLY A YEAR — the whole picture (0.1.93)
+
+| source | year? | from where |
+|---|---|---|
+| **library** | ✅ always | `Sources::libraryAlbumYear` — the local DB, free |
+| **Qobuz** (native or sibling) | ✅ | the album object, via `Sources::serviceYear` |
+| **LBF / PFR** (any service) | ✅ when they have one | the `&y=` handshake |
+| **Now Playing** | ✅ only if the label reads `"Album (YYYY)"` | Material's label, stripped by `_addCtxCommand` |
+| **Tidal native** | ❌ | `getAlbum` returns a TRACKLIST, no album hash to read |
+| **Deezer native** | ❌ | same |
+| **Bandcamp native** | ❌ | same, and no date at all without scraping the page |
+
+**The three ❌ rows are a DECISION, not an oversight.** Those plugins' raw `albums/<id>` /
+`album/<id>` endpoints DO carry dates, but surfacing them means reaching into private plugin
+internals, which was **DECLINED 2026-07-25** (breaks on plugin updates) — the same ruling that
+makes catalogue-side single/EP detection Qobuz-only. The one legitimate route left is those
+plugins' public SEARCH results, whose raw album hashes carry dates (`_searchService` already
+reads them for `_bestMatches` ranking) — unused here because a search is far too expensive to
+spend on a cosmetic-plus-dedupe field. **Don't re-attempt the private-endpoint route.**
+
+**`Sources::serviceYear` is the reader, and it takes the HASH.** Ported from PFR's `_svcYear`
+(0.1.93) after native adds were seen losing years that PFR kept. The earlier version asked for
+three Qobuz fields by name, so anything spelled differently produced nothing. Key order is
+PRECEDENCE: `release_date_original` (the original release — a reissue keeps the year it was
+made) → `release_date_stream` → `release_date` → `releaseDate` → `date` → `streamStartDate` →
+`released_at` (Qobuz's EPOCH, converted through `localtime` and range-checked) → `year`.
+**`release_date_stream` is not in PFR's list — don't drop it when syncing, this plugin reads
+it** (the regression suite caught exactly that).
+
+**The epoch changed behaviour deliberately.** `_yearOf` (string input) still refuses
+`released_at`, and must: there is no word boundary inside a digit run, so mining it would turn
+`1767225600` into "1767". But refusing it *outright* meant an album object stating only the
+epoch yielded no year at all — which is what PFR was getting right. `serviceYear` converts it,
+because there it is known to be an epoch rather than guessed at.
+
+**Material has NO `$YEAR` variable.** Its map is `$ALBUMNAME`/`$ARTISTNAME`/`$TITLE`/`$FAVURL`/
+`$IMAGE`/`$ALBUMID` — so a **library** album added from a Material menu arrived yearless while
+the same album added from the info-provider menu (`_addItemFor`, which always sent one) got its
+year, and the two then keyed differently and could not dedupe. `_addCtxCommand` now reads it
+from `Slim::Schema` off the `$ALBUMID` it is already given. Note LMS stores `year = 0` for
+"unknown", which is not a year — `libraryAlbumYear` rejects it.
+
+- **`DB::updateYear`** mirrors `updateArtist`: fills a MISSING year and RECOMPUTES the dedupe
+  key. It never overwrites a year we already hold — that one came from the add, closer to the
+  user's own view of the release, and a service date can be a reissue's.
+- **`_classifyThenAdd` sets it BEFORE the insert**, so it reaches the key (`DB::add` builds
+  the key at insert; a year arriving later would leave the key yearless).
+- **`_verifyRelease` backfills it too**, ahead of the count check, so it lands even when the
+  count is provisional or never arrives — that is what heals rows already saved.
+- **An epoch `released_at` is deliberately NOT read.** `_yearOf` anchors on `\b`, and a run of
+  digits has no internal word boundary, so `1767225600` yields nothing rather than a nonsense
+  year. Pinned by a test.
+
+## Release type: why an asserted type is not classified before insert (DECIDED 2026-07-29)
+
+**Settled. Do not re-open — it was re-litigated once already, at length, and this is where that ended.**
+
+The tension is genuine and has no third option: for a release type we cannot corroborate at insert
+time, **"never show a type that changes" and "never delay the add" are mutually exclusive.** One of
+them has to give. Both have now been chosen, in that order, for different reasons:
+
+- **0.1.74–0.1.80 chose "never changes", accepting the wait.** Correct for what existed then: the
+  only types available were an unknown one (nothing to show but a guessed "Album") and a resolved
+  one, and the correction it was avoiding waited for a **first drill or play** — potentially days
+  later, in front of the user, on the list itself.
+- **0.9.141 created a third category that decision never considered: an ASSERTED type.** MusicBrainz
+  (via LBF's `&rt=`) and Qobuz's `release_type` both state one — and both are wrong in exactly one
+  way that matters, calling a multi-track release a Single (see 0.1.88). So it is neither "unknown"
+  (there IS a label, and a good one for album-vs-EP) nor "known" (it can't be trusted on the one
+  axis Played depends on).
+- **DECISION (Simon, 2026-07-29): the add must not wait on a service.** An asserted type inserts
+  IMMEDIATELY; `_verifyRelease` corrects it fire-and-forget afterwards. The first cut of 0.1.88
+  blocked instead, and was rejected on exactly this ground: *"I dont want a delay to adding
+  material."*
+
+**What makes the flip acceptable here, where it wasn't in 0.1.74–0.1.80** — the two situations differ
+in more than preference:
+
+1. **Milliseconds, not days.** Measured live on the real server, 3-track MB Single, per service:
+   Qobuz **1.5 ms**, Deezer **2–277 ms**, Tidal **150 ms** between the insert line and the
+   `reclassified as ep` line. The old flip waited for a first play.
+2. **Nobody is looking at the list.** An add happens from a streaming browse page or Now Playing —
+   the LL list isn't rendered, and by the time it is, the correction has long landed. Simon's own
+   report of the shipped behaviour: *"it did show up straight away in my test no delay."*
+3. **An UNKNOWN type still blocks.** `_classifyThenAdd` is unchanged for it, because there the label
+   would be a pure guess with nothing behind it. That half of 0.1.74–0.1.80 stands.
+
+**If this is ever revisited, the only lever is going back to blocking** — there is no arrangement that
+avoids both the delay and the correction. Storing NULL until verified was considered and rejected: it
+still flips visually (NULL renders as "Album", `_typeLabel`), and it breaks 0.1.79's cross-kind
+single↔track dedupe, which keys on `rel_type eq 'single'` at insert.
+
+**Two further `_verifyRelease` holes, both fixed 2026-07-30 (code review):**
+
+1. **It threw away a type it had just been handed.** It only ever wrote a type to DEMOTE a
+   wrong 'single', so a row inserted with a NULL type — the shape `_classifyThenAdd`'s safety
+   timeout leaves behind — kept showing `_typeLabel`'s neutral "Album" default for good, even
+   though the callback had just returned 'ep'. Now a missing type is filled in, UNFORCED
+   (`updateRelType`'s `WHERE rel_type IS NULL`), so it can't race over a type a drill/play
+   stored meanwhile. A standing claim is still left alone.
+2. **The gate asked the wrong question for Bandcamp.** It ran whenever the row had an album
+   ID, but Bandcamp's `get_album` scrapes the album PAGE url — an id-only Bandcamp row
+   resolves via a full service SEARCH, exactly the cost the gate exists to refuse.
+   `buildPlayableItems` already got this right, so the predicate is now ONE sub,
+   `Sources::hasDirectAlbumRef`, used by both — they had drifted, which is the same way
+   `_albumTracks` drifted from `_resolveCount`. **Rule: anything deciding whether to do
+   optional background work asks `hasDirectAlbumRef`, never "is there an album id".**
+
+**Related item — MITIGATED in 0.1.90, not eliminated.** A failed verify leaves the unverified `single`
+claim standing, and `Played::_totalTracks` reads it as a real total of 1 → marked Played after one
+track → auto-purged days later. 0.1.90 retries once after 60s (`_armVerifyRetry` /
+`_verifyRetryTick`) and, crucially, LOGS both failure routes — before that a service that answered
+with nothing was completely silent, which is why this could have sat unnoticed indefinitely. A
+sustained outage across both attempts still leaves the claim; the row is then corrected on first
+play/drill from the list (`Browse::_albumTracks`), so what remains needs the service down for a
+minute AND the release played only from outside LL.
+
+**The corroboration fix was considered and REJECTED — do not build it.** Gating the single fast-path
+on `rel_type='single' AND track_count=1` would put every pre-0.1.88 single (no stored count) back on
+the 4-track floor, re-opening **0.1.82**. Trading a narrow new hole for a documented old one is the
+wrong direction; heal the row, don't punish rows that predate the check.
 
 ## Podcast episodes (0.1.84) — what a browse row actually carries, and why resolution works this way
 

@@ -82,6 +82,7 @@ CREATE TABLE IF NOT EXISTS albums (
     album_title TEXT,                                -- the (parent) album title; also set for a track
     track_title TEXT,                                -- set only when kind='track'
     rel_type    TEXT,                                -- release type for kind='album': 'album'|'ep'|'single' (NULL until known)
+    track_count INTEGER,                             -- resolved playable track count (NULL until resolved) — Played's threshold
     year        INTEGER,
     artwork     TEXT,
     ref_kind    TEXT,                                -- 'album_id' | 'url' | 'passthrough'
@@ -131,6 +132,32 @@ SQL
         _addColumn($h, 'track_title', 'TEXT');
         _addColumn($h, 'rel_type',    'TEXT');
         $h->do('PRAGMA user_version = 2');
+    }
+    # 0.1.88: the resolved playable track count, so a STREAMING release can be thresholded
+    # on what it actually contains instead of the blunt streaming_min_tracks floor (see
+    # Played::_totalTracks). NULL on every existing row and filled the first time each is
+    # resolved — no backfill is possible here, the count only comes from the service.
+    if ($schemaVer < 3) {
+        _addColumn($h, 'track_count', 'INTEGER');
+        $h->do('PRAGMA user_version = 3');
+    }
+    # 0.1.90: every streaming count stored before this version is WRONG and has to go.
+    # They were produced by counting the resolved item list with a deny-list filter, which
+    # let a service's non-track rows through — Qobuz sends 5-6 with every album ('Artist:
+    # …', 'Credits', 'Music Label: …', 'Copyright', …), so a 1-track release was recorded as
+    # 6 and an 11-track album as 17 (see Sources::isPlayableTrack). Played thresholds on this
+    # number, so those rows want 60% of a total that overshoots what can be played: the
+    # 1-track release needed 4 and could never be marked at all.
+    #
+    # A wrong count cannot heal on its own — Played only resolves a count it does NOT have
+    # (Played::_onChange), so a present-but-wrong one is never revisited. Clearing them puts
+    # every streaming row back to "length unknown", which the next play resolves correctly.
+    # Library rows are untouched: their count is queried live and was never stored here.
+    if ($schemaVer < 4) {
+        my $n = eval { $h->do("UPDATE albums SET track_count = NULL WHERE source != 'library'") } || 0;
+        $log->warn("Listen Later: cleared $n stale streaming track count(s) — they will be "
+            . "re-measured on the next play") if $n && $n ne '0E0';
+        $h->do('PRAGMA user_version = 4');
     }
     return;
 }
@@ -258,11 +285,11 @@ sub add {
 
     dbh()->do(
         'INSERT INTO albums
-            (status, kind, source, artist, album_title, track_title, rel_type, year, artwork, ref_kind, ref_json, dedupe_key, added_at, play_count)
-         VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,0)',
+            (status, kind, source, artist, album_title, track_title, rel_type, track_count, year, artwork, ref_kind, ref_json, dedupe_key, added_at, play_count)
+         VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,0)',
         undef,
         $status, $kind, $source, $rec->{artist}, $rec->{album_title}, $rec->{track_title},
-        $rec->{rel_type}, $rec->{year},
+        $rec->{rel_type}, _sane($rec->{track_count}), $rec->{year},
         $rec->{artwork}, $rec->{ref_kind}, $ref_json, $key, time(),
     );
 
@@ -289,6 +316,27 @@ sub updateArtist {
     my $key = dedupeKey($artist, $rec->{album_title}, $rec->{year});
     eval { dbh()->do('UPDATE albums SET artist = ?, dedupe_key = ? WHERE id = ?', undef, $artist, $key, $id); 1 }
         or $log->warn("ListenLater: updateArtist($id) failed: $@");
+    return;
+}
+
+# Fill in a MISSING release year, and recompute the dedupe key with it — the exact shape of
+# updateArtist above, and for the same reason. A streaming browse row often carries no year
+# (only the sibling plugins' '&y=' handshake and Material's Now Playing "Album (YYYY)" label
+# supply one), and the year is part of the key: a row saved without one keys as
+# 'artist|album|', so the SAME album added later from a source that does supply the year keys
+# differently and lands as a second row that dedupe can't see. Backfilled from the service's
+# own album object (Sources::classifyRelType) once we've fetched it for other reasons.
+#
+# Never overwrites a year we already hold: that one came from the add, closer to the user's
+# own view of the release, and a service's date can differ (reissue vs original).
+sub updateYear {
+    my ($id, $year) = @_;
+    return unless $id && defined $year && $year =~ /^(?:19|20)\d{2}$/;
+    my $rec = get($id) or return;
+    return if $rec->{year};                                       # don't overwrite a real year
+    my $key = dedupeKey($rec->{artist}, $rec->{album_title}, $year);
+    eval { dbh()->do('UPDATE albums SET year = ?, dedupe_key = ? WHERE id = ?', undef, $year, $key, $id); 1 }
+        or $log->warn("ListenLater: updateYear($id) failed: $@");
     return;
 }
 
@@ -355,12 +403,36 @@ sub findTrackByArtistTitle {
 
 # Persist a release-type classification ('album'|'ep'|'single') once it's known — set at
 # add time for library releases (track count is free) and lazily on first resolve for
-# streaming ones (see Sources::relTypeFor). Won't overwrite an existing value.
+# streaming ones (see Sources::relTypeFor). Won't overwrite an existing value unless
+# $force is set, which only the mislabelled-single correction does (Browse::_albumTracks):
+# there the stored type is a source's claim and the resolved tracklist has just disproved
+# it, so it is the one case where a known value is worth replacing.
+# A count is only worth storing if it's a positive whole number — a service that
+# returns nothing resolvable must leave the column NULL ("unknown"), not 0, since Played
+# reads any stored count as a real total. Returns undef for anything else.
+sub _sane {
+    my ($n) = @_;
+    return (defined $n && $n =~ /^\d+$/ && $n > 0) ? $n + 0 : undef;
+}
+
+# Persist the resolved playable track count. Unlike rel_type this DOES overwrite: it's a
+# fact about the release re-measured on every resolve, and the newest measurement is the
+# one to keep (a service that fixes an incomplete tracklist should correct the row).
+sub updateTrackCount {
+    my ($id, $count) = @_;
+    my $n = _sane($count) or return;
+    return unless $id;
+    eval { dbh()->do('UPDATE albums SET track_count = ? WHERE id = ?', undef, $n, $id); 1 }
+        or $log->warn("Listen Later: updateTrackCount($id) failed: $@");
+    return;
+}
+
 sub updateRelType {
-    my ($id, $relType) = @_;
+    my ($id, $relType, $force) = @_;
     return unless $id && defined $relType && $relType =~ /^(?:album|ep|single)$/;
-    eval { dbh()->do("UPDATE albums SET rel_type = ? WHERE id = ? AND rel_type IS NULL",
-        undef, $relType, $id); 1 }
+    my $sql = "UPDATE albums SET rel_type = ? WHERE id = ?"
+        . ($force ? '' : ' AND rel_type IS NULL');
+    eval { dbh()->do($sql, undef, $relType, $id); 1 }
         or $log->warn("Listen Later: updateRelType($id) failed: $@");
     return;
 }
@@ -422,6 +494,31 @@ sub findBySourceAlbumId {
         return $h if defined $aid && "$aid" eq "$albumId";
     }
     return undef;
+}
+
+# Album rows whose stored SERVICE LABEL (ref.svc_title, written by _addCtxCommand when a
+# sibling's '&al=' replaced the title — 0.1.92) matches this album name. The last resort for
+# Played: a record saved under MusicBrainz's bare release name ("American Football") never
+# matches the title the service reports while playing ("American Football (LP2)"), because
+# _norm here deliberately KEEPS the qualifier. Scanned rather than queried — svc_title lives
+# in ref_json, not a column — exactly like findBySourceAlbumId, and for the same reason: the
+# table is a hand-curated list (tens of rows), so a scan on the MISS path is free. Returns a
+# list; the caller still has to disambiguate by artist.
+sub findBySourceRefTitle {
+    my ($source, $album) = @_;
+    my $want = _norm($album);
+    return () unless length $want;
+
+    my $rows = dbh()->selectall_arrayref(
+        "SELECT * FROM albums WHERE source = ? AND kind = 'album'", { Slice => {} }, $source);
+    my @out;
+    for my $row (@$rows) {
+        my $h = _rowToHash($row);
+        my $t = $h->{ref}{svc_title};
+        next unless defined $t && length $t;
+        push @out, $h if _norm($t) eq $want;
+    }
+    return @out;
 }
 
 # list($status, $sort) — $sort: added|artist|album|year|played

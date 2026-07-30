@@ -71,9 +71,9 @@ sudo systemctl restart lyrionmusicserver
 The menu wording is the same everywhere, because the row you're on already tells you what you're saving: an album row saves the album, a track row saves that track. The one exception is Material's **Now Playing** screen, where there's no surrounding list to make it obvious — there the menu says **Add track to Listen Later**, and **Add album to Listen Later** sits in **"… → More"** if you want the whole release instead.
 
 ### Albums, tracks and podcasts
-Each saved row is labelled with what it is, and carries a small glyph — **♫** for a multi-track release, **♪** for a single track, **❝** for a podcast episode:
+Each saved row is labelled with what it is on the line beneath the title, which carries a small glyph — **♫** for a multi-track release, **♪** for a single track, **❝** for a podcast episode — followed by the type and the source, e.g. *♫ Album · Qobuz*. The title line stays a plain *Artist – Album (Year)*:
 
-- **Album** / **EP** / **Single** — a whole release. Streaming releases are classified when you add them, so the label is right straight away rather than changing later.
+- **Album** / **EP** / **Single** — a whole release. The wording is the one MusicBrainz or the streaming service gives it, so it's shown as they have it. It isn't always literal — a release called an *EP* can hold a single track — so the **glyph** goes by the real track listing once the release has been counted, and only falls back to the label until then.
 - **Track** — one song, saved from a track row. It plays on tap rather than opening a tracklist.
 - **Podcast** — one episode, marked with a quote glyph rather than a note (see below).
 
@@ -105,7 +105,9 @@ For a Bandcamp album, the **"… → More"** menu has **Buy on Bandcamp**, which
 ### Automatic Played tracking
 With **Automatically move albums to Played** on (the default), a **Listen Later** item moves to **Played** once you've heard most of it — whether you started playback from the list or anywhere else (Material, the app, a streaming page). Only *Listen Later* items are watched; *Wish List* items are left alone.
 
-- A **multi-track release** is judged on how many of its tracks you've played — see the thresholds in Settings.
+- A **multi-track release** is judged on how many of its tracks you've played — see the thresholds in Settings. Streaming releases remember how many tracks they hold, measured from the release's real track listing the first time you play it (or in the background shortly after adding, where that's free), so the same *most of it* percentage applies to them as to your library albums. The fixed streaming count below is only a fallback for a release whose length couldn't be measured at all.
+- The percentage **rounds down**, so a skipped track — or one that isn't available in your country — never leaves a release stuck. At the default 90%, a nine-track album needs eight of its tracks and a five-track one needs four. A two-track release always needs both, since needing only one would mark it the instant it started.
+- **How long a release is comes from counting it, never from what it's called.** *Album*, *EP* and *Single* are labels from MusicBrainz or the streaming service, and they're often not literal — a release labelled *Single* can hold three tracks, and one labelled *EP* can hold a single track. Those labels are shown on the row, but they never decide when something has been heard. Only the real, playable track listing does, so a release still moves to *Played* whatever it's called and whichever of its tracks are available in your country.
 - Anything that's a **single track** (a saved track, a Single, or a podcast episode) is marked Played once you've actually listened to ~90% of it. Skipping past it doesn't count, and pausing doesn't either — it goes on real playback, not elapsed time — so something you skimmed past won't quietly move to *Played* and then be tidied away.
 
 ### Material home shelf
@@ -113,6 +115,8 @@ On the Material Skin home screen you can show a horizontal **Listen Later** row 
 
 ### Sorting
 A single **Default sort order** applies to all three lists: Recently added, Artist, Album, Year, or Recently played.
+
+**A note on release years.** Albums from your own library and from Qobuz carry their year, as do any added through ListenBrainz New Releases or Pitchfork Reviews. Albums added straight from **Tidal, Deezer or Bandcamp** don't: those plugins hand over a release's track listing rather than its details, so there's no date to read. Adding the same release through one of the companion plugins gets you the year. It's worth having where it's available — the year is part of how a duplicate is recognised, so two copies of an album saved with and without one aren't spotted as the same record.
 
 ---
 
@@ -124,8 +128,8 @@ Open **Settings → Advanced → Listen Later** (also linked as **Plugin Setting
 |---|---|---|
 | **Default sort order** | Ordering for all three lists | Recently added |
 | **Automatically move albums to Played** | Master switch for auto-marking | On |
-| **Played threshold** | Percent of a *library* album's tracks that must play before it's Played | 60% |
-| **Streaming track count** | Distinct *streaming* tracks before a streaming album is Played (no reliable track total exists). Capped for an EP, which may have fewer tracks than this | 4 |
+| **Played threshold** | Percent of an album's tracks that must play before it's Played — used whenever the number of tracks is known (your library, and any streaming release that's been looked up). Rounds down, and never below two tracks for a multi-track release | 90% |
+| **Streaming track count** | Fallback for a streaming release whose length couldn't be measured: distinct tracks before it's Played | 4 |
 | **Auto-remove played albums after** | Days a Played album is kept before being removed (**0 = keep forever**). Re-playing it resets the clock | 7 |
 | **Add to Material context menus** | Adds the *Add to Listen Later* / *Add to Wish List* entries to Material's menus (takes effect after a restart) | On |
 

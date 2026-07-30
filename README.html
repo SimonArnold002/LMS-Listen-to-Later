@@ -116,7 +116,7 @@
   <h1>Listen Later — LMS Plugin</h1>
   <p class="tagline">A plugin for <strong>Lyrion Music Server (LMS)</strong> that lets you save an album, an individual track or a podcast episode — from your <strong>local library</strong>, any <strong>streaming service</strong> (Qobuz, Tidal, Bandcamp, Deezer) or your <strong>podcast subscriptions</strong> — into a curated list, browse it like a playlist, and have things move to a <strong>Played</strong> section once you've heard them. A separate <strong>Wish List</strong> sits alongside for things you mean to buy, and items move freely between the three lists.</p>
   <div class="badges">
-    <span class="badge accent">v0.1.87</span>
+    <span class="badge accent">v0.1.93</span>
     <span class="badge">LMS 9.0.0+</span>
     <span class="badge">Material Skin</span>
     <span class="badge">Library + Streaming</span>
@@ -182,9 +182,9 @@ sudo systemctl restart lyrionmusicserver</code></pre>
 <p><em>Add to Listen Later</em> and <em>Add to Wish List</em> appear in the <strong>"…"</strong> context menu of albums and tracks — local library and streaming alike. Adding something that's already saved (in any list) does nothing, so an accidental tap can't disturb your lists or bounce a Played item back.</p>
 <p>The menu wording is the same everywhere, because the row you're on already tells you what you're saving: an album row saves the album, a track row saves that track. The one exception is Material's <strong>Now Playing</strong> screen, where there's no surrounding list to make it obvious — there the menu says <strong>Add track to Listen Later</strong>, and <strong>Add album to Listen Later</strong> sits in <strong>"… → More"</strong> if you want the whole release instead.</p>
 <h3>Albums, tracks and podcasts</h3>
-<p>Each saved row is labelled with what it is, and carries a small glyph — <strong>♫</strong> for a multi-track release, <strong>♪</strong> for a single track, <strong>❝</strong> for a podcast episode:</p>
+<p>Each saved row is labelled with what it is on the line beneath the title, which carries a small glyph — <strong>♫</strong> for a multi-track release, <strong>♪</strong> for a single track, <strong>❝</strong> for a podcast episode — followed by the type and the source, e.g. <em>♫ Album · Qobuz</em>. The title line stays a plain <em>Artist – Album (Year)</em>:</p>
 <ul>
-<li><strong>Album</strong> / <strong>EP</strong> / <strong>Single</strong> — a whole release. Streaming releases are classified when you add them, so the label is right straight away rather than changing later.
+<li><strong>Album</strong> / <strong>EP</strong> / <strong>Single</strong> — a whole release. The wording is the one MusicBrainz or the streaming service gives it, so it's shown as they have it. It isn't always literal — a release called an <em>EP</em> can hold a single track — so the <strong>glyph</strong> goes by the real track listing once the release has been counted, and only falls back to the label until then.
 </li>
 <li><strong>Track</strong> — one song, saved from a track row. It plays on tap rather than opening a tracklist.
 </li>
@@ -213,7 +213,11 @@ sudo systemctl restart lyrionmusicserver</code></pre>
 <h3>Automatic Played tracking</h3>
 <p>With <strong>Automatically move albums to Played</strong> on (the default), a <strong>Listen Later</strong> item moves to <strong>Played</strong> once you've heard most of it — whether you started playback from the list or anywhere else (Material, the app, a streaming page). Only <em>Listen Later</em> items are watched; <em>Wish List</em> items are left alone.</p>
 <ul>
-<li>A <strong>multi-track release</strong> is judged on how many of its tracks you've played — see the thresholds in Settings.
+<li>A <strong>multi-track release</strong> is judged on how many of its tracks you've played — see the thresholds in Settings. Streaming releases remember how many tracks they hold, measured from the release's real track listing the first time you play it (or in the background shortly after adding, where that's free), so the same <em>most of it</em> percentage applies to them as to your library albums. The fixed streaming count below is only a fallback for a release whose length couldn't be measured at all.
+</li>
+<li>The percentage <strong>rounds down</strong>, so a skipped track — or one that isn't available in your country — never leaves a release stuck. At the default 90%, a nine-track album needs eight of its tracks and a five-track one needs four. A two-track release always needs both, since needing only one would mark it the instant it started.
+</li>
+<li><strong>How long a release is comes from counting it, never from what it's called.</strong> <em>Album</em>, <em>EP</em> and <em>Single</em> are labels from MusicBrainz or the streaming service, and they're often not literal — a release labelled <em>Single</em> can hold three tracks, and one labelled <em>EP</em> can hold a single track. Those labels are shown on the row, but they never decide when something has been heard. Only the real, playable track listing does, so a release still moves to <em>Played</em> whatever it's called and whichever of its tracks are available in your country.
 </li>
 <li>Anything that's a <strong>single track</strong> (a saved track, a Single, or a podcast episode) is marked Played once you've actually listened to ~90% of it. Skipping past it doesn't count, and pausing doesn't either — it goes on real playback, not elapsed time — so something you skimmed past won't quietly move to <em>Played</em> and then be tidied away.
 </li></ul>
@@ -221,6 +225,7 @@ sudo systemctl restart lyrionmusicserver</code></pre>
 <p>On the Material Skin home screen you can show a horizontal <strong>Listen Later</strong> row of your saved albums, each playable/tappable. It uses Material's standard home-extra mechanism (no skin patching). If it isn't shown, enable it under Material's home-screen customisation.</p>
 <h3>Sorting</h3>
 <p>A single <strong>Default sort order</strong> applies to all three lists: Recently added, Artist, Album, Year, or Recently played.</p>
+<p><strong>A note on release years.</strong> Albums from your own library and from Qobuz carry their year, as do any added through ListenBrainz New Releases or Pitchfork Reviews. Albums added straight from <strong>Tidal, Deezer or Bandcamp</strong> don't: those plugins hand over a release's track listing rather than its details, so there's no date to read. Adding the same release through one of the companion plugins gets you the year. It's worth having where it's available — the year is part of how a duplicate is recognised, so two copies of an album saved with and without one aren't spotted as the same record.</p>
 </section>
 <section id="settings-reference">
 <h2>Settings reference</h2>
@@ -234,8 +239,8 @@ sudo systemctl restart lyrionmusicserver</code></pre>
 <tbody>
 <tr><td><strong>Default sort order</strong></td><td>Ordering for all three lists</td><td>Recently added</td></tr>
 <tr><td><strong>Automatically move albums to Played</strong></td><td>Master switch for auto-marking</td><td>On</td></tr>
-<tr><td><strong>Played threshold</strong></td><td>Percent of a <em>library</em> album's tracks that must play before it's Played</td><td>60%</td></tr>
-<tr><td><strong>Streaming track count</strong></td><td>Distinct <em>streaming</em> tracks before a streaming album is Played (no reliable track total exists). Capped for an EP, which may have fewer tracks than this</td><td>4</td></tr>
+<tr><td><strong>Played threshold</strong></td><td>Percent of an album's tracks that must play before it's Played — used whenever the number of tracks is known (your library, and any streaming release that's been looked up). Rounds down, and never below two tracks for a multi-track release</td><td>90%</td></tr>
+<tr><td><strong>Streaming track count</strong></td><td>Fallback for a streaming release whose length couldn't be measured: distinct tracks before it's Played</td><td>4</td></tr>
 <tr><td><strong>Auto-remove played albums after</strong></td><td>Days a Played album is kept before being removed (<strong>0 = keep forever</strong>). Re-playing it resets the clock</td><td>7</td></tr>
 <tr><td><strong>Add to Material context menus</strong></td><td>Adds the <em>Add to Listen Later</em> / <em>Add to Wish List</em> entries to Material's menus (takes effect after a restart)</td><td>On</td></tr>
 </tbody></table>
