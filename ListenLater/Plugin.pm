@@ -23,6 +23,7 @@ use Slim::Utils::Strings qw(cstring);
 use Slim::Utils::Timers;
 
 use Plugins::ListenLater::DB;
+use Plugins::ListenLater::Podcast;
 use Plugins::ListenLater::Sources;
 
 my $JSON = JSON::XS->new->utf8->canonical->pretty;
@@ -37,14 +38,29 @@ my $prefs = preferences('plugin.listenlater');
 
 $prefs->init({
     sort                 => 'added',   # added|artist|album|year|played
-    played_threshold     => 60,        # % of library album tracks → Played
+    played_threshold     => 90,        # % of a release's MEASURED tracks → Played
     streaming_min_tracks => 4,         # distinct streaming tracks → Played (no total available)
     watch_outside        => 1,         # mark Played from plays started outside the plugin
     material_action      => 1,         # add an "Add to Listen Later" entry to Material's context menus
     played_retention_days => 7,        # auto-remove Played albums after N days (0 = keep forever)
     debug_log            => 0,         # verbose diagnostics for the Material custom-action wiring
     material_debug_snapshot => '',     # latest debug dump (set by _dumpMaterialState; shown in Settings)
+    threshold_90_migrated => 0,        # one-off 60% -> 90% bump has run (see below)
 });
+
+# The Played threshold moved from 60% to 90% once a release's length stopped being GUESSED
+# from its type and started being MEASURED from its real tracklist (2026-07-30): 60% of a
+# number we half-trusted was a hedge, and there is nothing left to hedge against.
+#
+# init() above only fills a pref that is ABSENT, so every existing install would silently
+# keep 60 for ever and the change would look like it simply hadn't worked. Bump it once,
+# gated on its own flag so it can never fight a user who then picks their own value in
+# Settings. Deliberately unconditional on the current value rather than "only if it's still
+# 60" — this is a change of default for everyone, not a repair of one setting.
+if (!$prefs->get('threshold_90_migrated')) {
+    $prefs->set('played_threshold', 90);
+    $prefs->set('threshold_90_migrated', 1);
+}
 
 # Verbose diagnostics, gated on the `debug_log` pref so a user can turn them on from
 # Settings, reproduce (e.g. "Add missing on Tidal"), and paste the log — then turn it
@@ -339,7 +355,10 @@ sub _writeMaterialActions {
     my $albumCmd = [ 'listenlater', 'addctx',
         'name:$ALBUMNAME', 'artist:$ARTISTNAME', 'albumid:$ALBUMID', 'year:$YEAR',
         'favurl:$FAVURL', 'image:$IMAGE' ];
-    my $trackCmd = [ 'listenlater', 'addctx',
+    # Library/queue track rows: save the individual TRACK (kind:track). $TRACKNAME is the
+    # track title, $ALBUMNAME its parent album, $TRACKID/$FAVURL the play key. addctx stores
+    # the track (Now Playing carries no favurl → recovered from the playing song).
+    my $trackCmd = [ 'listenlater', 'addctx', 'kind:track',
         'name:$ALBUMNAME', 'artist:$ARTISTNAME', 'albumid:$ALBUMID', 'year:$YEAR',
         'trackname:$TRACKNAME', 'trackid:$TRACKID', 'favurl:$FAVURL', 'image:$IMAGE' ];
 
@@ -355,35 +374,75 @@ sub _writeMaterialActions {
     # anything on a Material build that wires up custom actions for online items.
     my $onlineCmd = [ 'listenlater', 'addctx',
         'name:$TITLE', 'artist:$ARTISTNAME', 'svc:$SERVICE', 'favurl:$FAVURL', 'image:$IMAGE' ];
+    # An online TRACK row's $TITLE is the track title and $FAVURL its track play url — so
+    # save the track (kind:track). No $ALBUMNAME on online rows, so the parent album is left
+    # blank (the subtitle just omits it).
+    my $onlineTrackCmd = [ 'listenlater', 'addctx', 'kind:track',
+        'trackname:$TITLE', 'artist:$ARTISTNAME', 'svc:$SERVICE', 'favurl:$FAVURL', 'image:$IMAGE' ];
 
-    # Track-context categories that put a TOP-LEVEL "Add" on a track's "…" menu (each
-    # is a distinct Material surface, verified in the served bundle):
-    #   'track'       → the Now Playing screen's info panel
-    #                   (nowplaying-page.js: getCustomActions("track"))       — restored 0.1.62
-    #   'queue-track' → each item in the PLAY QUEUE list
-    #                   (getCustomActions("queue-track"))                     — added 0.1.63
-    #   'album-track' / 'playlist-track' → library album / playlist track lists
-    # (streaming rows use 'online-track'.) All map to $trackCmd (name:$ALBUMNAME), so they
-    # add the ALBUM the track belongs to, NOT the track — the trackname/trackid params are
-    # informational only (see _addCtxCommand). For a streaming track $FAVURL is the TRACK
-    # url (no album:<id>), so replay resolves the album by artist+title search
-    # (Sources::_searchService); a library track adds by $ALBUMID. Same end result as the
-    # "… → More" info-provider, just at the top of the menu. (0.1.34 had dropped 'track' as
-    # a design choice — Now Playing is track-oriented, we save albums — restored by request;
-    # 'queue-track' was simply never written, which is why the queue only showed Add in More.)
+    # A PODCAST episode row in the built-in Podcasts app. Verified in the served bundle:
+    # those rows have no stdItem and no metadata, so Material's is-track flag is false and
+    # the category it resolves is "<command>-album" = 'podcasts-album' — and it prefers a
+    # PRESENT per-command category over the generic online-*. So writing a POPULATED
+    # podcasts-album is what replaces the generic "Add album …" with "Add podcast …" there,
+    # and nowhere else. (The same per-app override we already use EMPTY for suppression;
+    # populated it can only ever add, never hide.)
+    # The row carries no favurl and no id — only $TITLE and $IMAGE — so the episode is
+    # resolved at add time against the user's subscribed feeds (Podcast.pm).
+    my $podcastCmd = [ 'listenlater', 'addctx', 'kind:podcast',
+        'name:$TITLE', 'artist:$ARTISTNAME', 'svc:$SERVICE', 'image:$IMAGE' ];
+
+    # Each context menu category maps to a list of { cmd, role } bases — one per "Add"
+    # pair (Add to Listen Later + Add to Wish List) written for it. The distinction is by
+    # SURFACE: an ALBUM "…" menu saves the album; a TRACK "…" menu (album-track /
+    # playlist-track / queue-track / online-track — each a distinct Material surface verified
+    # in the served bundle) saves the track. The Now Playing panel (`track`,
+    # nowplaying-page.js getCustomActions("track")) is ambiguous, and a Material top-level
+    # custom action CAN'T open a chooser sub-menu (verified: doCustomAction does exactly one
+    # of iframe/weblink/command/script/lmscommand, and getSectionActions renders a FLAT list)
+    # — so its default action is **Add the playing TRACK**, and the album option lives in the
+    # "… → More" menu (the TrackInfo provider, which CAN drill/list).
+    my $albumBase       = { cmd => $albumCmd,       role => 'plain' };
+    my $trackBase       = { cmd => $trackCmd,       role => 'plain' };
+    my $npBase          = { cmd => $trackCmd,       role => 'nowplaying' };
+    my $onlineAlbumBase = { cmd => $onlineCmd,      role => 'plain' };
+    my $onlineTrackBase = { cmd => $onlineTrackCmd, role => 'plain' };
+    my $podcastBase     = { cmd => $podcastCmd,     role => 'podcast' };
     my %cats = (
-        'album'          => $albumCmd,
-        'album-track'    => $trackCmd,
-        'playlist'       => $albumCmd,
-        'playlist-track' => $trackCmd,
-        'track'          => $trackCmd,
-        'queue-track'    => $trackCmd,
-        'online-album'   => $onlineCmd,
-        'online-track'   => $onlineCmd,
-        # NB: deliberately NO 'online-artist' — we save albums, not artists. An
+        'album'          => [ $albumBase ],
+        'album-track'    => [ $trackBase ],
+        'playlist'       => [ $albumBase ],
+        'playlist-track' => [ $trackBase ],
+        'track'          => [ $npBase ],      # Now Playing — default = Add track; album is in "… → More"
+        'queue-track'    => [ $trackBase ],
+        'online-album'   => [ $onlineAlbumBase ],
+        'online-track'   => [ $onlineTrackBase ],
+        # NB: deliberately NO 'online-artist' — we save albums/tracks, not artists. An
         # artist row's $TITLE is the artist name (no album, no favurl), so adding
-        # one would store a junk record (album_title = artist) that can never replay.
+        # one would store a junk record that can never replay.
     );
+
+    # The built-in Podcasts app, keyed on ITS browse command. '-album' is the category
+    # Material actually resolves for those rows (see $podcastCmd); '-track' is written with
+    # the same pair purely as insurance, in case a future Material starts classifying them
+    # as tracks — a populated category can only add an entry, never suppress one.
+    # Only written when the Podcast plugin holds subscriptions, because an episode can only
+    # be resolved against a subscribed feed; with none, the generic "Add album" stays and
+    # keeps rejecting exactly as it does today, rather than promising a podcast add we
+    # can't honour.
+    if (Plugins::ListenLater::Podcast::hasFeeds()) {
+        $cats{'podcasts-album'} = [ $podcastBase ];
+        $cats{'podcasts-track'} = [ $podcastBase ];
+    }
+
+    # NB: deliberately NO 'favorites-*' category. FAVOURITES is the other route people take
+    # to a podcast (favourite the feed, browse into it), and 0.1.85 gave it its own category
+    # purely to get type-neutral wording there. Now that EVERY row-level entry is neutral,
+    # favourites inherit exactly the right wording from the online-* fallback — and the
+    # last-resort podcast resolve in _addCtxCommand covers the behaviour — so the extra
+    # category would be pure duplication. (Anything a previous build wrote is emptied by the
+    # strip pass and then removed by the delete-empties pass below, which is what stops an
+    # empty leftover from SUPPRESSING the online-* fallback — the 0.1.52 rule.)
 
     # First strip OUR entries from EVERY existing category (clears legacy 0.1.7 hash
     # entries and any stale local ones); then add the current entry where we want it.
@@ -430,22 +489,40 @@ sub _writeMaterialActions {
         delete $data->{$cat} if ref $data->{$cat} eq 'ARRAY' && !@{ $data->{$cat} };
     }
 
-    # Two entries per category: "Add to Listen Later" (the base command, which
-    # defaults to the Listen Later list) and "Add to Wish List" (the same command
-    # plus list:wishlist). Both are stripped/rewritten on each run by _isOurAction.
+    # Per base command, two entries: "Add … to Listen Later" (the base command, which
+    # defaults to the Listen Later list) and "Add … to Wish List" (the same command plus
+    # list:wishlist). Titles are qualified by role (album/track) so a menu offering both —
+    # Now Playing — reads unambiguously; single-role menus still say which they save. All
+    # carry the 'listenlater' verb, so _isOurAction strips/rewrites them on each run.
+    my %roleTitle = (
+        # A browse ROW already tells you what it is — you're looking at an album, a track,
+        # a podcast episode — so naming the type in the menu is noise, and naming it per
+        # CONTAINER (which is all Material can do) gets it wrong on any mixed list. Every
+        # row-level entry therefore reads the same plain "Add to Listen Later".
+        plain      => { later => 'Add to Listen Later',       wishlist => 'Add to Wish List' },
+        # The exception: Material's Now Playing panel is outside any listing, so both "this
+        # track" and "the album it's from" are plausible and the entry MUST say which. Its
+        # top-level action adds the TRACK; the album option lives in "… → More" (the
+        # TrackInfo provider, which can drill) and is qualified there for the same reason.
+        nowplaying => { later => 'Add track to Listen Later', wishlist => 'Add track to Wish List' },
+        # NO wishlist entry for a podcast: the Wish List is for things you might BUY, and
+        # you don't buy podcast episodes. A role with no wishlist title writes one entry.
+        podcast    => { later => 'Add to Listen Later' },
+    );
     for my $cat (keys %cats) {
-        my $base = $cats{$cat};
-        push @{ $data->{$cat} ||= [] },
-            {
-                title      => 'Add to Listen Later',
+        for my $base (@{ $cats{$cat} }) {
+            my $t = $roleTitle{ $base->{role} };
+            push @{ $data->{$cat} ||= [] }, {
+                title      => $t->{later},
                 icon       => 'playlist_add',
-                lmscommand => $base,
-            },
-            {
-                title      => 'Add to Wish List',
-                icon       => 'shopping_cart',
-                lmscommand => [ @$base, 'list:wishlist' ],
+                lmscommand => $base->{cmd},
             };
+            push @{ $data->{$cat} }, {
+                title      => $t->{wishlist},
+                icon       => 'shopping_cart',
+                lmscommand => [ @{ $base->{cmd} }, 'list:wishlist' ],
+            } if $t->{wishlist};
+        }
     }
 
     # Suppress the generic streaming "Add" inside our OWN surfaces (the plugin list
@@ -653,13 +730,22 @@ sub _trackInfoHandler {
     $log->warn('LL: TrackInfo handler called: url=' . ($url // '?')
         . ' track=' . (ref($track) || '?')
         . ' remoteMeta=' . (ref($remoteMeta) || '-'));
-    my $rec = Plugins::ListenLater::Sources::captureFromTrack($client, $url, $track, $remoteMeta);
-    unless ($rec && $rec->{album_title}) {
+
+    # The track "… → More" menu offers "Add album …" (the album this track belongs to). The
+    # individual TRACK is added from the top-level custom action (album-track / online-track /
+    # queue-track, and the Now Playing `track` default) — so More carries the *album* option,
+    # which is otherwise unreachable from a track row. (On Material this is where the Now
+    # Playing "Add album" lives, since a top-level action can't drill.)
+    my $albumRec = Plugins::ListenLater::Sources::captureFromTrack($client, $url, $track, $remoteMeta);
+    unless ($albumRec && $albumRec->{album_title}) {
         $log->warn('LL: TrackInfo handler: no album captured, no menu item');
         return;
     }
-    $log->warn("LL: TrackInfo handler: captured $rec->{source} / $rec->{album_title}");
-    return _addItem($client, $rec);
+    $log->warn("LL: TrackInfo handler: captured album $albumRec->{source} / $albumRec->{album_title}");
+    return [
+        _addItemFor($client, $albumRec, 'later',    'PLUGIN_LL_ADD'),
+        _addItemFor($client, $albumRec, 'wishlist', 'PLUGIN_LL_ADD_WISHLIST'),
+    ];
 }
 
 sub _albumInfoHandler {
@@ -698,19 +784,21 @@ sub _addItemFor {
         || ($ref->{passthrough} && $ref->{passthrough}{album_id})
         || '';
 
+    my %params = (
+        source  => $rec->{source}      // 'library',
+        artist  => $rec->{artist}      // '',
+        album   => $rec->{album_title} // '',
+        year    => $rec->{year}        // '',
+        artwork => $rec->{artwork}     // '',
+        albumid => $albumid,
+        svc     => $ref->{_svc}        // '',
+        list    => $list,
+    );
+
     my $go = {
         player     => 0,
         cmd        => [ 'listenlater', 'add' ],
-        params     => {
-            source  => $rec->{source}      // 'library',
-            artist  => $rec->{artist}      // '',
-            album   => $rec->{album_title} // '',
-            year    => $rec->{year}        // '',
-            artwork => $rec->{artwork}     // '',
-            albumid => $albumid,
-            svc     => $ref->{_svc}        // '',
-            list    => $list,
-        },
+        params     => \%params,
         nextWindow => 'parent',
     };
 
@@ -775,25 +863,23 @@ sub _addCommand {
         ref         => $ref,
     };
 
+    # Classify a library release now (its track count is local + free).
+    if ($source eq 'library' && defined $albumid && length $albumid) {
+        $rec->{rel_type} = Plugins::ListenLater::Sources::relTypeFor(
+            count => Plugins::ListenLater::Sources::libraryTrackCount($albumid));
+    }
+
     # Don't save an album from a source we can't replay — reject instead of
     # storing a record that only fails later at play time (see _isReplayableSource).
     return _rejectAdd($request, $source, $rec->{album_title}) unless _isReplayableSource($source);
 
-    my ($id, $already, $existingSource) = eval { Plugins::ListenLater::DB::add($rec, $list) };
-    if ($@) {
-        $log->error("LL: add command failed: $@");
-    }
-    else {
-        $log->warn("LL: add command -> id=" . ($id // '?') . " already=" . ($already // 0)
-            . " list=$list ($rec->{source} / " . ($rec->{album_title} // '?') . ")");
-    }
-
-    if (my $client = $request->client) {
-        eval { $client->showBriefly({ line => [ cstring($client, 'PLUGIN_LL'), _addedMsg($client, $list, $already, $existingSource, $rec->{source}) ] }, { duration => 2 }); };
-    }
-
+    # Same classify-before-insert rule as the Material path: a streaming release whose type
+    # isn't yet known is classified first (async) so the list never shows a wrong "Album"
+    # that flips on refresh. Library / known-type inserts immediately.
     $request->addResult('count', 1);
-    $request->setStatusDone;
+    return _finishAlbumAdd($request, $rec, $list, $source, $albumid, $rec->{artist})
+        if $rec->{rel_type} || $source eq 'library';
+    return _classifyThenAdd($request, $rec, $list, $source, $albumid, $rec->{artist});
 }
 
 # Reject an add whose source we can't replay: no DB row, request completed cleanly.
@@ -808,6 +894,352 @@ sub _rejectAdd {
     $request->addResult('count', 0);
     $request->setStatusDone;
     return;
+}
+
+# Track-save: build a kind='track' record from resolved fields and store it. The play url
+# + source are worked out from the given url (a streaming scheme names its own source), a
+# library track id, or — for a Material Now Playing add that carries neither — the
+# currently-playing track (_nowPlayingTrackFallback). Rejects (silently, like the album
+# path) a source we can't replay or a track with no resolvable play url. Reached ONLY from
+# the Material custom action (addctx kind:track / a track-shaped favurl); the local
+# info-providers offer the ALBUM only, so on Classic there is no individual-track add.
+sub _saveTrackRecord {
+    my ($request, $list, %f) = @_;
+
+    my $source  = $f{source} || '';
+    my $url     = $f{url};
+    my $trackId = $f{trackid};
+    my ($track, $artist, $album, $year, $artwork)
+        = @f{qw(track artist album year artwork)};
+
+    my $scheme = ($url && $url =~ m|^(\w+)://|) ? lc $1 : '';
+    if ($scheme && $scheme ne 'file') {
+        $source = Plugins::ListenLater::Sources::sourceFromUrl($url);
+    }
+    elsif (defined $trackId && $trackId =~ /^\d+$/) {
+        # Library track by id — take the canonical url + metadata from the object.
+        my $t = eval { Slim::Schema->find('Track', $trackId) };
+        if ($t) {
+            $source  = 'library';
+            $url     = $t->url;
+            $track   = (eval { $t->title }) // $track;
+            $artist  = (eval { $t->artistName }) // $artist;
+            my $alb  = eval { $t->album };
+            $album   = (eval { $alb ? $alb->title : undef }) // $album;
+            $year  ||= (eval { $alb ? $alb->year  : undef });
+            $artwork = (eval { $alb && $alb->artwork ? 'music/' . $alb->artwork . '/cover' : undef }) // $artwork;
+        }
+    }
+    elsif ($scheme eq 'file') {
+        $source = 'library';
+    }
+
+    # Now Playing track add (Material's `track` category): no favurl, no track id — recover
+    # the play url straight from the currently-playing song on this client.
+    if ((!defined $url || !length $url) && $request->client) {
+        my ($npSrc, $npUrl, $npTrack, $npArtist, $npAlbum, $npYear, $npArt)
+            = _nowPlayingTrackFallback($request->client, $track, $artist);
+        if ($npSrc && $npUrl) {
+            $source  = $npSrc;
+            $url     = $npUrl;
+            $track   = $npTrack  if defined $npTrack  && length $npTrack;
+            $artist  = $npArtist if defined $npArtist && length $npArtist;
+            $album   = $npAlbum  if defined $npAlbum  && length $npAlbum;
+            $year  ||= $npYear;
+            $artwork = $npArt // $artwork;
+            $log->warn("LL: now-playing fallback recovered track url for '" . ($track // '?') . "'");
+        }
+    }
+
+    # Strip a trailing " (YYYY)" off the album (Material appends it) for a clean subtitle.
+    if (defined $album && $album =~ s/\s*\((\d{4})\)\s*$//) { $year ||= $1; }
+
+    return _rejectAdd($request, $source, $track)
+        unless _isReplayableSource($source)
+            && defined $url   && length $url
+            && defined $track && length $track;
+
+    my %tf = (
+        source => $source, url  => $url,  track   => $track,   artist  => $artist,
+        album  => $album,  year => $year, artwork => $artwork, trackId => $trackId,
+    );
+
+    # A STREAMING track whose release is a SINGLE is the same recording as that single, so
+    # store it AS the Single (album form): it then shows "Single" and shares the album
+    # dedupe key with "Add album" (no duplicate). Needs the album id (from the service's
+    # cached metadata) and a single verdict; every other case — multi-track release, no
+    # recoverable album id, Bandcamp/library — falls through to storing the individual track.
+    # Services that can't classify still can't DUPLICATE: the album-add path reconciles
+    # against an existing track (_finishAlbumAdd cross-kind), and _insertTrackRow reconciles
+    # a track against an existing single. See _saveTrackClassify.
+    # NB: do NOT gate on an album NAME here — a streaming BROWSE track row carries none
+    # ($ALBUMNAME is empty, and a browse add has no Now-Playing fallback), yet it's exactly a
+    # single we want to detect. Classification needs only the album ID (recovered inside
+    # _saveTrackClassify); the Single's title falls back to the track title (a single's
+    # release title is the track title). Requiring the name here skipped every browse-track
+    # single (the "Tidal singles add purely as tracks" bug).
+    if (_canClassifyTrack($source) && $request->client) {
+        return _saveTrackClassify($request, $list, \%tf);
+    }
+    return _insertTrackRow($request, $list, \%tf);
+}
+
+# Save a podcast EPISODE from a Podcasts-app browse row. That row carries no play url and
+# no durable id (only $TITLE and $IMAGE), so the episode is resolved against the user's
+# subscribed feeds first — see Podcast.pm for why that's the only identity available. The
+# resolved enclosure is stored as an ordinary kind='track' row, so replay, dedupe and the
+# played-through Played check all come from the existing track machinery unchanged.
+# Async — setStatusProcessing holds the request open — with a timeout so an unreachable
+# feed can't leave the add hanging.
+sub _savePodcastEpisode {
+    my ($request, $list, $p, $rejectSource) = @_;
+
+    # When called as the last-resort fallback the add wasn't a podcast action at all, so a
+    # rejection should name the source it really came in as, not 'podcast'.
+    $rejectSource = 'podcast' unless defined $rejectSource && length $rejectSource;
+
+    my $title = $p->{name};
+    unless (defined $title && length $title) {
+        $log->warn('LL: podcast add with no title — rejected');
+        return _rejectAdd($request, $rejectSource, undef);
+    }
+
+    # The Wish List is for things you might BUY — which a podcast episode never is. The
+    # podcast action therefore offers no Wish List entry at all; this only fires when the
+    # episode came in through a GENERIC container's "Add to Wish List" (Favourites etc.),
+    # where the menu can't know it's a podcast. Save it to Listen Later rather than drop it
+    # into a list where it makes no sense.
+    if ($list eq 'wishlist') {
+        $log->warn("LL: podcast episode sent to the Wish List — saving to Listen Later instead");
+        $list = 'later';
+    }
+
+    # Same gate every other add path runs: don't store what we can't replay. This path
+    # inserts via _insertTrackRow directly (it doesn't go through _saveTrackRecord), so the
+    # check has to be made here — and it's made BEFORE the async feed work, so a server
+    # without the podcast:// handler costs nothing.
+    return _rejectAdd($request, $rejectSource, $title) unless _isReplayableSource('podcast');
+
+    # A show/section row (not an episode) resolves to nothing and is rejected below. The
+    # per-command category can't be scoped to episodes only: Material's per-action filter
+    # keys on the favurl, and these rows have none.
+    $request->setStatusProcessing;
+
+    my $done = 0;
+    my $finish = sub {
+        my ($ep) = @_;
+        return if $done; $done = 1;
+
+        return _rejectAdd($request, $rejectSource, $title) unless $ep && $ep->{url};
+
+        # artist is left EMPTY and the show goes in album_title: the row then reads
+        # "♪ <episode>" with "Podcast · <show>" beneath it, rather than repeating the show
+        # on both lines. Dedupe still separates episodes (the key's track segment is the
+        # episode title, the album segment the show).
+        return _insertTrackRow($request, $list, {
+            source  => 'podcast',
+            url     => $ep->{url},
+            track   => ($ep->{title} // $title),
+            artist  => undef,
+            album   => $ep->{show},
+            year    => $ep->{year},
+            artwork => ($ep->{image} // $p->{image}),
+            trackId => undef,
+        });
+    };
+
+    my $timeout = sub {
+        $log->warn('LL: podcast episode resolve timed out — rejected');
+        $finish->(undef);
+    };
+    Slim::Utils::Timers::setTimer(undef, time() + 20, $timeout);
+
+    Plugins::ListenLater::Podcast::resolveEpisode($title, $p->{image}, sub {
+        my ($ep) = @_;
+        Slim::Utils::Timers::killTimers(undef, $timeout);
+        $finish->($ep);
+    });
+    return;
+}
+
+# Insert an individual-track row (kind='track'). Split out of _saveTrackRecord so the
+# single-detection path can fall back to it. TWO dedupe guards, both requiring a known
+# artist (a bare title match across artists would be too loose):
+#   (1) cross-KIND — this release is already saved as a Single album: same recording, so
+#       don't add a second row for it.
+#   (2) same-kind, album-AGNOSTIC — this track is already saved as a track. Needed because
+#       the track dedupe key carries the PARENT ALBUM, and the album name differs by add
+#       SURFACE: a queue/Now-Playing row sends $ALBUMNAME, a streaming BROWSE track row
+#       sends none (online-track has no name: param), so the same track saved from both
+#       yields 'artist|the album||t:x' vs 'artist|||t:x' — different keys, which DB::add's
+#       exact-key findAnyByKey can't reconcile. findTrackByArtistTitle matches on
+#       artist + title with the album segment wild, which catches it.
+sub _insertTrackRow {
+    my ($request, $list, $tf) = @_;
+    my ($source, $url, $track, $artist, $album, $year, $artwork, $trackId)
+        = @{$tf}{qw(source url track artist album year artwork trackId)};
+
+    if (defined $artist && length $artist && defined $track && length $track) {
+        my $sing = eval { Plugins::ListenLater::DB::findByArtistAlbum($source, $artist, $track) };
+        undef $sing unless $sing && ($sing->{rel_type} // '') eq 'single';
+        my $dup = $sing
+            || eval { Plugins::ListenLater::DB::findTrackByArtistTitle($source, $artist, $track) };
+        if ($dup) {
+            $log->warn("LL: track '" . ($track // '?') . "' already saved as a "
+                . ($sing ? 'single' : 'track') . " (id=" . ($dup->{id} // '?')
+                . ") — not adding a duplicate track row");
+            if (my $client = $request->client) {
+                eval { $client->showBriefly({ line => [ cstring($client, 'PLUGIN_LL'),
+                    _addedMsg($client, $list, 1, $dup->{source}, $source) ] }, { duration => 2 }); };
+            }
+            $request->addResult('count', 0);
+            $request->setStatusDone;
+            return;
+        }
+    }
+
+    my $rec = {
+        kind        => 'track',
+        source      => $source,
+        artist      => $artist,
+        album_title => $album,
+        track_title => $track,
+        year        => ($year && $year =~ /(\d{4})/) ? $1 : undef,
+        artwork     => $artwork,
+        ref_kind    => 'url',
+        ref         => { _svc => $source, url => $url,
+                         (defined $trackId && length $trackId ? (track_id => $trackId) : ()) },
+    };
+
+    my ($id, $already, $existingSource) = eval { Plugins::ListenLater::DB::add($rec, $list) };
+    if ($@) { $log->error("LL: track add failed: $@"); }
+    else {
+        $log->warn("LL: track add -> $source / " . ($track // '?')
+            . " (id=" . ($id // '?') . ", already=" . ($already // 0) . ", list=$list)");
+    }
+
+    if (my $client = $request->client) {
+        eval { $client->showBriefly({ line => [ cstring($client, 'PLUGIN_LL'),
+            _addedMsg($client, $list, $already, $existingSource, $source) ] }, { duration => 2 }); };
+    }
+
+    $request->addResult('count', $id ? 1 : 0);
+    $request->setStatusDone;
+    return;
+}
+
+# Services whose streaming track-adds we try to classify (single → store as the Single).
+# Qobuz gives an authoritative release_type; Tidal falls back to a resolved track count.
+# Deezer/Bandcamp can't cheaply yield an album id from a playing track, so they degrade to
+# storing the track (the cross-kind guards still prevent a duplicate).
+sub _canClassifyTrack {
+    my ($source) = @_;
+    return defined $source && $source =~ /^(?:qobuz|tidal|deezer)$/;
+}
+
+# Streaming track-add single-detection. Read the release's album id from the service's
+# cached metadata; if we can classify it as a SINGLE, store it as the Single (album form)
+# so it dedupes with "Add album" and shows "Single". Anything else (no id, multi-track
+# release, classify timeout) stores the individual track. Async — setStatusProcessing holds
+# the request open, with a safety timeout so the add always completes.
+sub _saveTrackClassify {
+    my ($request, $list, $tf) = @_;
+    my $client = $request->client;
+    my $source = $tf->{source};
+
+    my $albumId = eval { Plugins::ListenLater::Sources::trackAlbumId($client, $tf->{url}) };
+    $log->warn("LL: track-classify source=$source url=" . ($tf->{url} // '?')
+        . " albumId=" . (defined $albumId && length $albumId ? $albumId : '(none)'));
+    return _insertTrackRow($request, $list, $tf) unless defined $albumId && length $albumId;
+
+    # The record we'd store IF this is a single — same shape the album-add path builds, so
+    # the dedupe key matches an "Add album" of the same release. A browse-track add has no
+    # album name → fall back to the track title (a single's release title == the track).
+    my $albumRec = {
+        source      => $source,
+        artist      => $tf->{artist},
+        album_title => (defined $tf->{album} && length $tf->{album}) ? $tf->{album} : $tf->{track},
+        rel_type    => 'single',
+        year        => ($tf->{year} && $tf->{year} =~ /(\d{4})/) ? $1 : undef,
+        artwork     => $tf->{artwork},
+        ref_kind    => 'search',
+        ref         => { _svc => $source, album_id => $albumId, passthrough => { album_id => $albumId } },
+    };
+
+    $request->setStatusProcessing;
+
+    my $done = 0;
+    my $finish = sub {
+        my ($rt, $count, $prov, $year) = @_;
+        return if $done; $done = 1;
+        if (($rt // '') eq 'single') {
+            # A PROVISIONAL count (Qobuz's catalogue tracks_count) settles the type but is
+            # never stored as Played's total — see Sources::classifyRelType. _provisionalCount
+            # tells _finishAlbumAdd not to re-ask for one it has already declined.
+            $albumRec->{track_count}      = $count if $count && !$prov;
+            $albumRec->{_provisionalCount} = 1     if $count && $prov;
+            $albumRec->{year} = $year if $year && !$albumRec->{year};
+            return _finishAlbumAdd($request, $albumRec, $list, $source, $albumId, $tf->{artist});
+        }
+        return _insertTrackRow($request, $list, $tf);
+    };
+
+    my $timeout = sub {
+        $log->warn('LL: track relType classify timed out — storing as a track');
+        $finish->(undef);
+    };
+    Slim::Utils::Timers::setTimer(undef, time() + 6, $timeout);
+
+    Plugins::ListenLater::Sources::classifyRelType($client, $source, $albumId, $albumRec, sub {
+        my ($rt, $count, $prov, $year) = @_;
+        Slim::Utils::Timers::killTimers(undef, $timeout);
+        $finish->($rt, $count, $prov, $year);
+    });
+    return;
+}
+
+# Recover (source, url, title, artist, album, year, artwork) for a Now Playing TRACK add
+# from the client's currently-playing song — the Material `track` action supplies no
+# favurl/id. Unlike the album Now-Playing fallback there's no album-match guard: a track
+# add from Now Playing is unambiguously *this* playing track. Prefers a non-http url so the
+# scheme still names the service; fills streaming album/artist/cover from the handler meta.
+sub _nowPlayingTrackFallback {
+    my ($client, $wantTrack, $wantArtist) = @_;
+
+    my $song   = eval { $client->playingSong } or return ();
+    my $ptrack = eval { $song->track };
+    my $ctrack = eval { $song->currentTrack };
+    my $track  = $ptrack || $ctrack or return ();
+    my $purl   = eval { $ptrack->url };
+    my $curl   = eval { $ctrack->url };
+    my $url    = (defined $purl && $purl !~ m|^https?://|) ? $purl
+               : (defined $curl && $curl !~ m|^https?://|) ? $curl
+               : ($purl // $curl);
+    return () unless defined $url && length $url;
+
+    my $scheme = ($url =~ m|^(\w+)://|) ? lc $1 : '';
+    my $source = (!$scheme || $scheme =~ /^(?:file|db|tmp)$/) ? 'library' : $scheme;
+
+    my $title  = (eval { $track->title }      // $wantTrack);
+    my $artist = (eval { $track->artistName } // $wantArtist);
+    my ($album, $year, $art);
+
+    if ($source eq 'library') {
+        my $alb = eval { $track->album };
+        $album = eval { $alb ? $alb->title : undef };
+        $year  = eval { $alb ? $alb->year  : undef } || undef;
+        $art   = eval { $alb && $alb->artwork ? 'music/' . $alb->artwork . '/cover' : undef };
+    }
+    else {
+        $album = eval { $track->albumname };
+        my $meta = Plugins::ListenLater::Sources::playingMeta($client, $url);
+        $title  = $meta->{title}  if (!defined $title  || !length $title)  && defined $meta->{title}  && length $meta->{title};
+        $artist = $meta->{artist} if (!defined $artist || !length $artist) && defined $meta->{artist} && length $meta->{artist};
+        $album  = $meta->{album}  if (!defined $album  || !length $album)  && defined $meta->{album}  && length $meta->{album};
+        $art    = _coverFromMeta($meta);
+    }
+
+    return ($source, $url, $title, $artist, $album, $year, $art);
 }
 
 # The "…" → More context menu for an album row: Remove + Move. Each entry is a
@@ -975,6 +1407,112 @@ sub _buyCommand {
     });
 }
 
+# ---------------------------------------------------------------------------
+# The PRIVATE favurl params — the handshake a sibling plugin uses to hand over what
+# Material's own $VARS can't carry (cover art, Bandcamp page url, artist, year, clean
+# album title, release type, track count). Each is stripped from the favurl IN PLACE,
+# whatever its value, so nothing is ever left behind for the downstream source /
+# 'album:<id>' logic, and only THEN validated. Native streaming-plugin favurls carry no
+# query string, so none of these fire for an ordinary streaming Add and such a favurl
+# comes back byte-for-byte unchanged. All of it runs BEFORE the addctx log in the caller,
+# so the logged favurl always reads as the clean id.
+#
+# This lives in its own sub, apart from _addCtxCommand, so the extraction is directly
+# testable: 0.1.89's '&tc=' bug (see the tc block below) survived a 24-check suite that
+# pulled these regexes out of this file by grep and applied them standalone — it never ran
+# the validation that sits beside them. tools/t_favurl.pl drives THIS sub instead. Param
+# order is significant and is preserved. Returns a hashref of what was found;
+# $p->{favurl} is modified in place.
+# ---------------------------------------------------------------------------
+sub _stripPrivateParams {
+    my ($p) = @_;
+    my %out;
+
+    # A favurl from the sibling ListenBrainz Fresh Releases plugin carries the album
+    # cover as a "?cover=<url-encoded>" param: its matched rows show the streaming
+    # SERVICE LOGO as the thumbnail, so $IMAGE is the logo, not the art. Pull the
+    # cover out and prefer it over $IMAGE, then strip the param so the source /
+    # album:<id> logic downstream sees a clean "<scheme>://album:<id>". Strip the param
+    # with its OWN leading delimiter ([?&]): removing "&cover=…" (cover as a later param)
+    # or "?cover=…" (cover as the lone param — what LBF actually appends) both leave a
+    # well-formed favurl. [^&]* (not +) tolerates an empty value. We don't consume a
+    # trailing "&", so nothing is glued together.
+    # Bandcamp matches pack the cover art AND the album page url into a single escaped
+    # '?b=' param ('<art>|<url>'): get_album needs the page url for an exact replay.
+    # Unpack it — art = cover, url = exact replay key (and the Buy link). The full ~164-
+    # char favurl is confirmed to survive Material intact (an earlier "long favurls are
+    # dropped" theory was a shadowed-install artifact, not real); the album_id resolve in
+    # Sources is just a safety net if the url half is ever absent. Other services use the
+    # plain '?cover=' (art only).
+    if ($p->{favurl} && $p->{favurl} =~ s{[?&]b=([^&?]*)}{}) {
+        require URI::Escape;
+        my ($a, $u) = split /\|/, URI::Escape::uri_unescape($1), 2;
+        $out{cover}        = $a if defined $a && length $a;
+        $out{bandcamp_url} = $u if defined $u && length $u;
+    }
+    elsif ($p->{favurl} && $p->{favurl} =~ s{[?&]cover=([^&]*)}{}) {
+        require URI::Escape;
+        $out{cover} = URI::Escape::uri_unescape($1);
+    }
+
+    # LBF also packs the release artist (and optionally year) into the favurl as
+    # private '&a='/'&y=' params, because Material sends its matched rows NO
+    # $ARTISTNAME — so without this the record is artist-less and never auto-moves to
+    # Played (Played matching keys on source+artist+album).
+    if ($p->{favurl} && $p->{favurl} =~ s{[?&]a=([^&]*)}{}) {
+        require URI::Escape;
+        $out{artist} = URI::Escape::uri_unescape($1);
+    }
+    if ($p->{favurl} && $p->{favurl} =~ s{[?&]y=([^&]*)}{}) {
+        $out{year} = $1;
+    }
+
+    # Some sibling plugins label their browse rows "Artist - Album" (e.g. Pitchfork
+    # Reviews' review rows), and Material forces $ALBUMNAME/$TITLE to that whole label for
+    # online items — so the album name arrives with the artist prefixed. Those plugins pack
+    # the CLEAN album title into the favurl as '&al=' (the symmetric partner of the '&a='
+    # artist above); the caller prefers it over $TITLE so the stored album is clean ("Extra
+    # Mile", not "Will Sheff - Extra Mile"). The list display AND Played auto-detection both
+    # key on the album name, so a polluted title shows doubled and never auto-moves to
+    # Played. ([?&]a= above can't match '&al=' — it needs '=' right after 'a'.)
+    if ($p->{favurl} && $p->{favurl} =~ s{[?&]al=([^&]*)}{}) {
+        require URI::Escape;
+        $out{album} = URI::Escape::uri_unescape($1);
+    }
+
+    # A sibling plugin that resolves MusicBrainz release-groups (ListenBrainz Fresh
+    # Releases) can pack the TRUE release type into the favurl as '&rt=' (album|ep|single) —
+    # the only authoritative type signal we get, since the streaming plugins' track coderefs
+    # expose none. Used by the caller for rel_type.
+    if ($p->{favurl} && $p->{favurl} =~ s{[?&]rt=([^&]*)}{}) {
+        $out{rel_type} = $1;
+    }
+
+    # …and, alongside it, that release's TRACK COUNT as '&tc=' (LBF 0.9.142+). The sibling
+    # already holds it: it reads the count off the streaming service's own album hash while
+    # matching (its _candReleaseType), so sending it costs nothing and saves us the album
+    # fetch _verifyRelease would otherwise make after the insert. It matters most as the
+    # check on '&rt=' — MusicBrainz calls a release with B-sides a Single, which is not what
+    # 'single' means here (see Sources::singleIsWrong) — and having it at INSERT time means
+    # the row is right immediately, with no service call at all.
+    #
+    # Validated as 1-3 digits, non-zero. A bogus or huge value would set an unreachable
+    # Played threshold (60% of a nonsense total) and no real release runs to 1000 tracks, so
+    # anything else is dropped and we fall back to resolving, exactly as an add from a
+    # pre-0.9.142 sibling does.
+    if ($p->{favurl} && $p->{favurl} =~ s{[?&]tc=([^&]*)}{}) {
+        # Copy the capture out BEFORE validating it. The validation match has no capture
+        # group of its own, and in Perl a SUCCESSFUL match still resets $1 to undef — so the
+        # original '$1 =~ /^\d{1,3}$/ && $1 > 0' discarded EVERY count (the second $1 was
+        # always undef) and left a "Use of uninitialized value $1 in numeric gt" warning in
+        # the log on every LBF add. That was 0.1.89's bug: the whole handshake was inert.
+        my $tc = $1;
+        $out{tracks} = $tc + 0 if defined $tc && $tc =~ /^\d{1,3}$/ && $tc > 0;
+    }
+
+    return \%out;
+}
+
 # Add triggered by a Material custom action. The variables Material substitutes
 # for online (Qobuz/Bandcamp) items are uncertain, so log everything we receive,
 # then add best-effort: if the album id resolves to a matching local library
@@ -991,58 +1529,51 @@ sub _addCtxCommand {
         ($_ => $v)
     } qw(name artist albumid trackname trackid year favurl image svc);
 
-    # A favurl from the sibling ListenBrainz Fresh Releases plugin carries the album
-    # cover as a "?cover=<url-encoded>" param: its matched rows show the streaming
-    # SERVICE LOGO as the thumbnail, so $IMAGE is the logo, not the art. Pull the
-    # cover out and prefer it over $IMAGE, then strip the param so the source /
-    # album:<id> logic below sees a clean "<scheme>://album:<id>". Only fires when
-    # the param is present, so native streaming-plugin favurls are byte-unchanged.
-    # Strip the param with its OWN leading delimiter ([?&]): removing "&cover=…"
-    # (cover as a later param) or "?cover=…" (cover as the lone param — what LBF
-    # actually appends) both leave a well-formed favurl. [^&]* (not +) tolerates an
-    # empty value. We don't consume a trailing "&", so nothing is glued together.
-    # Bandcamp matches pack the cover art AND the album page url into a single escaped
-    # '?b=' param ('<art>|<url>'): get_album needs the page url for an exact replay.
-    # Unpack it — art = cover, url = exact replay key (and the Buy link). The full ~164-
-    # char favurl is confirmed to survive Material intact (an earlier "long favurls are
-    # dropped" theory was a shadowed-install artifact, not real); the album_id resolve in
-    # Sources is just a safety net if the url half is ever absent. Other services use the
-    # plain '?cover=' (art only). NOTE: this strip runs BEFORE the addctx log below, so
-    # the logged favurl always reads as a bare 'bandcamp://album:<id>'.
-    my $favCover;
-    my $favBandcampUrl;
-    if ($p{favurl} && $p{favurl} =~ s{[?&]b=([^&?]*)}{}) {
-        require URI::Escape;
-        my ($a, $u) = split /\|/, URI::Escape::uri_unescape($1), 2;
-        $favCover       = $a if defined $a && length $a;
-        $favBandcampUrl = $u if defined $u && length $u;
-    }
-    elsif ($p{favurl} && $p{favurl} =~ s{[?&]cover=([^&]*)}{}) {
-        require URI::Escape;
-        $favCover = URI::Escape::uri_unescape($1);
-    }
-
-    # LBF also packs the release artist (and optionally year) into the favurl as
-    # private '&a='/'&y=' params, because Material sends its matched rows NO
-    # $ARTISTNAME — so without this the record is artist-less and never auto-moves to
-    # Played (Played matching keys on source+artist+album). Read them as a fallback and
-    # strip so the album:<id> logic below sees a clean "<scheme>://album:<id>". Native
-    # streaming-plugin favurls carry no query string, so these never fire for a normal
-    # streaming Add. Runs before the addctx log so the logged favurl is the clean id.
-    my $favArtist;
-    my $favYear;
-    if ($p{favurl} && $p{favurl} =~ s{[?&]a=([^&]*)}{}) {
-        require URI::Escape;
-        $favArtist = URI::Escape::uri_unescape($1);
-    }
-    if ($p{favurl} && $p{favurl} =~ s{[?&]y=([^&]*)}{}) {
-        $favYear = $1;
-    }
+    # The private sibling-plugin handshake params, pulled out of the favurl (and stripped
+    # from it) in one place — see _stripPrivateParams.
+    my $priv = _stripPrivateParams(\%p);
+    my ($favCover, $favBandcampUrl, $favArtist, $favYear, $favAlbum, $favRelType, $favTracks)
+        = @{$priv}{qw(cover bandcamp_url artist year album rel_type tracks)};
 
     my $list = _wantedList($request->getParam('list'));
 
     $log->warn('LL: addctx params -> '
         . join(', ', map { "$_=" . (defined $p{$_} ? $p{$_} : '(undef)') } qw(name artist albumid year trackname trackid favurl image svc)));
+
+    # Track save. Two signals decide album-vs-track:
+    #  (1) an explicit kind:track category — library album-track / playlist-track /
+    #      queue-track / online-track / the Now Playing `track`; and
+    #  (2) a track-shaped favurl — because Material collapses a STREAMING album's track rows
+    #      onto 'online-album' (verified live: a Qobuz album-drill track fires online-album
+    #      with name=$TITLE, no kind), so the category alone misses them; the play url
+    #      (…​.flac, /track/…) is the reliable tiebreaker (Sources::favurlIsTrack).
+    # $TRACKNAME carries the track title on real track-context rows; an online row redirected
+    # here by its favurl has only $TITLE (mapped to `name`), which IS the track title.
+    # Podcast episode (the podcasts-* custom action carries kind:podcast). Checked BEFORE
+    # the track branch: the row has no favurl at all, so neither the kind:track test nor
+    # favurlIsTrack would catch it, and it would fall through to the album path.
+    if (($request->getParam('kind') || '') eq 'podcast') {
+        return _savePodcastEpisode($request, $list, \%p);
+    }
+
+    my $explicitTrack = ($request->getParam('kind') || '') eq 'track';
+    if ($explicitTrack || Plugins::ListenLater::Sources::favurlIsTrack($p{favurl})) {
+        my $trackTitle = $p{trackname} // $p{name};
+        # Only a real track-context command ($TRACKNAME present) means $ALBUMNAME is the
+        # parent album; for a favurl-redirected online row `name` is the TRACK title, so the
+        # parent album is unknown → leave it to the '&al=' handshake (usually undef).
+        my $album = defined $p{trackname} ? ($favAlbum // $p{name}) : $favAlbum;
+        return _saveTrackRecord($request, $list,
+            source  => (($p{svc} && $p{svc} =~ /^[a-z0-9]+$/i) ? lc $p{svc} : ''),
+            artist  => ($p{artist} // $favArtist),
+            album   => $album,
+            track   => $trackTitle,
+            year    => ($p{year} || $favYear),
+            artwork => ($favCover // $p{image}),
+            url     => $p{favurl},
+            trackid => $p{trackid},
+        );
+    }
 
     my $artist  = $p{artist};
     # Fall back to the artist packed in the favurl (LBF rows arrive with an empty
@@ -1050,7 +1581,8 @@ sub _addCtxCommand {
     $artist = $favArtist if (!defined $artist || !length $artist) && defined $favArtist && length $favArtist;
     my $artwork = $favCover // $p{image};
     my $year    = $p{year} || $favYear;
-    my $album   = $p{name};
+    # Prefer the clean album packed in the favurl (&al=) over the "Artist - Album" row label.
+    my $album   = (defined $favAlbum && length $favAlbum) ? $favAlbum : $p{name};
     # Material appends " (YYYY)" to album display titles — strip it for a clean
     # album name (and use it as the year if none was passed).
     if (defined $album && $album =~ s/\s*\((\d{4})\)\s*$//) {
@@ -1108,6 +1640,21 @@ sub _addCtxCommand {
         # stash it for an exact get_album replay; otherwise buildPlayableItems resolves
         # it once by album_id instead.
         $ref->{album_url} = $favBandcampUrl if defined $favBandcampUrl && length $favBandcampUrl;
+        # Keep the label the SERVICE printed on the row, when '&al=' replaced it (0.1.92).
+        # A sibling's '&al=' hands us the MusicBrainz release name, which is the better
+        # title for DISPLAY and for the dedupe key — but MB deliberately holds the
+        # distinguisher OUTSIDE the title (all four American Football LPs are titled
+        # "American Football"; "LP2"/"LP3" live in MB's `disambiguation`), whereas the
+        # service prints "American Football (LP2)". Played's streaming path matches on the
+        # album TITLE only (no id anchor — see Played::_matchRecord), so storing MB's bare
+        # name alone would stop the playing track ever matching this row. Keep both: the
+        # clean name is what we show and key on, this is what the service will call it
+        # when it plays. Only when they actually differ — an identical label is noise.
+        # NB `$album` is already stripped of a trailing "(YYYY)"/format qualifier by here;
+        # `$p{name}` is the raw label, which is exactly what the player will report.
+        $ref->{svc_title} = $p{name}
+            if defined $p{name} && length $p{name}
+            && defined $album && $p{name} ne $album;
     }
     else {
         # Streaming album rows carry no favorites_url; the browsing service id is passed
@@ -1154,45 +1701,394 @@ sub _addCtxCommand {
         }
     }
 
+    # Last resort before rejecting: this may be a PODCAST EPISODE reached through some
+    # container OTHER than the Podcasts app. Material picks the custom action by the
+    # CONTAINER's browse command, so an episode under a favourited feed arrives as
+    # svc='favorites' (a home-shelf card or a search hit likewise) and never reaches the
+    # kind:podcast action — it lands here with no favurl, no id, just $TITLE and $IMAGE.
+    # Resolving it here catches every such container at once instead of chasing them one
+    # category at a time. It costs nothing on a working add: it only runs on one that was
+    # already going to be rejected, and the feeds are cached.
+    if (!_isReplayableSource($source)
+            && !(defined $p{favurl}  && length $p{favurl})
+            && !(defined $p{albumid} && length $p{albumid})
+            && Plugins::ListenLater::Podcast::hasFeeds()) {
+        return _savePodcastEpisode($request, $list, \%p, $source);
+    }
+
     # Reject a source we can't replay (Deezer/Spotify/radio/…): don't store a record that
     # would only fail at play time — reject it (silently) instead. This is the one reliable
     # gate, so we no longer bother hiding the Material "Add" button per service.
     return _rejectAdd($request, $source, $album) unless _isReplayableSource($source);
 
+    # Release type. Library releases classify instantly (local track count); a '&rt='
+    # handshake is authoritative. A streaming release with NEITHER must be classified BEFORE
+    # the row is inserted — otherwise the list shows a wrong "Album" that flips to EP/Single
+    # on the next refresh (unacceptable). See _finishAlbumAdd / _classifyThenAdd.
+    # The count comes from the library (free, local) or from the sibling's '&tc=' handshake;
+    # either way relTypeFor gets to check a claimed 'single' against it here and now, with no
+    # service round trip. A streaming add with neither still resolves later.
+    #
+    # That check is the ONE thing only an add-time count can do, and it's worth having: if a
+    # claimed 'single' is still standing when the row is inserted, _finishAlbumAdd's cross-kind
+    # dedupe can match it against an already-saved TRACK of the same name and drop the add
+    # entirely — and no background correction repairs a row that was never inserted.
+    my $relCount = ($source eq 'library' && defined $p{albumid} && $p{albumid} =~ /^\d+$/)
+        ? Plugins::ListenLater::Sources::libraryTrackCount($p{albumid})
+        : $favTracks;
+
+    my $relType = Plugins::ListenLater::Sources::relTypeFor(
+        service => $favRelType,
+        (defined $relCount ? (count => $relCount) : ()),
+    );
+
+    # A LIBRARY album's year, read straight from the local database. Material's custom action
+    # has no $YEAR variable at all (its map is $ALBUMNAME/$ARTISTNAME/$TITLE/$FAVURL/$IMAGE/
+    # $ALBUMID), so a library album added from a Material menu arrived with no year even
+    # though $ALBUMID is passed and LMS knows the answer — the info-provider path
+    # (_addItemFor) has always sent one, so the same album keyed differently depending on
+    # which menu you used, and the two rows could not dedupe. Free and local, exactly like
+    # the track count above; never overrides a year that did arrive.
+    if (!$year && $source eq 'library' && defined $p{albumid} && $p{albumid} =~ /^\d+$/) {
+        $year = Plugins::ListenLater::Sources::libraryAlbumYear($p{albumid}) || undef;
+    }
+
+    # track_count is Played's total, and ONLY a count resolved from a real TRACKLIST may fill
+    # it — the same rule the Qobuz catalogue count is held to (Sources::classifyRelType).
+    #
+    # So '&tc=' does NOT go in here, even though it's a perfectly good number for the type
+    # check above. The sibling reads it off a streaming service's own album hash, which makes
+    # it a CATALOGUE count: it describes the release, not what this account can play in this
+    # region, and it can only ever be >= the playable count. Storing it would set Played's bar
+    # at 60% of a total some users can never reach — the exact bug the Qobuz path had. It
+    # arrives as a bare integer with no provenance, so LL cannot tell a resolved count from a
+    # catalogue one and must assume the unsafe case.
+    #
+    # Consequence, deliberate: leaving this NULL means _finishAlbumAdd still runs the
+    # background _verifyRelease, so '&tc=' no longer saves that call. On Tidal/Deezer that's a
+    # gain — the verify resolves a real tracklist and stores a true total. On Qobuz it fetches
+    # the album object, gets a provisional count it won't store, and the total waits for the
+    # first play from the list. That's the same call an add without '&tc=' has always made, so
+    # nothing is worse than before; the handshake just stops being a saving. A provisional
+    # number should not suppress the hunt for a real one.
+    #
+    # A library release is counted live from the library at play time (Played::_totalTracks),
+    # which can't go stale, so it stores nothing here either.
     my $rec = {
         source      => $source,
         artist      => $artist,
         album_title => $album,
+        rel_type    => $relType,
+        track_count => undef,
         year        => ($year && $year =~ /(\d{4})/) ? $1 : undef,
         artwork     => $artwork,
         ref_kind    => ($source eq 'library' ? 'album_id' : 'search'),
         ref         => $ref,
     };
 
-    my ($id, $already, $existingSource) = eval { Plugins::ListenLater::DB::add($rec, $list) };
-    if ($@) {
-        $log->error("LL: addctx add failed: $@");
-    }
-    else {
-        $log->warn("LL: addctx -> $source / " . ($album // '?') . " (id=" . ($id // '?') . ", already=" . ($already // 0) . ", list=$list)");
+    my $albumId = $ref->{album_id} || ($ref->{passthrough} && $ref->{passthrough}{album_id});
+
+    # Known type (library, or the &rt= handshake) → insert NOW: the add must never wait on
+    # a service. What we don't have for a streaming release is its track count, and Played
+    # needs that — but it is not needed at add time, so _finishAlbumAdd chases it in the
+    # background once the row is in (_verifyRelease), which is also where a claimed 'single'
+    # is confirmed. Only an UNKNOWN streaming type still blocks: there the label itself is
+    # missing, and a row that appears as "Album" and flips to EP/Single on refresh is worse
+    # than a moment's wait.
+    return _finishAlbumAdd($request, $rec, $list, $source, $albumId, $artist)
+        if $relType || $source eq 'library';
+    return _classifyThenAdd($request, $rec, $list, $source, $albumId, $artist);
+}
+
+# Insert an album record, backfill a missing streaming artist, and confirm. The common tail
+# of both the immediate and the classify-first add paths.
+sub _finishAlbumAdd {
+    my ($request, $rec, $list, $source, $albumId, $artist) = @_;
+
+    # A single already saved as an individual TRACK — or as another SINGLE row whose only
+    # difference is the year segment — is the SAME recording, so don't add a second row.
+    # Only when we KNOW it's a single and the artist is known (a bare title match across
+    # artists would be too loose). The year case is real because the year reaching us
+    # depends on the add SURFACE: a Now Playing add recovers it from Material's
+    # "Album (YYYY)" label, a Qobuz/Tidal browse row sends none, so the same single lands
+    # as 'artist|title|2026' one way and 'artist|title|' the other — different dedupe keys.
+    # findByArtistAlbum is year-agnostic, and the rel_type='single' gate on BOTH rows keeps
+    # 0.1.43 intact (two same-titled ALBUMS from different years still coexist).
+    if (($rec->{rel_type} // '') eq 'single'
+            && defined $artist && length $artist
+            && defined $rec->{album_title} && length $rec->{album_title}) {
+        my $dup = eval { Plugins::ListenLater::DB::findTrackByArtistTitle($source, $artist, $rec->{album_title}) };
+        my $asTrack = $dup ? 1 : 0;
+        if (!$dup) {
+            my $other = eval { Plugins::ListenLater::DB::findByArtistAlbum($source, $artist, $rec->{album_title}) };
+            $dup = $other if $other && ($other->{rel_type} // '') eq 'single';
+        }
+        if ($dup) {
+            $log->warn("LL: single '" . ($rec->{album_title} // '?') . "' already saved as a "
+                . ($asTrack ? 'track' : 'single') . " (id="
+                . ($dup->{id} // '?') . ") — not adding a duplicate album row");
+            if (my $client = $request->client) {
+                eval { $client->showBriefly({ line => [ cstring($client, 'PLUGIN_LL'),
+                    _addedMsg($client, $list, 1, $dup->{source}, $source) ] }, { duration => 2 }); };
+            }
+            $request->setStatusDone;
+            return;
+        }
     }
 
-    # Tidal browse rows send no $ARTISTNAME (Material doesn't map their subtitle) and the
-    # Tidal cover URL has no artist/id — but the favurl gives us the album id, so fetch the
-    # artist from the album's tracks in the background and backfill the record. Without an
-    # artist the row shows album-only and never auto-moves to Played (Played keys on
-    # source+artist+album). Fire-and-forget; only for a fresh add that has no artist yet.
+    my ($id, $already, $existingSource) = eval { Plugins::ListenLater::DB::add($rec, $list) };
+    if ($@) {
+        $log->error("LL: album add failed: $@");
+    }
+    else {
+        $log->warn("LL: add -> $source / " . ($rec->{album_title} // '?') . " (id=" . ($id // '?')
+            . ", already=" . ($already // 0) . ", list=$list, rel=" . ($rec->{rel_type} // '-') . ")");
+    }
+
+    # Chase the release's real track count once the row is safely in — Played thresholds on
+    # it, and a claimed 'single' is only disprovable against it. Deliberately AFTER the
+    # insert and fire-and-forget: the add is a button press and must not wait on a service.
+    # Skipped when the count is already known — either the classify-first path resolved it or
+    # the sibling handed it over as '&tc=', which is the point of that handshake: no call at
+    # all — and for library rows (Played counts those live from the library). Also skipped when
+    # a classify already got a PROVISIONAL count for this row (_provisionalCount): that is
+    # Qobuz's catalogue count, deliberately not stored as the total (Sources::classifyRelType),
+    # and re-fetching the same album object would return the same number and store it no more —
+    # a wasted call, and one whose "no count stored" outcome would read like a failure.
+    if ($id && !$already && $source ne 'library'
+            && !$rec->{track_count} && !$rec->{_provisionalCount}) {
+        _verifyRelease($request->client, $id, $rec, $source, $albumId);
+    }
+
+    # Tidal/Deezer browse rows send no $ARTISTNAME (Material doesn't map their subtitle) and
+    # their cover URL has no artist/id — but the favurl gives the album id, so fetch the
+    # artist from the album's tracks in the background. Without it the row never auto-moves to
+    # Played (keys on source+artist+album). Fire-and-forget; only for a fresh artist-less add.
     if ($id && !$already && ($source eq 'tidal' || $source eq 'deezer')
-            && (!defined $artist || !length $artist)
-            && $ref->{album_id}) {
-        _backfillStreamingArtist($request->client, $id, $ref->{album_id}, $source);
+            && (!defined $artist || !length $artist) && $albumId) {
+        _backfillStreamingArtist($request->client, $id, $albumId, $source);
     }
 
     if (my $client = $request->client) {
-        eval { $client->showBriefly({ line => [ cstring($client, 'PLUGIN_LL'), _addedMsg($client, $list, $already, $existingSource, $source) ] }, { duration => 2 }); };
+        eval { $client->showBriefly({ line => [ cstring($client, 'PLUGIN_LL'),
+            _addedMsg($client, $list, $already, $existingSource, $source) ] }, { duration => 2 }); };
     }
 
     $request->setStatusDone;
+    return;
+}
+
+# Classify a streaming release whose type NOTHING told us, before inserting, so the list
+# never shows a wrong "Album" that flips on refresh. Qobuz gives a release_type; other
+# services fall back to the resolved track count (Sources::classifyRelType) — and a REAL
+# count is kept too, so this path needs no background _verifyRelease afterwards. Qobuz's
+# catalogue count is provisional and is not kept (it settles the type only), but the row is
+# marked so _finishAlbumAdd doesn't go and ask the same question again.
+# This is the one add that waits: a release whose type is known inserts immediately.
+# Async — setStatusProcessing holds the request open — with a safety timeout so the add
+# always completes (worst case the type is NULL, shown neutrally, still no wrong label).
+sub _classifyThenAdd {
+    my ($request, $rec, $list, $source, $albumId, $artist) = @_;
+    my $client = $request->client;
+
+    $request->setStatusProcessing;
+
+    my $done = 0;
+    my $finish = sub {
+        my ($rt, $count, $prov, $year) = @_;
+        return if $done; $done = 1;
+        $rec->{rel_type} = $rt if $rt;
+        # A year off the service's album object, for a row that arrived without one — a plain
+        # streaming browse row carries no year. Set BEFORE the insert so it reaches the dedupe
+        # key too (DB::add builds the key from artist|album|year); a yearless row keys
+        # differently from the same album added later with a year, and they can't dedupe.
+        $rec->{year} = $year if $year && !$rec->{year};
+        # A PROVISIONAL count (Qobuz's catalogue tracks_count) settles the type but is never
+        # stored as Played's total — see Sources::classifyRelType. _provisionalCount tells
+        # _finishAlbumAdd not to chase a count this path has already seen and declined.
+        $rec->{track_count}      = $count if $count && !$prov;
+        $rec->{_provisionalCount} = 1     if $count && $prov;
+        _finishAlbumAdd($request, $rec, $list, $source, $albumId, $artist);
+    };
+
+    my $timeout = sub { $log->warn('LL: relType classify timed out — inserting unclassified'); $finish->(undef); };
+    Slim::Utils::Timers::setTimer(undef, time() + 6, $timeout);
+
+    Plugins::ListenLater::Sources::classifyRelType($client, $source, $albumId, $rec, sub {
+        my ($rt, $count, $prov, $year) = @_;
+        Slim::Utils::Timers::killTimers(undef, $timeout);
+        $finish->($rt, $count, $prov, $year);
+    });
+    return;
+}
+
+# Find out what a just-saved streaming release really contains, in the background, and
+# correct the row. Two things come back from the one lookup (Sources::classifyRelType):
+#
+#   • the TRACK COUNT — stored so Played can threshold on the real thing. Without it a
+#     streaming release falls on the flat streaming_min_tracks floor, which a release with
+#     fewer tracks than the floor can never reach, so it would never move to Played. Only a
+#     count from a resolved TRACKLIST is stored; Qobuz's catalogue count comes back flagged
+#     provisional and is used for the type check only, never as the total (it can exceed
+#     what's playable here, and 60% of an inflated total is unreachable —
+#     Sources::classifyRelType). It still proves the service ANSWERED, so it never retries.
+#   • a corrected TYPE, in exactly two cases: a claimed 'single' the tracklist disproves
+#     (Sources::singleIsWrong), and a row that carries NO type at all — the shape
+#     _classifyThenAdd's safety timeout leaves behind, which otherwise shows the neutral
+#     "Album" default for good. Any OTHER claim is left alone: MusicBrainz and Qobuz know an
+#     EP from an album better than a track count does.
+#
+# Fire-and-forget by design. The add already completed and the row is already on screen;
+# this is a slower, optional improvement to it, so nothing waits on it, nothing times it
+# out, and a service that never answers costs only a missing count — which the first
+# drill/play from the list fills in anyway (Browse::_albumTracks), from a resolve that
+# would have happened regardless. Needs a client for the service API handlers.
+#
+# Cost is one album fetch, and only when the tracklist can be fetched DIRECTLY
+# (Sources::hasDirectAlbumRef — a native album id, or for Bandcamp the album PAGE url its
+# get_album actually scrapes). Otherwise the lookup falls back to SEARCHING the service by
+# artist (Sources::_searchService) — far too much work to spend on a background nicety, and
+# the least reliable answer of the lot. Those rows simply wait for their first play. On
+# Qobuz it's cheaper still: the album object states its own track count, so no tracklist is
+# fetched at all (and that count is provisional — see above).
+# A failed verify is RETRIED ONCE, because of what the failure costs on a claimed single: the
+# claim stands, `Played::_totalTracks` reads 'single' as a real total of 1, and the release is
+# marked Played after ONE of its tracks — then auto-purged days later. That is the very bug
+# 0.1.88 set out to fix, so a transient outage at add time must not be allowed to reinstate it.
+# A retry is the right shape because the alternative — refusing to trust the label until a count
+# corroborates it — would put every pre-0.1.88 single (which has no stored count) back on the
+# 4-track floor, re-opening 0.1.82. Heal the row; don't punish the rows that predate the check.
+use constant VERIFY_RETRY_SECS   => 60;
+use constant VERIFY_MAX_ATTEMPTS => 2;   # the first go plus one retry
+use constant VERIFY_TIMEOUT_SECS => 6;   # a callback that never arrives (same wait as _classifyThenAdd)
+
+sub _verifyRelease {
+    my ($client, $recId, $rec, $source, $albumId, $attempt) = @_;
+    return unless $client && $recId;
+    # Only when the tracklist can be fetched DIRECTLY. Asking Sources means this can't drift
+    # from what a resolve actually costs: an album id is enough for Qobuz/Tidal/Deezer, but
+    # Bandcamp replays off the album PAGE url, so an id-only Bandcamp row would resolve via a
+    # full service SEARCH — precisely the cost this gate exists to refuse (see the header).
+    return unless Plugins::ListenLater::Sources::hasDirectAlbumRef($rec);
+    return unless defined $albumId && length $albumId;
+    $attempt ||= 1;
+
+    my $claim = $rec->{rel_type};
+
+    # A callback that NEVER ARRIVES is the third failure route, and it used to be the silent
+    # one: the two guarded below are a callback reporting no count and a synchronous die, but
+    # an HTTP request that is accepted and then never answered fires neither, so the row kept
+    # its unverified claim with nothing in the log. Same shape _classifyThenAdd guards with
+    # its own 6s timer. $done makes the timeout and the callback mutually exclusive, so a
+    # late answer can't act after the retry was armed (and vice versa).
+    my $done = 0;
+    my $timeout;
+    $timeout = sub {
+        return if $done; $done = 1;
+        $log->warn("LL: rec $recId — release verify never answered");
+        _armVerifyRetry($client, $recId, $rec, $source, $albumId, $attempt);
+    };
+    Slim::Utils::Timers::setTimer(undef, time() + VERIFY_TIMEOUT_SECS, $timeout);
+
+    my $ok = eval {
+        Plugins::ListenLater::Sources::classifyRelType($client, $source, $albumId, $rec, sub {
+            my ($rt, $count, $prov, $year) = @_;
+            Slim::Utils::Timers::killTimers(undef, $timeout);
+            return if $done; $done = 1;
+
+            # A missing release year, filled from the album object this lookup already
+            # fetched. Done BEFORE the count check below, because it is worth having even on
+            # the path where no count comes back — and it costs nothing extra.
+            # DB::updateYear won't overwrite a year we already hold, and recomputes the
+            # dedupe key so the row can't be duplicated by a later add that carries one.
+            Plugins::ListenLater::DB::updateYear($recId, $year) if $year;
+
+            # No count: the service couldn't be reached, or returned nothing playable. Never
+            # silent — this was invisible before, which is exactly why it could sit unnoticed.
+            # A PROVISIONAL count still counts as an answer here (the service replied), so it
+            # must not trigger the retry — it just isn't stored as the total.
+            return _armVerifyRetry($client, $recId, $rec, $source, $albumId, $attempt)
+                unless $count;
+
+            Plugins::ListenLater::DB::updateTrackCount($recId, $count) unless $prov;
+            return unless $rt;
+            # A type the source CLAIMED is only ever overwritten to demote a wrong 'single'
+            # — MusicBrainz and Qobuz read an EP from an album better than a count does.
+            if (Plugins::ListenLater::Sources::singleIsWrong($claim, $count)) {
+                Plugins::ListenLater::DB::updateRelType($recId, $rt, 1);
+                $log->warn("LL: rec $recId was added as a single but has $count tracks"
+                    . " — reclassified as $rt");
+            }
+            # No claim at all — the row went in with a NULL type, which happens when
+            # _classifyThenAdd's safety timeout fired and inserted unclassified. We have just
+            # been handed the answer it was waiting for, and throwing it away left the row
+            # showing the neutral default ("Album", per Browse::_typeLabel) forever. Unforced,
+            # so it only ever fills a NULL (updateRelType's WHERE rel_type IS NULL) and can't
+            # race over a type a drill/play stored in the meantime. Mirrors the same repair in
+            # Browse::_albumTracks, which does this on every resolve.
+            elsif (!defined $claim || !length $claim) {
+                Plugins::ListenLater::DB::updateRelType($recId, $rt);
+                $log->warn("LL: rec $recId had no type — classified as $rt from $count tracks");
+            }
+        }, $claim);
+        1;
+    };
+    unless ($ok) {
+        Slim::Utils::Timers::killTimers(undef, $timeout);
+        return if $done; $done = 1;
+        $log->warn("LL: release verify failed for rec $recId: $@");
+        _armVerifyRetry($client, $recId, $rec, $source, $albumId, $attempt);
+    }
+    return;
+}
+
+# Schedule the single retry (or give up, loudly). Kept separate so both failure routes — a
+# callback with no count, and a synchronous die — go through the same attempt accounting and
+# can never chain into a third try.
+sub _armVerifyRetry {
+    my ($client, $recId, $rec, $source, $albumId, $attempt) = @_;
+
+    if (($attempt || 1) >= VERIFY_MAX_ATTEMPTS) {
+        # Worth a WARN, not silence: the row keeps the type its source claimed, which for a
+        # 'single' means Played may act on a total of 1 it never confirmed. Opening or playing
+        # the release from the list still fixes it (Browse::_albumTracks).
+        $log->warn("LL: rec $recId — no track count after " . ($attempt || 1)
+            . " attempts; keeping the claimed type '" . ($rec->{rel_type} // '-')
+            . "'. It will be corrected on first play from the list.");
+        return;
+    }
+
+    $log->warn("LL: rec $recId — release verify got no track count, retrying in "
+        . VERIFY_RETRY_SECS . "s");
+    Slim::Utils::Timers::setTimer($client, time() + VERIFY_RETRY_SECS, \&_verifyRetryTick, {
+        recId   => $recId,
+        source  => $source,
+        albumId => $albumId,
+        attempt => ($attempt || 1) + 1,
+    });
+    return;
+}
+
+# The retry itself. A NAMED sub, not a closure, so setTimer/killTimers pair on one coderef and
+# a re-arm can't build a self-referencing chain (the 0.1.83 lesson from _deferredMarkTick).
+# Re-reads the row rather than trusting the captured copy: in the intervening minute it may have
+# been removed, or a drill/play may have resolved it and stored the real count already, in which
+# case there is nothing left to do.
+sub _verifyRetryTick {
+    my ($client, $args) = @_;
+    return unless ref $args eq 'HASH' && $args->{recId};
+
+    my $rec = eval { Plugins::ListenLater::DB::get($args->{recId}) } or return;
+    return if $rec->{track_count};
+
+    # No live player, no service API handler — give up rather than pretend.
+    return unless $client;
+    my $live = eval { Slim::Player::Client::getClient($client->id) };
+    return unless $live;
+
+    _verifyRelease($live, $args->{recId}, $rec, $args->{source}, $args->{albumId},
+                   $args->{attempt});
+    return;
 }
 
 # Fetch a streaming album's artist from its tracks and backfill it onto the saved

@@ -78,7 +78,7 @@ sub _section {
     # view toggle for the whole page if any item is type => 'text' (browse-resp.js:
     # `types.has("text")`), whereas type => 'header' is fine. An empty section just
     # shows its "(0)" header. (The header count conveys emptiness.)
-    push @items, map { _albumRow($client, $_) } @$rows;
+    push @items, map { _row($client, $_) } @$rows;
 
     return @items;
 }
@@ -110,29 +110,140 @@ sub _renderSection {
     my ($client, $callback, $status) = @_;
     my $rows = Plugins::ListenLater::DB::list($status, $prefs->get('sort') || 'added');
     my @items = @$rows
-        ? map { _albumRow($client, $_) } @$rows
+        ? map { _row($client, $_) } @$rows
         : ({ name => cstring($client, 'PLUGIN_LL_EMPTY'), type => 'text' });
     $callback->({ items => \@items });
+}
+
+# Leading glyphs, chosen so the symbol matches what the row actually is. All are plain
+# text glyphs (NOT colour emoji) so they render identically on every client — these are
+# drawn by the viewer's browser, not the server, so anything that resolves to an emoji font
+# would look different per device (and be a missing-glyph box where there's no emoji font):
+#   ♫ (two beamed notes) = a release holding MORE THAN ONE track
+#   ♪ (one note)         = ONE track: a one-track release OR an individual saved Track
+#   ❝ (heavy turned comma) = a PODCAST episode — speech rather than music
+# (Release vs individual Track is then told apart by the subtitle word, not the glyph.)
+# NB there is no plain-text MICROPHONE to use for podcasts: the only ones (U+1F3A4,
+# U+1F399) live in the emoji planes, and though U+1F399 defaults to text presentation
+# almost no font ships a monochrome glyph for it, so it renders in colour from the emoji
+# font — or not at all. The quote mark is the closest speech symbol that behaves.
+use constant GLYPH_MULTI   => "\x{266b}";
+use constant GLYPH_SINGLE  => "\x{266a}";
+use constant GLYPH_PODCAST => "\x{275d}";
+use constant SEP           => " \x{00b7} ";   # " · " subtitle separator
+
+# The glyph for a row: ❝ for a podcast episode, ♪ for one track, ♫ for more than one.
+#
+# The glyph answers "how many tracks", so it is driven by the MEASURED count whenever we
+# have one — not by the release type. The type is MusicBrainz's or the service's word, and
+# it is frequently not literal: adieu's 'Wanna me' is labelled an EP and holds exactly ONE
+# track, so it drew ♫ while the truthful figure sat unused in track_count. The label is
+# theirs and stays as they wrote it (see _typeLabel); this symbol is OURS, and it claims
+# something specific, so it should tell the truth.
+#
+# Falls back to the type only while the count is still unknown — a row added but not yet
+# played or opened. Library rows are the same: they carry no stored count (Played counts
+# those live, and doing that here would be a schema query per row on every list render), but
+# their type was classified from the real library count at add time, so it is already sound.
+sub _glyphFor {
+    my ($rec) = @_;
+    return GLYPH_PODCAST if ($rec->{source} || '') eq 'podcast';
+    return GLYPH_SINGLE  if ($rec->{kind}   || '') eq 'track';
+
+    my $n = $rec->{track_count};
+    if (defined $n && $n =~ /^\d+$/ && $n > 0) {
+        return $n == 1 ? GLYPH_SINGLE : GLYPH_MULTI;
+    }
+
+    return GLYPH_SINGLE  if ($rec->{rel_type} || '') eq 'single';
+    return GLYPH_MULTI;
+}
+
+# Dispatch a stored row to the right renderer.
+sub _row {
+    my ($client, $rec) = @_;
+    return (($rec->{kind} || '') eq 'track')
+        ? _trackRow($client, $rec)
+        : _albumRow($client, $rec);
+}
+
+# The type word shown as the first segment of a row's subtitle. A podcast episode says
+# "Podcast"; any other track says "Track"; a release is its classified type (Album / EP /
+# Single), defaulting to Album until it's been resolved and classified (see _albumTracks /
+# relTypeFor).
+sub _typeLabel {
+    my ($client, $rec) = @_;
+    return cstring($client, 'PLUGIN_LL_TYPE_PODCAST') if ($rec->{source} || '') eq 'podcast';
+    return cstring($client, 'PLUGIN_LL_TYPE_TRACK') if ($rec->{kind} || '') eq 'track';
+    my $rt = $rec->{rel_type} || 'album';
+    my %str = (album => 'PLUGIN_LL_TYPE_ALBUM', ep => 'PLUGIN_LL_TYPE_EP', single => 'PLUGIN_LL_TYPE_SINGLE');
+    return cstring($client, $str{$rt} || 'PLUGIN_LL_TYPE_ALBUM');
 }
 
 # A directly-playable album row. type => 'playlist' + a url coderef that resolves
 # the album's tracks gives Material the play button and Play/Play Next/Add in the
 # "…". itemActions→info adds the "…" → More context entry → our Remove/Move menu
-# (refreshes the list in place; see Plugin::_contextMenuQuery).
+# (refreshes the list in place; see Plugin::_contextMenuQuery). The subtitle carries
+# the ♫ glyph + the type word ("Album"/"EP"/"Single" · source) and marks it a release;
+# the NAME line stays the plain "Artist – Album (Year)" it has always been.
 sub _albumRow {
     my ($client, $rec) = @_;
 
     my $name = '';
     $name .= $rec->{artist} . " \x{2013} " if $rec->{artist};
     $name .= $rec->{album_title} // cstring($client, 'PLUGIN_LL_UNKNOWN_ALBUM');
-    $name .= " ($rec->{year})" if $rec->{year};
+
+    # …and the year, unless the title is already carrying it ("The New World (2026) (2026)").
+    # A sibling feed labels its rows "Album (YYYY)" and Material hands us that whole label as
+    # $ALBUMNAME, so the year ends up inside the stored title. Only skipped when the trailing
+    # parenthesised year is the SAME year we hold — a title that genuinely ends in a
+    # different year ("Live (1971)" released 2026) still gets its own appended.
+    my $year = $rec->{year};
+    $name .= " ($year)" if $year && $name !~ /\(\Q$year\E\)\s*$/;
 
     return {
         name        => $name,
-        line2       => ucfirst($rec->{source} || ''),
+        line2       => _glyphFor($rec) . ' ' . _typeLabel($client, $rec)
+                       . SEP . ucfirst($rec->{source} || ''),
         image       => $rec->{artwork} || _iconFor($rec->{status}),
         type        => 'playlist',
         url         => \&_albumTracks,
+        passthrough => [ { id => $rec->{id} } ],
+        itemActions => {
+            info => {
+                command     => [ 'listenlater', 'contextmenu' ],
+                fixedParams => { id => $rec->{id} },
+            },
+        },
+    };
+}
+
+# A directly-playable single-track row. Unlike a release it plays on click (type =>
+# 'audio' with the stored play url) rather than drilling into a tracklist — a saved
+# track is one song. The "♪ Track · <album> · <source>" subtitle distinguishes it.
+# Same itemActions→info "…" → More (Remove/Move) as a release row.
+sub _trackRow {
+    my ($client, $rec) = @_;
+
+    my $ref = (ref $rec->{ref} eq 'HASH') ? $rec->{ref} : {};
+
+    my $name = '';
+    $name .= $rec->{artist} . " \x{2013} " if $rec->{artist};
+    $name .= $rec->{track_title} // $rec->{album_title} // cstring($client, 'PLUGIN_LL_UNKNOWN_ALBUM');
+
+    my $sub = _glyphFor($rec) . ' ' . _typeLabel($client, $rec);
+    $sub .= SEP . $rec->{album_title} if defined $rec->{album_title} && length $rec->{album_title};
+    # The source segment is dropped for a podcast: the type word already reads "Podcast",
+    # so appending it again would give "Podcast · <show> · Podcast".
+    $sub .= SEP . ucfirst($rec->{source} || '')
+        if $rec->{source} && $rec->{source} ne 'podcast';
+
+    return {
+        name        => $name,
+        line2       => $sub,
+        image       => $rec->{artwork} || _iconFor($rec->{status}),
+        type        => 'audio',
+        url         => $ref->{url},
         passthrough => [ { id => $rec->{id} } ],
         itemActions => {
             info => {
@@ -151,7 +262,7 @@ sub _albumRow {
 sub homeShelf {
     my ($client, $callback, $args) = @_;
     my $rows = Plugins::ListenLater::DB::list('later', $prefs->get('sort') || 'added');
-    $callback->({ items => [ map { _albumRow($client, $_) } @$rows ] });
+    $callback->({ items => [ map { _row($client, $_) } @$rows ] });
 }
 
 # Resolve the tracks for an album row (drill-in and play both call this).
@@ -173,6 +284,49 @@ sub _albumTracks {
             ref $_ eq 'HASH' && !$_->{weblink} && (($_->{type} // '') ne 'text')
         } @$tracks;
         @playable = @$tracks unless @playable;
+
+        # How many REAL tracks the resolve produced. Deliberately NOT `scalar @playable`:
+        # that list is what the DRILL VIEW shows, which is a different question. Qobuz sends
+        # 5-6 info rows with every album ('Artist: …', 'Credits', 'Copyright', …) that belong
+        # in the view but are not tracks, and the display filter above keeps them — so
+        # counting the view stored 6 for a 1-track release and 17 for an 11-track album, and
+        # Played then wanted 60% of THAT (see Sources::isPlayableTrack). Ask the one predicate
+        # LMS itself uses, and ask it of the RAW list so nothing the fallback restores — the
+        # single "no match" text row of a failed resolve — can be mistaken for a track.
+        my $resolved = Plugins::ListenLater::Sources::countPlayableTracks($tracks);
+
+        # Here — and only here — the release's real tracklist is in hand for a row that is
+        # already stored, so this is where what the DB knows about it gets put right. Three
+        # things, all free at this point:
+        #
+        #  • the TRACK COUNT, always refreshed. It's what Played thresholds against, and a
+        #    row added before 0.1.88 (or whose add-time resolve failed) has none — until it
+        #    does, a release shorter than the streaming_min_tracks floor can never be marked
+        #    Played, however many times it's heard. Library releases don't need it (Played
+        #    counts those live from the library).
+        #  • the release TYPE, when it was never classified (updateRelType is a no-op once
+        #    set, so this only fills a NULL).
+        #  • a stored 'single' that resolves to MORE than one track — never a single in LL's
+        #    sense whatever its source called it — corrected in place (the one forced
+        #    update). This is what repairs rows saved before the add-time check existed.
+        if (($rec->{kind} || '') ne 'track' && $resolved) {
+            my $count  = $resolved;
+            my $stored = $rec->{rel_type} || '';
+            my $wrong  = Plugins::ListenLater::Sources::singleIsWrong($stored, $count);
+
+            Plugins::ListenLater::DB::updateTrackCount($rec->{id}, $count)
+                if ($rec->{source} || '') ne 'library';
+
+            if (!$stored || $wrong) {
+                my $rt = Plugins::ListenLater::Sources::relTypeFor(count => $count);
+                if ($rt) {
+                    Plugins::ListenLater::DB::updateRelType($rec->{id}, $rt, $wrong);
+                    $log->warn("LL: rec $rec->{id} was stored as a single but resolves to "
+                        . "$count tracks — reclassified as $rt") if $wrong;
+                }
+            }
+        }
+
         $callback->({ items => \@playable });
     });
 }

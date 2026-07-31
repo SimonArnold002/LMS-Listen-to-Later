@@ -40,6 +40,37 @@ sub sourceFromUrl {
     return $SCHEME{$scheme} || $scheme;   # unknown streaming scheme kept as-is
 }
 
+# Does this favurl point at a single TRACK (vs an album)? The reliable album-vs-track
+# discriminator for streaming adds: Material collapses a streaming album's track rows onto
+# the 'online-album' custom-action category (verified live — a Qobuz album-drill track fires
+# online-album, not online-track), so the category can't be trusted; the play url can.
+# Order: a container ref ('album:' etc.) is a decisive NO; a media-file extension (Qobuz
+# .flac, Deezer .flc, Tidal .flac/.m4a, …) or a '/track/' path (Bandcamp/SoundCloud) is a
+# decisive YES; anything else falls through to a logged fail-open YES (see below).
+sub favurlIsTrack {
+    my ($u) = @_;
+    return 0 unless defined $u && length $u;
+    return 0 unless $u =~ m{^\w+://};      # must be a scheme url to say anything
+    # A CONTAINER ref is decisive → not a track. 'album:' is the one the services actually
+    # emit; the others cost nothing and stop a playlist/artist/mix row being replayed as a
+    # single audio url.
+    return 0 if $u =~ m{(?:[:/])(?:album|playlist|artist|mix):};
+    # Explicit track shapes: a media-file extension (Qobuz .flac, Deezer .flc, Tidal
+    # .flac/.m4a, …) or a '/track/' path (Bandcamp/SoundCloud).
+    return 1 if $u =~ m{\.(?:flac|flc|mp3|m4a|mp4|aac|ogg|oga|opus|wav|alac|aiff?)(?:[?#].*)?$}i;
+    return 1 if $u =~ m{/track/};
+    # Otherwise: for every service we support, an ALBUM favurl is either EMPTY or carries
+    # 'album:' — so a remaining non-empty scheme url with neither is a track (e.g. an
+    # extension-less tidal://<id>). This is a fail-OPEN default and nothing enforces the
+    # invariant: if a supported service ever starts emitting an album favurl in a shape we
+    # don't recognise, its albums would be stored as kind='track' rows pointing a
+    # type => 'audio' item at a non-audio url — i.e. rows that can't play. Log it so that
+    # shows up in log.txt as a named suspect instead of silently. (An UNsupported service
+    # breaking the invariant still costs nothing — it's rejected by _isReplayableSource.)
+    $log->warn("LL: favurlIsTrack — assuming TRACK for an unrecognised favurl shape: $u");
+    return 1;
+}
+
 # Metadata for a currently-playing REMOTE track, from its protocol handler's
 # getMetadataFor — the same source LMS's status query / Material's Now Playing use.
 # Streaming services (Qobuz/Tidal/Deezer) DON'T store album/artist/cover on the LMS
@@ -181,10 +212,37 @@ sub _libraryAlbumRec {
 # Build playable album node(s) for a stored record
 #   ($client, $rec, $callback) — $callback->( \@items )
 # ---------------------------------------------------------------------------
+# Can this record's tracklist be fetched DIRECTLY — one album call — or would it cost a
+# SEARCH of the service? The difference is what separates a cheap background job from an
+# expensive one, so anything deciding whether to do optional work in the background must ask
+# THIS, not "is there an album id".
+#
+# Bandcamp is the exception that makes it worth a named sub: its get_album scrapes the album
+# PAGE url, so an album_id alone buys nothing there — a record with an id but no album_url
+# still resolves via a full Bandcamp search. Plugin::_verifyRelease used to gate on the id
+# alone and so spent exactly the search its own comment said it was avoiding. Every other
+# service replays straight from the captured id.
+sub hasDirectAlbumRef {
+    my ($rec) = @_;
+    my $source = $rec->{source} || 'library';
+    my $ref    = $rec->{ref} || {};
+    return 1 if $source eq 'library';
+    return ($ref->{album_url} ? 1 : 0) if $source eq 'bandcamp';
+    my $albumId = $ref->{album_id} || ($ref->{passthrough} && $ref->{passthrough}{album_id});
+    return $albumId ? 1 : 0;
+}
+
 sub buildPlayableItems {
     my ($client, $rec, $cb) = @_;
 
     my $source = $rec->{source} || 'library';
+
+    # A saved TRACK is a single, self-contained play URL — no album node, no matcher,
+    # no search. The stored url plays directly (a library file://, or a streaming
+    # qobuz://…/tidal://…/deezer://…/bandcamp track url).
+    if (($rec->{kind} || '') eq 'track') {
+        return $cb->(_trackPlayableItems($rec));
+    }
 
     if ($source eq 'library') {
         return $cb->(_libraryPlayable($rec));
@@ -203,7 +261,7 @@ sub buildPlayableItems {
     # direct. Qobuz/Tidal replay fine straight from the captured id.
     # (Historical note: an earlier belief that "Material drops a long favurl" was wrong —
     # it was a shadowed-install artifact; the full ?b= favurl survives intact.)
-    my $directOk = ($source eq 'bandcamp') ? ($ref->{album_url} ? 1 : 0) : ($albumId ? 1 : 0);
+    my $directOk = hasDirectAlbumRef($rec);
 
     if ($directOk && _serviceCan($source)) {
         my $item = _streamingAlbumNode($client, $source, $albumId, $rec);
@@ -247,6 +305,11 @@ sub resolveTracks {
     my ($client, $rec, $cb) = @_;
 
     my $source = $rec->{source} || 'library';
+
+    # Track saves resolve to the one stored audio item (no service round-trip).
+    if (($rec->{kind} || '') eq 'track') {
+        return $cb->(_trackPlayableItems($rec));
+    }
 
     if ($source eq 'library') {
         return $cb->(_libraryTrackItems($rec->{ref}{album_id}));
@@ -293,6 +356,321 @@ sub _libraryTrackItems {
         push @items, { name => $t->title, type => 'audio', url => $t->url };
     }
     return \@items;
+}
+
+# One playable audio item for a saved TRACK, from its stored play URL. The URL is the
+# canonical service/library url captured at add time (qobuz://…flac, file://…, etc.), so
+# replay is a direct handoff to the protocol handler — the same shape as a library album's
+# track items. Returns a "no match" text row if the url is somehow missing (older/corrupt
+# record) so the view is never blank.
+sub _trackPlayableItems {
+    my ($rec) = @_;
+    my $ref = (ref $rec->{ref} eq 'HASH') ? $rec->{ref} : {};
+    my $url = $ref->{url};
+    return [{ name => cstring(undef, 'PLUGIN_LL_NO_MATCH'), type => 'text' }]
+        unless defined $url && length $url;
+    return [{
+        name  => $rec->{track_title} // $rec->{album_title} // '',
+        type  => 'audio',
+        url   => $url,
+        image => $rec->{artwork},
+    }];
+}
+
+# Classify a release as 'album' | 'ep' | 'single'. Prefers an explicit type the SOURCE
+# supplied (e.g. the ListenBrainz Fresh Releases favurl '&rt=' handshake, which carries
+# the true MusicBrainz release-group type) — since the LMS streaming plugins' track
+# coderefs don't expose a release type, that handshake is the only *authoritative* signal.
+# Falls back to a track-count heuristic (1 = single, 2-6 = ep, else album), which is what
+# library and direct-streaming adds use. Returns undef when neither signal is available
+# (label then defaults to "Album" until a resolve fills in the count).
+#
+# ONE exception to "the source wins": a claimed 'single' is overruled by a real track
+# count greater than one — see singleIsWrong().
+sub relTypeFor {
+    my (%a) = @_;
+    my $svc = _normRelType($a{service});
+    my $n   = $a{count};
+    my $have = defined $n && $n =~ /^\d+$/ && $n > 0;
+    return $svc if $svc && !($have && singleIsWrong($svc, $n));
+    return undef unless $have;
+    return $n == 1 ? 'single' : $n <= 6 ? 'ep' : 'album';
+}
+
+# Is a claimed 'single' contradicted by the release's real track count? To LL 'single'
+# is not a genre label, it is the statement "this release has exactly ONE track":
+# Played::_totalTracks returns 1 for it and Played then marks the whole release heard as
+# soon as that one track has played through. So a release the SOURCE calls a single but
+# which actually carries several tracks gets marked Played after its first track.
+#
+# Sources really do call such releases singles. MusicBrainz gives a release group whose
+# primary type is Single that label however many B-sides, remixes or radio edits the
+# release carries, and that type is what ListenBrainz Fresh Releases hands over in its
+# '&rt=' handshake; Qobuz's own release_type behaves the same way. Neither is lying — a
+# 4-track CD single IS a single as the industry means it — but it is not what LL's
+# 'single' means, so we defer to the count, which is the thing Played actually cares
+# about (it then reads as an EP, or an Album beyond 6 tracks — calling a 9-track release
+# an EP would just re-run the same early-Played bug against the EP's 2-track floor).
+sub singleIsWrong {
+    my ($relType, $count) = @_;
+    return 0 unless ($relType // '') eq 'single';
+    return (defined $count && $count =~ /^\d+$/ && $count > 1) ? 1 : 0;
+}
+
+# Map a free-text release-type token (from a service / MB handshake) to our vocabulary.
+sub _normRelType {
+    my $t = lc($_[0] // '');
+    return undef unless length $t;
+    return 'single' if $t =~ /single/;
+    return 'ep'     if $t =~ /\bep\b/ || $t eq 'ep';
+    return 'album'  if $t =~ /album|^lp$|compilation|mixtape/;
+    return undef;
+}
+
+# ---------------------------------------------------------------------------
+# Is this resolved OPML item a playable TRACK?
+#
+# A port of LMS's own hasAudio (Slim::Control::XMLBrowser) — the definition the server
+# itself uses to set the `isaudio` flag on a browse row. Counting by the same rule the
+# server displays by means "we counted it" and "you can play it" are the same question, and
+# the answer is checkable against any live feed over jsonrpc.js.
+#
+# It MUST be an allow-list. The old test was a deny-list — anything that is not type 'text'
+# and has no weblink — so any row a service invents that we did not anticipate fails it
+# OPEN and is counted as a track. Qobuz returns FIVE OR SIX such rows on every album
+# ('Artist: X', "Add Release … to Qobuz favourites", 'Credits', 'Description', 'Music
+# Label: …', 'Copyright'), and verified live against four releases, none of them carries a
+# `type` at all — so every one was counted. A 1-track release stored 6; an 11-track album
+# stored 17. Played thresholds on that number: the 1-track release needed 4 of its 1 track
+# and could NEVER be marked, and the album needed all 11 instead of 7.
+#
+# Note 'playlist' counts as playable, not just 'audio' — that is what hasAudio does, and
+# guessing 'audio' alone would silently undercount any service that nests a playable item.
+sub isPlayableTrack {
+    my ($i) = @_;
+    return 0 unless ref $i eq 'HASH';
+    return 1 if $i->{play};
+    return 1 if ((($i->{type} // '') =~ /^(?:audio|playlist)$/)
+                 && ($i->{playlist} || $i->{url} || scalar @{ $i->{outline} || [] }));
+    return 1 if ref $i->{enclosure} eq 'HASH' && (($i->{enclosure}{type} // '') =~ /audio/);
+    return 0;
+}
+
+# How many REAL tracks a resolved item list holds. This is the only number allowed to become
+# Played's total — see Played::_totalTracks.
+sub countPlayableTracks {
+    my ($items) = @_;
+    return 0 unless ref $items eq 'ARRAY';
+    return scalar grep { isPlayableTrack($_) } @$items;
+}
+
+# Work out what a STREAMING release IS, async →
+#     $cb->($relType|undef, $trackCount|undef, $countIsProvisional, $year|'')
+#
+# The FOURTH value is a release year read off the service's album object, for a row that
+# arrived without one (Qobuz only — it is the one service whose ID call returns an album
+# object rather than a tracklist). Empty when unknown. Callers fill a MISSING year with it
+# and never overwrite one they already hold — see DB::updateYear.
+#
+# Two answers, both needed. The TYPE is the row's label; the COUNT is what Played
+# thresholds against — without it a streaming release falls back to the blunt
+# streaming_min_tracks floor, which a release shorter than the floor can never reach (see
+# Played::_totalTracks).
+#
+# THE THIRD VALUE says where the count came from, and callers must honour it. A count from
+# a resolved TRACKLIST is real: the service has already applied its own regional/licensing
+# filter, so what came back is what can actually be played here ($provisional = 0). A count
+# from a catalogue album OBJECT (Qobuz's tracks_count) is a claim about the release, not
+# about your account — it can only ever be >= what's playable — so it is PROVISIONAL and
+# must NOT be stored as Played's total ($provisional = 1). Storing it was a real bug: a
+# 12-track catalogue entry with 5 playable tracks needs ceil(60% of 12) = 8 distinct tracks
+# and can never be marked, which is WORSE than the flat 4-track floor it replaced.
+# Provisional counts are still passed back, because they are perfectly good for settling
+# the TYPE (that's what the fetch is for) and because their presence distinguishes "the
+# service answered" from "the service could not be reached" — which is what
+# Plugin::_verifyRelease's retry keys on.
+#
+# $claimed is a type the source already told us (the '&rt=' handshake). It settles the
+# type — MusicBrainz knows an EP from an album better than a track count does — EXCEPT
+# for a 'single', which is confirmed against the count (singleIsWrong). With no claim,
+# Qobuz's own release_type (getAPIHandler->getAlbum → $album->{release_type}) plays the
+# same role, and with neither the count decides. Either way the tracklist is resolved, so
+# the count comes back regardless of who won the type. Called BEFORE the row is inserted
+# (Plugin::_classifyThenAdd) so it is never shown mislabelled. Guarded; always fires $cb.
+sub classifyRelType {
+    my ($client, $source, $albumId, $rec, $cb, $claimed) = @_;
+
+    my $claim = _normRelType($claimed);
+
+    # Qobuz answers BOTH questions from one album fetch — its album object carries
+    # release_type and tracks_count — so when it gives us a count there is no reason to
+    # fetch a tracklist as well. Every other service's album call IS the tracklist, so
+    # they get nothing from a special case and go the resolve route below.
+    #
+    # Note what that count MEANS: it's the catalogue's track count, which can exceed what
+    # is actually playable here (regional/licensing gaps drop tracks from the tracklist,
+    # not from the album object). Played thresholds against what can be PLAYED, so this
+    # count is handed back flagged PROVISIONAL and is never stored as the total — see the
+    # header. It still settles the type, which is what this fetch is for. The real total
+    # arrives on the first drill/play from the list, which resolves the actual tracklist
+    # (Browse::_albumTracks → DB::updateTrackCount).
+    #
+    # ONE use of a provisional count can RAISE the Played bar, and it is not allowed:
+    # DEMOTING a claimed 'single' (singleIsWrong). A 'single' means a real total of 1, so it
+    # needs 1 track; demote it to 'ep' with no stored total and it needs 2 (the EP floor).
+    # If the catalogue count is inflated — it says 3, the region serves 1 — that release can
+    # never be marked at all, where 0.1.87 marked it. So in exactly that case the count is
+    # not good enough to act on and we fall through to resolving the real TRACKLIST, which
+    # answers both questions properly: the true playable count (stored, not provisional) and
+    # a type settled from it. It costs one call, only for a claimed single the catalogue
+    # contradicts — rare — while albums, EPs and confirmed singles keep the zero-call path.
+    #
+    # Every OTHER use of the count can only LOWER the bar or leave it alone, which is why
+    # they need no such care: with no assertion, a count of 1 gives 'single' (needs 1, down
+    # from the 4-track floor), 2-6 gives 'ep' (needs 2, down from 4) and 7+ gives 'album'
+    # (needs 4, unchanged). Only the demotion goes the wrong way.
+    #
+    # Residual case, accepted: a release Qobuz explicitly asserts is an 'album' but which
+    # holds 2-6 tracks stores no total, so it sits on the 4-track floor until the first play
+    # from the list. Narrow, and it can only ever make a release WAIT to be marked, never
+    # mark early or never mark at all.
+    if ($source eq 'qobuz' && defined $albumId && length $albumId
+            && Plugins::Qobuz::Plugin->can('getAPIHandler')) {
+        my $api = eval { Plugins::Qobuz::Plugin::getAPIHandler($client) };
+        if ($api && $api->can('getAlbum')) {
+            my $ok = eval {
+                $api->getAlbum(sub {
+                    my $album = shift;
+                    my $rt = $claim
+                        || _normRelType(ref $album eq 'HASH' ? $album->{release_type} : undef);
+                    my $n = albumTrackCount($album);
+                    # …and the release YEAR, off the same object, for a row that arrived
+                    # without one — a plain Qobuz browse row carries no year at all (only the
+                    # siblings' '&y=' handshake and Now Playing's "Album (YYYY)" label do), and
+                    # the year is part of the dedupe key, so a yearless row can be duplicated
+                    # by a later add that has one. Free: this object is already in hand.
+                    #
+                    # Read with serviceYear (the whole hash), NOT a hand-picked few fields:
+                    # the earlier three-field version missed an album object that states only
+                    # the epoch `released_at`, which is exactly what Pitchfork Reviews was
+                    # getting years from while this path returned nothing.
+                    my $yr = serviceYear($album);
+                    # Short-circuit ONLY when the catalogue count can't raise the bar, i.e.
+                    # anything but demoting a claimed single (see above). 1 = provisional.
+                    return $cb->(_settle($rt, $n), $n, 1, $yr) if $n && !singleIsWrong($rt, $n);
+                    # No count on the object, or a count that would demote a claimed single
+                    # and so has to be proved first → resolve the real tracklist. The year
+                    # still came off the object, so carry it through rather than lose it.
+                    _countThen($client, $rec, $rt, sub {
+                        my ($t, $c, $p) = @_;
+                        $cb->($t, $c, $p, $yr);
+                    });
+                }, $albumId);
+                1;
+            };
+            return if $ok;
+        }
+    }
+    return _countThen($client, $rec, $claim, $cb);
+}
+
+# The track count a service states on its own album object, without resolving anything.
+# Field names verified per plugin (and shared with the sibling ListenBrainz plugin's
+# _candReleaseType): Qobuz tracks_count, Deezer nb_tracks, TIDAL numberOfTracks.
+#
+# Only the Qobuz name is reachable from classifyRelType today, and the reason is the shape
+# of the two resolution paths, not a preference for Qobuz: the ID-based call returns an
+# album OBJECT on Qobuz but a TRACKLIST on Tidal/Deezer/Bandcamp, so there is no hash to
+# read a count from.
+#
+# Their album data is NOT missing — verified 2026-07-25 by reading each plugin's source:
+# Tidal's album objects carry `type` (ALBUM/EP/SINGLE) + numberOfTracks and Deezer's carry
+# record_type + nb_tracks, but only on the raw albums/<id> / album/<id> endpoints, which
+# the plugins do not surface (their getAlbum returns tracks). **Reaching into those private
+# API internals was DECLINED (2026-07-25) — it breaks on plugin updates — so do not
+# re-attempt it; single/EP detection from a service's own catalogue is Qobuz-only by
+# decision, not by oversight.** Bandcamp has no type at all and no count before its page
+# is fetched.
+#
+# What IS legitimately available is those services' SEARCH results: the raw album hashes in
+# _searchService's Tidal/Deezer branches carry the counts, through the plugins' own public
+# search. That path isn't used here only because searching is the expense we're avoiding —
+# so these two names stay both verified and (via search) reachable without going private.
+sub albumTrackCount {
+    my ($album) = @_;
+    return undef unless ref $album eq 'HASH';
+    my $n = $album->{tracks_count} // $album->{nb_tracks} // $album->{numberOfTracks};
+    return (defined $n && "$n" =~ /^\d+$/ && $n > 0) ? $n + 0 : undef;
+}
+
+# Decide the final type from what the source asserted and what the release actually holds.
+# With no assertion the count classifies. With one, the assertion stands — it comes from
+# MusicBrainz or the service's own catalogue, either of which reads an EP better than a
+# count does — UNLESS it says 'single' and the count disagrees, where the count wins
+# (singleIsWrong). An assertion also stands when there's no count at all: that leaves an
+# unreachable service exactly where it was, rather than guessing from nothing.
+sub _settle {
+    my ($asserted, $count) = @_;
+    my $counted = relTypeFor(count => $count);
+    return $counted unless $asserted;
+    return ($counted || $asserted) if singleIsWrong($asserted, $count);
+    return $asserted;
+}
+
+# The general route: resolve the release's tracklist and settle from what came back.
+sub _countThen {
+    my ($client, $rec, $asserted, $cb) = @_;
+    return resolveTrackCount($client, $rec, sub {
+        my ($n) = @_;
+        # 0 = a real count: resolveTrackCount counted the tracklist the service actually served,
+        # which is already filtered to what's playable here.
+        $cb->(_settle($asserted, $n), $n, 0);
+    });
+}
+
+# Count the release's real tracks → $cb->($count|undef). PUBLIC: Played calls this too, to
+# learn a release's length at the moment it starts playing (see Played::_onChange).
+# undef means "couldn't find out", never "zero".
+sub resolveTrackCount {
+    my ($client, $rec, $cb) = @_;
+    my $ok = eval {
+        resolveTracks($client, $rec, sub {
+            my $items = shift || [];
+            $cb->(countPlayableTracks($items) || undef);
+        });
+        1;
+    };
+    $cb->(undef) unless $ok;
+    return;
+}
+
+# Best-effort native album id for a STREAMING track url, read SYNCHRONOUSLY from the
+# service's already-cached playing-track metadata (no network) — used to classify a
+# track-add's release (single vs album). Qobuz caches 'albumId', Tidal 'album_id'; Deezer's
+# getMetadataFor flattens the album to a title (dropping the id), so it yields undef there
+# and the caller stores the individual track. Guarded — any failure just returns undef.
+sub trackAlbumId {
+    my ($client, $url) = @_;
+    return undef unless defined $url && length $url;
+    my $meta = eval {
+        my $handler = Slim::Player::ProtocolHandlers->handlerForURL($url);
+        ($handler && $handler->can('getMetadataFor'))
+            ? $handler->getMetadataFor($client, $url) : undef;
+    };
+    return undef unless ref $meta eq 'HASH';
+    my $id = $meta->{albumId} || $meta->{album_id}
+        || (ref $meta->{album} eq 'HASH' ? $meta->{album}{id} : undef);
+    return (defined $id && length $id) ? $id : undef;
+}
+
+# The number of library tracks on an album id (for release-type classification at add
+# time — cheap, the count is local). 0/undef on any error.
+sub libraryTrackCount {
+    my ($albumId) = @_;
+    return 0 unless $albumId;
+    return eval {
+        Slim::Schema->search('Track', { 'album.id' => $albumId }, { join => 'album' })->count;
+    } || 0;
 }
 
 sub _libraryPlayable {
@@ -533,7 +911,21 @@ sub _serviceCan {
     return 1 if $source eq 'bandcamp' && Plugins::Bandcamp::Plugin->can('get_album');
     return 1 if $source eq 'tidal'    && Plugins::TIDAL::Plugin->can('getAlbum');
     return 1 if $source eq 'deezer'   && Plugins::Deezer::Plugin->can('getAlbum');
+    # A podcast EPISODE needs no service adapter at all — it's a single self-contained
+    # enclosure url, stored podcast://-wrapped, and replay is a straight handoff to the
+    # Podcast plugin's own protocol handler (which also keeps its resume-position
+    # tracking). So the only question is whether that handler exists on this server.
+    return 1 if $source eq 'podcast'  && _hasPodcastHandler();
     return 0;
+}
+
+# Is the built-in Podcast plugin's podcast:// protocol handler registered? Asked with a
+# representative url because handlerForURL parses the scheme off one (the same call
+# trackAlbumId already relies on).
+sub _hasPodcastHandler {
+    return eval {
+        Slim::Player::ProtocolHandlers->handlerForURL('podcast://https://example.com/e.mp3')
+    } ? 1 : 0;
 }
 
 # Normalise for fuzzy MATCHING. NB: intentionally differs from DB::_norm — this one
@@ -620,6 +1012,63 @@ sub _yearOf {
     return '' unless defined $v && !ref $v;
     return $1 if $v =~ /\b((?:19|20)\d{2})\b/;
     return '';
+}
+
+# The release year a SERVICE states on its own album hash, whatever it happens to call the
+# field. Ported from Pitchfork Reviews' _svcYear so the two read a service identically —
+# PFR was getting years off native adds that this plugin was dropping, and the difference
+# was entirely in the breadth of this lookup.
+#
+# Takes the HASH, not a string, and that is the point: the field name varies per service
+# (Qobuz release_date_original / release_date, TIDAL releaseDate / streamStartDate, Deezer
+# release_date) and asking for a fixed few means a service that spells it differently
+# silently yields nothing.
+#
+# `released_at` is Qobuz's EPOCH variant and needs converting, not pattern-matching:
+# _yearOf above deliberately refuses it (a long digit run has no 4-digit year at a word
+# boundary, so 1767225600 can't become a nonsense "1767"), which is right for a string but
+# means an album object carrying ONLY the epoch yielded no year at all. Convert it here,
+# where we know what the number is.
+#
+# Returns '' when nothing usable is present — never undef, and never a guess.
+sub serviceYear {
+    my (@hashes) = @_;
+    for my $h (@hashes) {
+        next unless ref $h eq 'HASH';
+        # Order is precedence, not taste: Qobuz's *_original is the ORIGINAL release date and
+        # *_stream is when it reached streaming, so a reissue gets the year it was actually
+        # made. release_date_stream is a Qobuz field PFR's list doesn't carry — keep it, this
+        # plugin was already reading it.
+        for my $k (qw(release_date_original release_date_stream release_date
+                      releaseDate date streamStartDate)) {
+            my $v = $h->{$k};
+            return $1 if defined $v && !ref $v && $v =~ /^((?:19|20)\d{2})/;
+        }
+        my $e = $h->{released_at};                      # Qobuz epoch
+        if (defined $e && !ref $e && $e =~ /^\d{9,}$/) {
+            my $y = (localtime($e))[5] + 1900;
+            return $y if $y >= 1900 && $y < 2100;
+        }
+        return $1 if defined $h->{year} && !ref $h->{year} && $h->{year} =~ /^((?:19|20)\d{2})/;
+    }
+    return '';
+}
+
+# The release year of a LIBRARY album, straight from the local database. Free, always
+# available, and authoritative — the mirror of libraryTrackCount.
+#
+# Needed because Material's custom action has NO $YEAR variable (its map is
+# $ALBUMNAME/$ARTISTNAME/$TITLE/$FAVURL/$IMAGE/$ALBUMID), so a library album added from a
+# Material menu arrives with no year even though $ALBUMID is passed and LMS knows the
+# answer. The year is part of the dedupe key, so a yearless row keys as 'artist|album|' and
+# the same album added from anywhere that DOES supply a year lands as a second row dedupe
+# can't see. '' on any error, matching serviceYear.
+sub libraryAlbumYear {
+    my ($albumId) = @_;
+    return '' unless $albumId && $albumId =~ /^\d+$/;
+    my $y = eval { Slim::Schema->find('Album', $albumId) };
+    $y = eval { $y->year } if $y;
+    return (defined $y && $y =~ /^((?:19|20)\d{2})$/) ? $1 : '';
 }
 
 # Like _norm but KEEPS distinguishing "(...)" content (e.g. "(LP4)") as words — only

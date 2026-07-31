@@ -15,7 +15,7 @@
 <h2>[% 'PLUGIN_LL_SECTION_PLAYED' | string %]</h2>
 
 [% WRAPPER setting title="PLUGIN_LL_WATCH_OUTSIDE" desc="PLUGIN_LL_WATCH_OUTSIDE_DESC" %]
-<input type="checkbox" name="pref_watch_outside" value="1" [% IF prefs.watch_outside %]checked="checked"[% END %]>
+<label><input type="checkbox" name="pref_watch_outside" value="1" [% IF prefs.watch_outside %]checked="checked"[% END %]> [% 'PLUGIN_LL_ENABLED' | string %]</label>
 [% END %]
 
 [% WRAPPER setting title="PLUGIN_LL_THRESHOLD" desc="PLUGIN_LL_THRESHOLD_DESC" %]
@@ -33,11 +33,11 @@
 <h2>[% 'PLUGIN_LL_SECTION_MATERIAL' | string %]</h2>
 
 [% WRAPPER setting title="PLUGIN_LL_MATERIAL_ACTION" desc="PLUGIN_LL_MATERIAL_ACTION_DESC" %]
-<input type="checkbox" name="pref_material_action" value="1" [% IF prefs.material_action %]checked="checked"[% END %]>
+<label><input type="checkbox" name="pref_material_action" value="1" [% IF prefs.material_action %]checked="checked"[% END %]> [% 'PLUGIN_LL_ENABLED' | string %]</label>
 [% END %]
 
 [% WRAPPER setting title="PLUGIN_LL_DEBUG_LOG" desc="PLUGIN_LL_DEBUG_LOG_DESC" %]
-<input type="checkbox" name="pref_debug_log" value="1" [% IF prefs.debug_log %]checked="checked"[% END %]>
+<label><input type="checkbox" name="pref_debug_log" value="1" [% IF prefs.debug_log %]checked="checked"[% END %]> [% 'PLUGIN_LL_ENABLED' | string %]</label>
 [% END %]
 
 [% IF prefs.debug_log %]

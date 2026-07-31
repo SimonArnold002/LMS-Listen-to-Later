@@ -34,7 +34,7 @@ sub handler {
         # the prefs directly here would just be overwritten. Clamp the params instead
         # and let the base class store the clean values.
         my $thr = $params->{pref_played_threshold};
-        $thr = 60  unless defined $thr && $thr =~ /^\d+$/;
+        $thr = 90  unless defined $thr && $thr =~ /^\d+$/;   # matches the pref default
         $thr = 10  if $thr < 10;
         $thr = 100 if $thr > 100;
         $params->{pref_played_threshold} = $thr + 0;
