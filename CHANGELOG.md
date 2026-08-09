@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.1.94 — Your settings stop reverting every time the server restarts
+
+### Fixed
+- **Settings you changed were being quietly undone at the next restart.** When the plugin was renamed from "Listen to Later" to "Listen Later", it copied your settings across from the old name — a one-off job that was supposed to happen once and never again. The marker recording that it had been done was never actually saved, so the copy ran again at every single start, putting your settings back to whatever they were at the rename. The default sort order, the number of streaming tracks, and how long played albums are kept were all restored to their old values on each restart, so changing them appeared to work and then silently didn't. This is fixed, and the copy now genuinely happens once.
+- **The 90% *Played* figure introduced in 0.1.93 was one of the settings being undone, which is why it never took effect.** It was applied on update exactly as intended and then overwritten with the old 60% a moment later, during the same start, every time — so albums kept moving to *Played* at 60%, and 0.1.93 looked like it hadn't shipped. Updating re-applies the 90% once. If you have since chosen your own figure, that choice is kept from now on, which it wasn't before.
+- If you had albums move to *Played* earlier than you expected and they've since been tidied away, that's the cause. Anything still in the *Played* section can be moved back to Listen Later.
+
 ## 0.1.93 — Hearing most of a release now means most of it
 
 ### Changed

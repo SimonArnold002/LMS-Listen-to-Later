@@ -13,7 +13,7 @@ use File::Temp qw(tempdir);
 require "$FindBin::Bin/t_stubs.pl";
 
 my $dir = tempdir(CLEANUP => 1);
-Slim::Utils::Prefs::set_test_pref('cachedir', $dir);
+Slim::Utils::Prefs::set_test_pref_ns('server', 'cachedir', $dir);
 
 ll_require('DB');
 

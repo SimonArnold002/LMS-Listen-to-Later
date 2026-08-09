@@ -93,7 +93,40 @@ Goal: an **"Add to Listen Later"** entry on a streaming **album row while browsi
 5. Remove / Move between sections; persists across `systemctl restart`.
 
 ## Prefs Namespace
-`plugin.listenlater` — sort, played_threshold, streaming_min_tracks, watch_outside, material_action, played_retention_days, debug_log, threshold_90_migrated.
+`plugin.listenlater` — sort, played_threshold, streaming_min_tracks, watch_outside, material_action, played_retention_days, debug_log, threshold_90_migrated, rebrand_migrated.
+
+### A PREF NAME MUST NOT START WITH `_` (0.1.94 — this cost six weeks)
+
+`Slim::Utils::Prefs::Base::set` stores a value only `if ($valid && $pref !~ /^_/)`. A pref whose
+name begins with an underscore is **DISCARDED**: no error, no warning, no return value worth
+checking, and `get` returns undef for ever after. The namespace reserves that prefix for its own
+`_ts_<pref>` write stamps.
+
+So a one-shot migration flag of that shape is not one-shot — it re-runs at **every** server start.
+`_rebrand_migrated` (0.1.25) was exactly that, and `_migrateRebrandPrefs` therefore copied the
+pre-rebrand `plugin.listentolater` namespace over the user's live settings on every restart until
+0.1.94: `sort`, `streaming_min_tracks` and `played_retention_days` all silently reverted, and
+**0.1.93's 90% threshold was overwritten with the old 60 seconds after the bump set it, in the same
+startup** — which is why that release looked like it had never shipped.
+
+**Why it hid for six weeks, which is the more useful lesson:**
+- The flag was write-only. Nothing read it back, so the failure had no symptom of its own.
+- `set` **suppresses a no-change write**, so re-importing identical values left no trace — no `_ts_`
+  update, nothing in the log. The copy only ever *changed* anything on the one restart after 0.1.93,
+  where it read as a Played bug, which is the area with a long history of real ones.
+- **0.1.93 was verified one level below where it broke.** `tracksNeeded(10) == 9` was proved offline
+  and that was taken as the release being verified. **A pref migration is only verified against the
+  live box, AFTER a restart** — `["","pref","plugin.listenlater:<name>","?"]` over `jsonrpc.js`,
+  which showed 60 the whole time.
+- **The test harness could not express it.** `t_stubs.pl`'s prefs stub stored every key and treated
+  all namespaces as one store, so both behaviours that produce the bug were absent by construction —
+  the vacuous-pass hazard sitting in the STUB rather than in an assertion. The stub now mirrors both;
+  `t_prefs_migration.pl` fails 8 ways without the fix.
+
+**`threshold_90_migrated` is now a VERSION, not a boolean** (`THRESHOLD_MIGRATION`, currently 2).
+Installs that ran it as 1 had the result thrown away, so re-applying it needed a way to say "ran, but
+not the current one". Both migrations live in **`Plugin::_migratePrefs`**, called at module load —
+a sub purely so a test can drive them twice over a prepared store.
 
 ## The Played threshold: 90%, rounded DOWN (0.1.93)
 
@@ -1052,6 +1085,31 @@ The "Add to Listen Later"/"Add to Wish List" custom actions appear on streaming 
   variable). See "Year backfill" for the per-source table and why Tidal/Deezer/Bandcamp
   natives stay yearless BY DECISION.
 
+- **0.1.94** — **The rebrand pref copy ran at EVERY server start, reverting the user's settings —
+  including 0.1.93's 90% threshold, seconds after the bump set it.** Reported as "albums move to
+  Played too early, still the old 60% behaviour"; diagnosed live in one query
+  (`played_threshold`=60 sitting next to `threshold_90_migrated`=1 — the migration had run AND its
+  result was gone), confirmed by rec 229: `is 10 track(s)` then `marked … (6 tracks, total=10)`.
+  **Cause:** `Slim::Utils::Prefs::Base::set` discards any pref matching `/^_/`, so the 0.1.25 flag
+  `_rebrand_migrated` never persisted and `_migrateRebrandPrefs` re-imported `plugin.listentolater`
+  on every start. Full rule, and why it stayed invisible for six weeks, under "Prefs Namespace"
+  above — **read that before adding any pref or migration flag.**
+  **Fix, three parts.** (1) The flag is `rebrand_migrated`, underscore-free, so the copy is genuinely
+  one-shot. (2) Existing installs are SEEDED as already-copied, gated on `threshold_90_migrated` as
+  the "not a new install" proxy — otherwise the newly-working copy would run one final time and
+  re-import the very 60 this release removes; a fresh install is deliberately NOT seeded, so a
+  genuine pre-0.1.25 upgrader still gets their settings. (3) `threshold_90_migrated` becomes a
+  VERSION (`THRESHOLD_MIGRATION` = 2) so the bump re-applies once for every install whose version-1
+  run was undone, while a value chosen after that is left alone. Both migrations moved into
+  `Plugin::_migratePrefs`.
+  **`t_stubs.pl`'s prefs stub now mirrors the server on the two points that produce this bug** — the
+  underscore discard, and namespaces as SEPARATE stores (a stub that conflates them makes the copy
+  between them look like a no-op, hiding the thing worth testing). Consequence for existing suites:
+  `cachedir` must be set with `set_test_pref_ns('server', …)`, since `DB::_path` reads it from the
+  `server` namespace. Covered by `t_prefs_migration.pl`, anti-tested (8 failures against the old
+  code, the decisive one reproducing the live symptom exactly: `90 survives the copy that used to
+  undo it → got '60'`).
+
 ## Regression tests — RUN THESE BEFORE ANY BUILD (added 2026-07-29)
 
     sh tools/t_all.sh          # one line per suite, non-zero exit on any failure
@@ -1079,6 +1137,7 @@ session scratchpads and are gone — so nothing carried forward. Anything worth 
 | `t_favurl.pl` | the private favurl handshake (`Plugin::_stripPrivateParams`): `?cover=`/`?b=`/`&a=`/`&y=`/`&al=`/`&rt=`/`&tc=` — what each yields, that junk is stripped-but-rejected, that `&a=` can't eat `&al=`, that `&rt=`+`&tc=` really do reach `singleIsWrong`, and that a NATIVE favurl comes back byte-for-byte unchanged with no field set. Calls the real sub — see the `&tc=` lesson below |
 | `t_addpath.pl` | the ADD PATH end to end — a Material action into `_addCtxCommand`, out as a row in SQLite. Also 0.1.92's `ref.svc_title`: that the service label is kept when it differs and not when it doesn't, that a play of the QUALIFIED title finds the row while a different artist's doesn't, and that the dedupe key still ignores the label. What the handshake params become on the stored row, that `&tc=` settles the type but never fills `track_count`, that the cross-kind single dedupe eats a REAL single but not a disproved one, that an UNKNOWN type defers instead of inserting a guess, and that unreplayable/unidentifiable adds are refused. Needs no service: the whole path asks only `client`/`getParam`/`setStatusDone`/`setStatusProcessing`/`addResult`/`addResultLoop`, and `client => undef` makes the background jobs no-op. **The service plugins must be declared** (`_serviceCan`) or the gate rejects everything and every assertion passes against an empty DB |
 | `t_resolve_count.pl` | what a resolve writes BACK to the row (`Browse::_albumTracks`): a FAILED resolve records nothing and never clobbers a real `track_count`/`rel_type`, Bandcamp helper-only rows count as a failure too, and 0.1.88's successful-resolve refresh + forced single-correction still work. Plus `Sources::hasDirectAlbumRef` — whether a row's tracklist costs one album call or a whole service SEARCH (the Bandcamp page-url case), which is what gates background work |
+| `t_prefs_migration.pl` | 0.1.94's pref migrations and the rule that makes them one-shot: that a leading-underscore pref cannot be stored at all (pinning the stub against `Slim::Utils::Prefs::Base::set` — if that assertion ever passes with a value, every other one here stops meaning anything), that the rebrand copy runs once and never reverts a later choice, that an install which already ran the broken copy isn't copied over again, and that the threshold bump re-applies exactly once. Runs the two migrations in the real startup order — the ordering IS the bug — for both an install that carries a pre-rebrand namespace and one that doesn't. **A real user's box is the second shape**: the rebrand landed in 0.1.25 and the first release was tagged v0.1.69, so no installed copy ever wrote a `plugin.listentolater` pref and the copy has nothing to import. `reset_prefs` seeds that namespace (Simon's dev box, the only one that ran the pre-rebrand code); `reset_prefs_no_legacy` doesn't — pick the one that matches the install you mean, or an assertion proves the wrong thing |
 | `t_load.pl` | every shipped module compiles AND loads, plus a called-vs-defined sweep — `perl -c` passes on a call to a sub that doesn't exist, which nearly shipped a runtime crash in 0.1.83 |
 
 Two rules that follow from how this suite is built:
@@ -1108,6 +1167,11 @@ Two rules that follow from how this suite is built:
   service, is not covered here — `tools/t_all.sh` proves logic, not integration. Live checks go
   through `curl http://plex:9000/log.txt` (see the testing note above) and their results belong in
   this file.
+- **A PREF MIGRATION IS NOT VERIFIED UNTIL THE LIVE PREF IS READ BACK AFTER A RESTART.** A suite can
+  only prove the migration computes the right value; whether that value SURVIVES startup is a
+  property of the running server, and 0.1.94 is what happens when the two are confused — the
+  arithmetic was proved offline and the pref was 60 on the box the whole time. One query settles it:
+  `["","pref","plugin.listenlater:<name>","?"]` over `jsonrpc.js`.
 
 ## `&al=` carries the SERVICE's album title — FLEET RULE (SETTLED 2026-07-30)
 

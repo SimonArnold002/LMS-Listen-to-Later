@@ -37,19 +37,43 @@ use warnings;
     $INC{'Slim/Utils/Log.pm'} = __FILE__;
 }
 
-# Slim::Utils::Prefs — preferences('server')->get('cachedir') must return a real
-# writable directory (DB::_path builds the SQLite path from it); every other pref
-# reads undef unless a test sets it via Slim::Utils::Prefs::set_test_pref().
+# Slim::Utils::Prefs — a pref reads undef unless a test sets it, with set_test_pref() for
+# the plugin's own namespace and set_test_pref_ns() for any other. DB::_path builds the
+# SQLite path from preferences('server')->get('cachedir'), so a suite touching the DB sets
+# that one on the 'server' namespace or lands in /tmp.
+#
+# Two behaviours of the real thing are reproduced here because plugin code depends on
+# them and got both wrong (0.1.94):
+#
+#   * A pref whose name starts with '_' is silently DISCARDED by set. The server stores
+#     only `if ($valid && $pref !~ /^_/)` (Slim::Utils::Prefs::Base::set) — no error, no
+#     warning, and get() returns undef for ever after. A one-shot migration flag of that
+#     shape therefore re-runs on every single start.
+#   * Namespaces are SEPARATE stores. The plugin reads its own AND the pre-rebrand
+#     `plugin.listentolater` one, and a stub that conflated them would make the copy
+#     between them look like a no-op — hiding exactly the bug worth testing.
+#
+# %VALUES stays the plugin's own namespace so set_test_pref and every existing suite are
+# unaffected; other namespaces get their own store in %NAMESPACES.
 {
     package Slim::Utils::Prefs;
     require Exporter; our @ISA = ('Exporter'); our @EXPORT = ('preferences');
-    our %VALUES;
-    sub preferences { return bless {}, 'Slim::Utils::Prefs::Obj' }
+    our %VALUES;                        # the plugin's own namespace
+    our %NAMESPACES;                    # every other namespace, keyed by name
+    our $NS = 'plugin.listenlater';
+    sub _store {
+        my ($ns) = @_;
+        return \%VALUES if !defined $ns || $ns eq $NS;
+        return $NAMESPACES{$ns} ||= {};
+    }
+    sub preferences { return bless { ns => $_[0] }, 'Slim::Utils::Prefs::Obj' }
     sub set_test_pref { $VALUES{$_[0]} = $_[1] }
+    sub set_test_pref_ns { my ($ns,$k,$v) = @_; _store($ns)->{$k} = $v }
     package Slim::Utils::Prefs::Obj;
-    sub get { return $Slim::Utils::Prefs::VALUES{$_[1]} }
-    sub set { $Slim::Utils::Prefs::VALUES{$_[1]} = $_[2] }
-    sub init { my (undef,$h) = @_; $Slim::Utils::Prefs::VALUES{$_} //= $h->{$_} for keys %$h; }
+    sub _s   { return Slim::Utils::Prefs::_store($_[0]->{ns}) }
+    sub get  { return $_[0]->_s->{ $_[1] } }
+    sub set  { return if $_[1] =~ /^_/; $_[0]->_s->{ $_[1] } = $_[2] }
+    sub init { my ($self,$h) = @_; my $s = $self->_s; $s->{$_} //= $h->{$_} for keys %$h; }
     sub setValidate {} sub setChange {} sub migrateClient {} sub AUTOLOAD {} sub DESTROY {}
     $INC{'Slim/Utils/Prefs.pm'} = __FILE__;
 }

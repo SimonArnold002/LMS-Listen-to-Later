@@ -45,9 +45,26 @@ $prefs->init({
     played_retention_days => 7,        # auto-remove Played albums after N days (0 = keep forever)
     debug_log            => 0,         # verbose diagnostics for the Material custom-action wiring
     material_debug_snapshot => '',     # latest debug dump (set by _dumpMaterialState; shown in Settings)
-    threshold_90_migrated => 0,        # one-off 60% -> 90% bump has run (see below)
+    threshold_90_migrated => 0,        # VERSION of the 60% -> 90% bump that has run (see below)
+    rebrand_migrated      => 0,        # the pre-rebrand pref copy has run (see _migrateRebrandPrefs)
 });
 
+# A PREF-MIGRATION FLAG MUST NOT START WITH AN UNDERSCORE.
+#
+# `Slim::Utils::Prefs::Base::set` stores a value only `if ($valid && $pref !~ /^_/)` — a pref
+# whose name begins with `_` is DISCARDED, with no error, no warning and no return value to
+# check, and `get` then returns undef for ever. (The namespace reserves that prefix for its own
+# `_ts_<pref>` write stamps.) `_rebrand_migrated`, the one-shot flag added with the 0.1.25
+# rebrand, was exactly that shape — so it never persisted and `_migrateRebrandPrefs` ran on
+# EVERY server start, copying the pre-rebrand `plugin.listentolater` namespace over the user's
+# current settings each time.
+#
+# That is what made 0.1.93 look like it hadn't shipped: the bump below set 90 at module load and
+# `initPlugin` overwrote it with the old namespace's 60 seconds later, on every restart. Diagnosed
+# live 2026-07-31 — `played_threshold`=60 alongside `threshold_90_migrated`=1, `_rebrand_migrated`
+# undef, and both `_ts_` stamps sitting on the last restart. It silently reverted every Settings
+# change to `sort` / `streaming_min_tracks` / `played_retention_days` too.
+#
 # The Played threshold moved from 60% to 90% once a release's length stopped being GUESSED
 # from its type and started being MEASURED from its real tracklist (2026-07-30): 60% of a
 # number we half-trusted was a hedge, and there is nothing left to hedge against.
@@ -57,9 +74,34 @@ $prefs->init({
 # gated on its own flag so it can never fight a user who then picks their own value in
 # Settings. Deliberately unconditional on the current value rather than "only if it's still
 # 60" — this is a change of default for everyone, not a repair of one setting.
-if (!$prefs->get('threshold_90_migrated')) {
-    $prefs->set('played_threshold', 90);
-    $prefs->set('threshold_90_migrated', 1);
+#
+# The flag is a VERSION, not a boolean (0.1.94). Every install that ran it as version 1 had the
+# bump undone within the same startup by the broken rebrand copy above, so the setting they are
+# actually running is still 60 while the flag says the migration is done. Version 2 re-applies it
+# once, now that the copy can no longer overwrite it. A user who deliberately chose 60 in the
+# meantime never kept it either — it was being rewritten from the old namespace at every restart —
+# so there is no considered choice here to overrule.
+use constant THRESHOLD_MIGRATION => 2;
+
+_migratePrefs();
+
+# Both one-shot pref migrations, in a sub purely so a test can drive them over a prepared
+# store — the bug they exist to fix is a migration that ran when it shouldn't have, and
+# top-level code that runs once per process can't be asked to do that twice.
+sub _migratePrefs {
+    # Mark the rebrand copy done for anyone who has been here before, so the properly-gated
+    # version in _migrateRebrandPrefs cannot run one final time and re-import the very values
+    # this release exists to stop. `threshold_90_migrated` is the proxy for "this install is
+    # not new": only a fresh install lacks it, and a fresh install has nothing to migrate.
+    if (!$prefs->get('rebrand_migrated') && $prefs->get('threshold_90_migrated')) {
+        $prefs->set('rebrand_migrated', 1);
+    }
+
+    if (($prefs->get('threshold_90_migrated') || 0) < THRESHOLD_MIGRATION) {
+        $prefs->set('played_threshold', 90);
+        $prefs->set('threshold_90_migrated', THRESHOLD_MIGRATION);
+    }
+    return;
 }
 
 # Verbose diagnostics, gated on the `debug_log` pref so a user can turn them on from
@@ -147,14 +189,19 @@ sub initPlugin {
 # Copy prefs from the pre-rebrand namespace (plugin.listentolater) into ours once.
 # Runs after $prefs->init (top of module), so it overrides defaults with the user's
 # previous values where they were set.
+#
+# ONCE is the whole contract, and until 0.1.94 it was not honoured: the flag was
+# `_rebrand_migrated`, which a leading underscore made unstorable, so this ran at every
+# start and reverted the user's settings to their 0.1.25-era values. See the note beside
+# $prefs->init. The flag must stay underscore-free.
 sub _migrateRebrandPrefs {
-    return if $prefs->get('_rebrand_migrated');
+    return if $prefs->get('rebrand_migrated');
     my $old = preferences('plugin.listentolater');
     for my $k (qw(sort played_threshold streaming_min_tracks watch_outside material_action played_retention_days)) {
         my $ov = $old->get($k);
         $prefs->set($k, $ov) if defined $ov;
     }
-    $prefs->set('_rebrand_migrated', 1);
+    $prefs->set('rebrand_migrated', 1);
     $log->info('Listen Later: migrated prefs from plugin.listentolater');
     return;
 }
