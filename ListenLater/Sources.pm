@@ -102,6 +102,49 @@ sub sourceFromImage {
     return '';
 }
 
+# Every source tag `sourceFromUrl`/`sourceFromImage` can produce. NOT the list of services we
+# can REPLAY (that's `_serviceCan`) — deezer/spotify belong here precisely so an add naming
+# them still reaches the reject gate under their own name, exactly as before.
+my %KNOWN_SOURCE = map { $_ => 1 } qw(qobuz tidal bandcamp deezer spotify);
+
+# Is this string actually the name of a service we recognise?
+#
+# The caller's problem is that Material's `$SERVICE` is NOT a service tag — it's the browse
+# COMMAND of whatever menu the row came from (`data.params[1][0]`), and on a Material HOME SHELF
+# that command is the home-extra id. The stock Qobuz plugin registers its shelves as
+# `QobuzExtrasqobuz` ("Qobuz"), `QobuzExtrasnew-releases-full`, … — so entering Qobuz from the
+# home screen instead of Apps sends svc='QobuzExtrasqobuz' for the very same rows.
+#
+# So a SHAPE test (`^[a-z0-9]+$`, which only ever meant to reject Material's unpopulated literal
+# "$SERVICE" and hyphenated non-services) is not enough: an all-alphanumeric shelf id passes it,
+# becomes `$source`, and short-circuits the cover-URL sniff that would have got the answer right.
+# That is why the hyphenated shelves worked and `QobuzExtrasqobuz` did not.
+#
+# Deliberately an EXACT match, never a substring: 'QobuzExtrasqobuz' contains 'qobuz', and so
+# would a hypothetical 'tidalqobuz' — matching loosely would just trade this bug for a subtler one.
+sub knownSource {
+    my ($s) = @_;
+    return 0 unless defined $s && length $s;
+    return $KNOWN_SOURCE{ lc $s } ? 1 : 0;
+}
+
+# Our OWN browse surfaces, by the command Material passes as $SERVICE: the plugin's list
+# view (the dispatch verb, 'listenlater') and its Material home shelf (the home-extra tag,
+# 'LLHome'), plus both pre-rebrand spellings — a stale actions.json outlives the rename.
+#
+# Kept here, next to knownSource, because the two answer the same question about the same
+# untrusted string and the caller must ask BOTH: knownSource says "this doesn't name a
+# service", which since 0.1.96 means "fall through to the cover sniff" — and on one of our
+# own rows that sniff succeeds, because our cards carry the ORIGINAL streaming cover. Only
+# an explicit name can tell those two cases apart.
+my %OWN_SURFACE = map { lc($_) => 1 } qw(listenlater LLHome listentolater LtLHome);
+
+sub ownSurface {
+    my ($s) = @_;
+    return 0 unless defined $s && length $s;
+    return $OWN_SURFACE{ lc $s } ? 1 : 0;
+}
+
 # Recover the Qobuz album id from its cover URL. Qobuz browse rows carry NO
 # favorites_url / album id, but they DO carry a cover whose filename IS the album id:
 #   …/static.qobuz.com/images/covers/<xx>/<yy>/<ALBUMID>_<size>.jpg

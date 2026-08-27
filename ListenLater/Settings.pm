@@ -56,16 +56,25 @@ sub handler {
         $prefs->set('material_action', $params->{pref_material_action} ? 1 : 0);
         $prefs->set('debug_log',       $params->{pref_debug_log}       ? 1 : 0);
 
-        # Rewrite Material's actions.json now so the diagnostics snapshot shown on the page
-        # reflects the current state (otherwise the user would enable debug logging, save,
-        # and see nothing until the next restart). _writeMaterialActions writes the snapshot
-        # pref when debug_log is on. Guarded exactly like postinitPlugin — only touch the
-        # shared file when the feature is on and Material is installed.
-        if ( $prefs->get('debug_log')
-          && $prefs->get('material_action')
-          && Slim::Utils::PluginManager->isEnabled('Plugins::MaterialSkin::Plugin') ) {
-            eval { Plugins::ListenLater::Plugin::_writeMaterialActions(); 1 }
-                or $log->error("LL: settings-page diagnostics rewrite failed: $@");
+        # Re-run Material's actions.json write now, mirroring postinitPlugin's two branches
+        # exactly, so the toggle takes effect on THIS save rather than at the next restart:
+        #   * ON  — _writeMaterialActions writes the full set to the file. It cannot register
+        #           (registerCustomAction has no de-dupe and no unregister, so it runs once
+        #           per server run, in postinit), and that is precisely why the file write is
+        #           what makes turning it on mid-run work at all.
+        #   * OFF — _clearMaterialActions strips our entries from the shared file. Anything
+        #           registered at startup can only go at the next restart; it says so.
+        # debug_log deliberately does NOT gate this — it gates only the diagnostics SNAPSHOT
+        # that _writeMaterialActions stashes for the textarea below. Gating the write on it
+        # (as we did before 0.1.97) meant the Material toggle silently did nothing on the
+        # default config, where debug logging is off.
+        if ( Slim::Utils::PluginManager->isEnabled('Plugins::MaterialSkin::Plugin') ) {
+            eval {
+                $prefs->get('material_action')
+                    ? Plugins::ListenLater::Plugin::_writeMaterialActions()
+                    : Plugins::ListenLater::Plugin::_clearMaterialActions();
+                1;
+            } or $log->error("LL: settings-page Material action rewrite failed: $@");
         }
 
         $log->info('Listen Later settings saved');

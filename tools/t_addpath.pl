@@ -50,6 +50,13 @@ sub is {
     printf "%s %-58s got=%-14s want=%s\n", ($ok ? 'ok  ' : 'FAIL'), $desc,
         (defined $got ? "'$got'" : '(undef)'), (defined $want ? "'$want'" : '(undef)');
 }
+sub like {
+    my ($desc, $got, $re) = @_;
+    my $ok = defined $got && $got =~ $re;
+    $ok ? $pass++ : $fail++;
+    printf "%s %-58s got=%s\n", ($ok ? 'ok  ' : 'FAIL'), $desc,
+        (defined $got ? "'$got'" : '(undef)');
+}
 sub section { printf "\n== %s\n", $_[0] }
 
 # The request surface the add path uses. Six methods, taken from a sweep of every
@@ -57,9 +64,12 @@ sub section { printf "\n== %s\n", $_[0] }
 # just _addCtxCommand/_finishAlbumAdd misses.
 {
     package FakeRequest;
-    sub new      { my ($c, %p) = @_; return bless { p => \%p, done => 0, res => {} }, $c }
+    # `_client` is pulled OUT of the params (it isn't one) — pass it only for the Now
+    # Playing cases, since a live client is what opens the now-playing fallback.
+    sub new      { my ($c, %p) = @_; my $cl = delete $p{_client};
+                   return bless { p => \%p, cl => $cl, done => 0, res => {} }, $c }
     sub getParam { return $_[0]{p}{ $_[1] } }
-    sub client   { return undef }                 # no player: background jobs no-op
+    sub client   { return $_[0]{cl} }             # undef by default: background jobs no-op
     sub setStatusDone       { $_[0]{done}++ }
     sub setStatusProcessing { $_[0]{processing}++ }
     sub addResult           { $_[0]{res}{ $_[1] } = $_[2] }
@@ -317,6 +327,318 @@ is('an unidentifiable row is rejected',
    (defined add(name => 'W/C 22 June', svc => 'material-skin-client',
                 image => 'plugins/ListenBrainz/weekly.png') ? 'stored' : 'rejected'),
    'rejected');
+
+# The reject is SILENT to the user by necessity (Material renders no toast for a custom-action
+# command), so this one warn line is the entire trace it leaves — and triage of "Add did
+# nothing" is driven by it. Since 0.1.96 an unrecognised container verb leaves $source an
+# EMPTY STRING, which '// ?' does not catch, so the line said "unsupported source ''" and
+# named neither the source nor the surface. Assert on what it actually prints.
+sub reject_line {
+    my (%p) = @_;
+    Slim::Utils::Log::clear();
+    add(%p);
+    my ($l) = grep { /rejected add/ } Slim::Utils::Log::lines();
+    return $l // '(nothing logged)';
+}
+like('an empty source is named as such, not as an empty quote',
+     reject_line(name => 'Darko.Audio #123', svc => 'favorites',
+                 image => 'https://darko.audio/ep123.jpg'),
+     qr/unsupported source \(none identified\)/);
+like('...and the container verb is named, since that IS the surface',
+     reject_line(name => 'Darko.Audio #123', svc => 'favorites',
+                 image => 'https://darko.audio/ep123.jpg'),
+     qr/via container 'favorites'/);
+like('a source we DID identify is still quoted as before',
+     reject_line(name => 'Something', svc => 'spotify', favurl => 'spotify://album:x'),
+     qr/unsupported source 'spotify'/);
+like('...and an add with no container verb claims none',
+     reject_line(name => 'Mystery Row'),
+     qr/unsupported source \(none identified\) \(Mystery Row\)/);
+
+section('a home-shelf browse verb is not a service name (the QobuzExtrasqobuz bug)');
+# Material's $SERVICE is the browse COMMAND (`data.params[1][0]`), and on a HOME SHELF that
+# command is the home-extra id — verified live: the stock Qobuz plugin registers
+# `3rdparty_QobuzExtrasqobuz` ("Qobuz"), and `["QobuzExtrasqobuz","items",…]` returns the
+# identical 11-item Qobuz app menu. So entering Qobuz from the home screen rather than Apps
+# sends a svc that merely LOOKS like a service tag. The old `^[a-z0-9]+$` shape test accepted
+# it, made $svc truthy, and short-circuited the `||` before the cover sniff — which had the
+# right answer all along, in the static.qobuz.com URL.
+my $qcover = '/imageproxy/https%3A%2F%2Fstatic.qobuz.com%2Fimages%2Fcovers%2Fve%2Fdj%2Fvafgxaiq1djve_600.jpg/image.jpg';
+
+# A favurl-less browse row carries no '&rt=', so this path goes through _classifyThenAdd and
+# only inserts once the service answers. Qobuz answers from its album OBJECT, so stub that one
+# call and let it call back inline — everything else on the path stays real, including the
+# album id, which _addCtxCommand recovers from the cover URL and passes to getAlbum.
+{
+    no strict 'refs';
+    *{'Plugins::Qobuz::Plugin::getAPIHandler'} = sub { bless {}, 'FakeQobuzAPI' };
+    package FakeQobuzAPI;
+    sub can     { my ($s,$m) = @_; return $m eq 'getAlbum' ? \&getAlbum : undef }
+    sub getAlbum { my ($s,$cb,$id) = @_; $cb->({ release_type => 'album', tracks_count => 12 }) }
+}
+
+$r = add(name => 'Hazel Eyes (Hi-Res)', artist => 'Sam Smith',
+         svc => 'QobuzExtrasqobuz', image => $qcover);
+is('a home-shelf verb still resolves to the service', ($r ? $r->{source} : 'REJECTED'), 'qobuz');
+# Not just stored under the right name — the cover is also where the album id comes from, so
+# this proves the whole downstream identity survived rather than merely the gate passing.
+is('and the album id is still recovered',
+   ($r ? ($r->{ref}{album_id} // 'none') : 'REJECTED'), 'vafgxaiq1djve');
+
+# The Apps route sends the bare tag for the very same row; it must be untouched.
+$r = add(name => 'Hazel Eyes 2 (Hi-Res)', artist => 'Sam Smith', svc => 'qobuz', image => $qcover);
+is('the Apps browse verb is unaffected',   ($r ? $r->{source} : 'REJECTED'), 'qobuz');
+
+# Its HYPHENATED sibling shelves always worked — they failed the shape test and so fell through
+# to the cover sniff by accident. That accident is now the deliberate path; pin it, because it
+# is the evidence that this was never a Material bug to wait on.
+$r = add(name => 'Hazel Eyes 3 (Hi-Res)', artist => 'Sam Smith',
+         svc => 'QobuzExtrasnew-releases-full', image => $qcover);
+is('a hyphenated shelf verb keeps working', ($r ? $r->{source} : 'REJECTED'), 'qobuz');
+
+# A REAL service name still wins over the cover, even when the two disagree and the named one
+# can't be replayed. knownSource is not a replayability test — spotify belongs in it precisely
+# so this add is refused under its own name instead of being re-sniffed into a qobuz row.
+is('a known-but-unsupported svc is not re-sniffed from the cover',
+   (defined add(name => 'Wrong Service', artist => 'X', svc => 'spotify', image => $qcover)
+        ? 'stored' : 'rejected'),
+   'rejected');
+
+# And an unrecognised verb with nothing to fall back on is still refused — the 0.1.53 rule.
+# The existing case uses a hyphenated svc, which the OLD shape test also rejected; this one is
+# all-alphanumeric, so only knownSource can be what turns it away.
+is('an all-alphanumeric unknown verb with no service cover is rejected',
+   (defined add(name => 'New Releases for You', svc => 'LBFForYou',
+                image => 'plugins/ListenBrainz/weekly.png') ? 'stored' : 'rejected'),
+   'rejected');
+
+section('an add from OUR OWN surfaces is refused by the command, not just hidden');
+# Every row in our list view / home shelf is ALREADY saved, so re-adding one bounces a Played
+# album back to Listen Later. The empty 'listenlater-*'/'LLHome-*' categories hide the button,
+# but a written category is not a gate — Material caches customactions.json (the 0.1.57
+# post-upgrade window), and a home shelf's $SERVICE is the shelf id, which those categories
+# were never certain to match.
+#
+# This used to be gated by ACCIDENT: the old shape test made svc='LLHome' the $source, and an
+# unreplayable source was rejected downstream. knownSource leaves it empty so a home-shelf row
+# can be identified from its cover — and OUR cards carry the original streaming cover, so the
+# sniff answers 'qobuz' and the re-add went through. That is what the reject list closes.
+# Every case below uses a DISTINCT title on purpose. Sharing one lets the cross-kind dedupe
+# drop the second add, which reads as "rejected" here and would let these pass with the guard
+# removed — anti-tested, and that is exactly how it failed.
+is('a card in our own home shelf is not re-addable, cover or no cover',
+   (defined add(name => 'Own Shelf Album', artist => 'Sam Smith',
+                svc => 'LLHome', image => $qcover) ? 'stored' : 'rejected'),
+   'rejected');
+is('...nor a row in the plugin list view',
+   (defined add(name => 'Own List Album', artist => 'Sam Smith',
+                svc => 'listenlater', image => $qcover) ? 'stored' : 'rejected'),
+   'rejected');
+# A stale actions.json outlives the rename, so the pre-rebrand spellings must be refused too.
+is('...nor either pre-rebrand spelling',
+   join(',', map {
+       defined add(name => "Pre-rebrand $_", artist => 'Sam Smith',
+                   svc => $_, image => $qcover) ? 'stored' : 'rejected'
+   } qw(LtLHome listentolater)),
+   'rejected,rejected');
+# The guard sits ahead of EVERY branch, so neither a track-shaped favurl nor a kind:podcast
+# category can route around it — both are rows that are already in the list as well.
+is('a track row in our own surface takes the same answer',
+   (defined add(name => 'Own Shelf Track', svc => 'LLHome', kind => 'track',
+                favurl => 'qobuz://12345.flac') ? 'stored' : 'rejected'),
+   'rejected');
+# On the podcast branch the assertion has to be the REASON, not the outcome: with no feeds
+# subscribed in this harness the episode is refused anyway, so "rejected" alone proves nothing
+# about the guard. The reject line names which gate turned it away.
+like('...and a saved podcast episode is turned away by THIS gate, not the empty-feeds one',
+     reject_line(name => 'Own Shelf Episode', svc => 'LLHome', kind => 'podcast',
+                 image => 'https://darko.audio/ep123.jpg'),
+     qr/row is already in Listen Later/);
+like('the log says the row was already ours, not that the source was unsupported',
+     reject_line(name => 'Own Shelf Album 2', artist => 'Sam Smith',
+                 svc => 'LLHome', image => $qcover),
+     qr/row is already in Listen Later.*via container 'LLHome'/);
+# Positive control, and the same exact-match discipline knownSource is held to: the list is of
+# NAMES, never prefixes. A foreign command that merely starts with one of ours is not ours, and
+# widening the test would quietly start refusing another plugin's adds.
+is('a verb that merely BEGINS with one of ours is not treated as ours',
+   (add(name => 'Hazel Eyes 4 (Hi-Res)', artist => 'Sam Smith',
+        svc => 'LLHomeworkHelper', image => $qcover) || {})->{source} // 'REJECTED',
+   'qobuz');
+
+section('the Now Playing fallback is for Now Playing, not for every empty source');
+# The fallback recovers the source from the PLAYING track when an add arrives with nothing to
+# identify it. It has to fail OPEN on the match guard, because a streaming Track row exposes
+# no album/artist to match against (Qobuz/Tidal serve that dynamically) — so what stops it
+# adopting an unrelated playing track is the gate at the call site, not the guard inside it.
+#
+# 0.1.96 widened that hole: `svc` is now only believed when it NAMES a service, so every
+# CONTAINER command that isn't one (favorites, search, bbcsounds, a home-shelf id) leaves
+# $source empty — which is exactly what opens the gate. A podcast episode added from
+# Favourites while a Qobuz track played would be stored as a qobuz album. The gate therefore
+# also requires that NO svc arrived at all: Material's Now Playing action ($trackCmd) carries
+# no `svc:` param, so a populated one means a browse row, not the Now Playing panel.
+{
+    package FakeSong;
+    sub new          { my ($c, $t) = @_; return bless { t => $t }, $c }
+    sub track        { return $_[0]{t} }
+    sub currentTrack { return $_[0]{t} }
+    package FakeNPTrack;
+    # A streaming track as LMS really holds one: a service play url and NO metadata —
+    # ->albumname/->artistName come back empty (confirmed live on a qobuz:// track).
+    sub new        { my ($c, %p) = @_; return bless {%p}, $c }
+    sub url        { return $_[0]{url} }
+    sub album      { return undef }
+    sub albumname  { return '' }
+    sub artistName { return '' }
+    # The one thing a streaming Track DOES answer. Named here so the track-path cases below
+    # can tell "stored the playing song" from "stored the row that was tapped".
+    sub title      { return $_[0]{title} }
+    package FakeClient;
+    sub new        { my ($c, $s) = @_; return bless { s => $s }, $c }
+    sub playingSong { return $_[0]{s} }
+    sub id          { return 'aa:bb:cc:dd:ee:ff' }
+}
+my $playing = FakeClient->new(FakeSong->new(
+    FakeNPTrack->new(url => 'qobuz://12345.flac', title => 'TRACK ONE (playing)')));
+
+# The reported shape: a podcast episode from Favourites. No favurl, no id, a container verb
+# that is not a service, an image no cover sniff recognises — and a Qobuz track playing.
+$r = add(_client => $playing,
+         name   => 'Darko.Audio podcast #123',
+         artist => 'Darko.Audio',
+         svc    => 'favorites',
+         image  => 'https://darko.audio/wp-content/uploads/ep123.jpg');
+is('a browse row does NOT adopt the playing track',
+   (defined $r ? "STORED as $r->{source}" : 'rejected'), 'rejected');
+
+# ...and the fallback itself still works, or the line above would pass by simply being off.
+# No svc at all + a live client = the Now Playing panel, which is what it exists for.
+$r = add(_client => $playing, name => 'Moisturizer II (2025)', artist => 'Wet Leg');
+is('a real Now Playing add still recovers the source',
+   (defined $r ? $r->{source} : 'REJECTED'), 'qobuz');
+is('...with the year stripped off Material\'s "Album (YYYY)" label', ($r ? $r->{year} : undef), 2025);
+is('...and the label itself cleaned', ($r ? $r->{album_title} : undef), 'Moisturizer II');
+
+# ---------------------------------------------------------------------------
+section('the TRACK path has the same fallback, and needs a gate of its own');
+# _nowPlayingTrackFallback has NO match guard by design, so the call-site gate is the only
+# thing standing between a tapped row and whatever is playing. The album path's "no svc"
+# test does not transfer on its own: `queue-track` and the Now Playing panel are the SAME
+# lmscommand ($trackCmd), so a queue row also arrives with no svc. The track id is what
+# separates them — the Now Playing item has neither id nor favurl to substitute, while any
+# real row carries one.
+
+# Tap "Add" on a queue row while row 1 plays, with an id that resolves to NOTHING on this
+# server (a stale row from a browser tab whose queue has moved on). There is no play url to
+# be had, and adopting the playing song for it is the bug — so it is refused.
+$r = add(_client => $playing, kind => 'track',
+         trackname => 'Track Seven (tapped)', name => 'Some Album', artist => 'The Band',
+         trackid => '-1', favurl => '');
+is('a tapped row whose id resolves to nothing does NOT adopt the playing song',
+   (defined $r ? "STORED '" . ($r->{track_title} // '') . "'" : 'rejected'), 'rejected');
+
+# An online track row whose service sent no favurl. Here svc IS populated, so this one the
+# album path's test would have caught — assert it anyway, since it is a second live shape.
+$r = add(_client => $playing, kind => 'track',
+         trackname => 'Some Stream', artist => 'Someone', svc => 'qobuz', favurl => '');
+is('...nor does an online-track row with a container verb',
+   (defined $r ? "STORED '" . ($r->{track_title} // '') . "'" : 'rejected'), 'rejected');
+
+# ...and the fallback still works, or both assertions above pass with it simply switched off.
+# No svc, no trackid, no favurl, a live client: the Now Playing panel.
+$r = add(_client => $playing, kind => 'track',
+         name => 'Moisturizer II', artist => 'Wet Leg');
+is('a real Now Playing TRACK add still recovers the playing song',
+   ($r ? $r->{track_title} : 'REJECTED'), 'TRACK ONE (playing)');
+is('...as a track row, playable by the recovered url',
+   ($r ? "$r->{kind}|$r->{ref}{url}" : undef), 'track|qobuz://12345.flac');
+
+# ---------------------------------------------------------------------------
+section('a REMOTE queue row is resolved by its id, not refused for having one');
+# The gate above rejects on the PRESENCE of a track id, and a streaming queue row is the one
+# shape that arrives with an id and nothing else: Material builds the row id as
+# "track_id:"+i.id and substitutes it into $TRACKID, while queue rows carry no presetParams
+# at all, so $FAVURL is empty. LMS gives a remote track a NEGATIVE id (verified live: the
+# status query serves id=-94606967849352 for qobuz://420282127.flac), so refusing to resolve
+# a non-positive id made every remote queue row unaddable — including the playing one.
+# Resolve it instead: row 7 stores row 7, and the gate is untouched.
+Slim::Schema::add_test_track(
+    id => -94606967849352, url => 'qobuz://420282127.flac',
+    title => 'Cleveland', artist => 'Squirrel Flower',
+    album => 'Say a Prayer to the Gods of Getting Going');
+
+$r = add(_client => $playing, kind => 'track',
+         trackname => 'Cleveland', name => 'Say a Prayer to the Gods of Getting Going',
+         artist => 'Squirrel Flower', trackid => '-94606967849352', favurl => '');
+is('a remote queue row is stored', (defined $r ? 'stored' : 'REJECTED'), 'stored');
+# The decisive one: TRACK ONE (playing) is what the now-playing fallback would have supplied.
+is('...as the row that was TAPPED, not the song that was playing',
+   ($r ? $r->{track_title} : undef), 'Cleveland');
+is('...with the TAPPED row\'s play url',
+   ($r ? $r->{ref}{url} : undef), 'qobuz://420282127.flac');
+# The other half of the same edit: the id branch used to hardcode source 'library', which
+# would have filed a qobuz:// url as a library row — unplayable, and it would never dedupe
+# against the same album added from Qobuz.
+is('...and the source read off that url, not hardcoded library',
+   ($r ? $r->{source} : undef), 'qobuz');
+
+# A LIBRARY queue row takes the same branch and must be unchanged — the metadata still comes
+# from the Album row, which a remote track doesn't have.
+Slim::Schema::add_test_track(
+    id => 476336, url => 'file:///music/pnhaeu.flac',
+    title => 'Pnhaeu samnieng', artist => 'Various Artists',
+    album => bless({ title => 'Cambodian Soul Sounds Vol 1', year => 2019 }, 'Slim::Schema::Album'));
+
+$r = add(_client => $playing, kind => 'track',
+         trackname => 'Pnhaeu samnieng', name => 'Cambodian Soul Sounds Vol 1',
+         artist => 'Various Artists', trackid => '476336', favurl => '');
+is('a library queue row still resolves by id',
+   ($r ? "$r->{source}|$r->{ref}{url}" : 'REJECTED'), 'library|file:///music/pnhaeu.flac');
+is('...taking its album from the Album row', ($r ? $r->{album_title} : undef),
+   'Cambodian Soul Sounds Vol 1');
+is('...and its year',                        ($r ? $r->{year}        : undef), 2019);
+
+# ---------------------------------------------------------------------------
+section('a BARE RemoteTrack must not wipe the metadata the row sent');
+# The shape above is the friendly one: the test registered a title and an artist, so taking
+# them off the object looked free. The real one is bare. Qobuz/Tidal serve track metadata
+# dynamically through a metadata provider, so the RemoteTrack row itself holds the url and
+# little else and answers '' — not undef — for ->title and ->artistName (the same emptiness
+# _nowPlayingFallback has to fail open on). '' is DEFINED, so `//` treated it as a value and
+# overwrote what Material substituted from the row: artist='' skips both dedupe guards in
+# _insertTrackRow (they test `length $artist`), never matches in Played::_matchRecord and
+# renders with no artist, while an emptied title is rejected by the add gate outright — the
+# exact case resolving a negative id exists to fix.
+Slim::Schema::add_test_track(id => -94606967849353, url => 'qobuz://420282128.flac');
+
+$r = add(_client => $playing, kind => 'track',
+         trackname => 'Pond Song', name => 'Moisturizer', artist => 'Wet Leg',
+         trackid => '-94606967849353', favurl => '');
+is('a bare RemoteTrack is still stored, by its own url',
+   ($r ? $r->{ref}{url} : 'REJECTED'), 'qobuz://420282128.flac');
+is('...keeping the title Material sent, not the object\'s \'\'',
+   ($r ? $r->{track_title} : undef), 'Pond Song');
+is('...and the artist, which the dedupe guards and Played both need',
+   ($r ? $r->{artist} : undef), 'Wet Leg');
+
+# ---------------------------------------------------------------------------
+section('a silent reject names the clause that failed, not just the source');
+# The warn is the whole trace a reject leaves, and the gate has three clauses. A track with a
+# good source and an empty title reported "unsupported source 'qobuz'", which points triage
+# at the service. The source is still worth printing — it just isn't the finding.
+like('a missing play url says so',
+     reject_line(kind => 'track', trackname => 'Some Stream', artist => 'Someone',
+                 svc => 'qobuz', favurl => ''),
+     qr/rejected add — no play url \(source 'qobuz'\)/);
+like('an empty title says so, rather than blaming the service',
+     reject_line(kind => 'track', trackname => '', artist => 'Someone',
+                 svc => 'qobuz', favurl => 'qobuz://12345.flac'),
+     qr/rejected add — no track title \(source 'qobuz'\)/);
+like('an unreplayable source still reads exactly as it did',
+     reject_line(kind => 'track', trackname => 'A Track', svc => 'spotify',
+                 favurl => 'spotify://track:x'),
+     qr/rejected add — unsupported source 'spotify'/);
 
 printf "\n%d passed, %d failed\n", $pass, $fail;
 exit($fail ? 1 : 0);

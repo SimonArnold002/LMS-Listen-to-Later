@@ -39,7 +39,7 @@ my $cache = Slim::Utils::Cache->new();
 use constant FEED_TTL          => 3600;        # 1h
 use constant FEED_FALLBACK_TTL => 7 * 86400;   # 7d
 use constant HTTP_TIMEOUT      => 20;
-use constant CACHE_VER         => 1;           # bump to invalidate parsed feeds
+use constant CACHE_VER         => 9;           # bump to invalidate parsed feeds
 
 # The user's subscribed podcasts, read from the Podcast plugin's OWN prefs — the only
 # place the durable feed urls exist. Each entry is { name => <show>, value => <rss url> }.

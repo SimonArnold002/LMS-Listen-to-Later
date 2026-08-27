@@ -1,0 +1,40 @@
+Subject: [PATCH] Let a plugin-registered custom action define an app's own category
+
+Two small changes so the per-app "<command>-<type>" custom-action category works for
+plugin-registered actions as well as for entries in customactions.json.
+
+Generated against master (6.4.7, commit d0366662). Paths are repo-relative.
+
+--- a/MaterialSkin/HTML/material/html/js/browse-resp.js	2026-08-23 16:50:16
++++ b/MaterialSkin/HTML/material/html/js/browse-resp.js	2026-08-23 16:50:16
+@@ -706,9 +706,14 @@
+                     // "<command>-<type>" (e.g. "listentolater-album"). If defined - even as an
+                     // empty list - it takes precedence over the generic "online-*" category, so
+                     // a plugin's own list can show different actions, or none (an empty category
+-                    // suppresses the generic actions on that app's items).
++                    // suppresses the generic actions on that app's items). The category may be
++                    // defined in customactions.json or registered by a plugin - check both, so
++                    // that a plugin registering its actions does not lose this.
+                     let appCat = (undefined!=command) ? command+"-"+btype : undefined;
+-                    let oca = (undefined!=appCat && undefined!=customActions && (appCat in customActions))
++                    let haveAppCat = undefined!=appCat &&
++                                     ((undefined!=customActions && (appCat in customActions)) ||
++                                      (undefined!=pluginCustomActions && (appCat in pluginCustomActions)));
++                    let oca = haveAppCat
+                                   ? getCustomActions(appCat, false, ocFilter, true)
+                                   : getCustomActions("online-"+btype, false, ocFilter, true);
+                     if (undefined!=oca && oca.length>0) {
+--- a/MaterialSkin/Plugin.pm	2026-08-23 16:50:16
++++ b/MaterialSkin/Plugin.pm	2026-08-23 16:50:16
+@@ -553,7 +553,10 @@
+     if (! exists($PLUGIN_CUSTOM_ACTIONS->{$section})) {
+         $PLUGIN_CUSTOM_ACTIONS->{$section} = [];
+     }
+-    push(@{$PLUGIN_CUSTOM_ACTIONS->{$section}}, $action);
++    # $action is optional - registering a section with no action declares an EMPTY
++    # category, which is how a plugin suppresses the generic "online-*" actions on
++    # its own items.
++    push(@{$PLUGIN_CUSTOM_ACTIONS->{$section}}, $action) if defined $action;
+ }
+ 
+ sub getHomeExtra {

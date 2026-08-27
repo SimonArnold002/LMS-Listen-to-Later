@@ -122,6 +122,44 @@ sub _materialVersion {
     return eval { Plugins::MaterialSkin::Plugin->getPluginVersion() };
 }
 
+# Material 6.4.6 added a REGISTRATION API for custom actions — a plugin hands its entries to
+# Material (`registerCustomAction($section, $action)`), which serves them over the CLI query
+# ["material-skin","plugin-actions"]; the JS fetches that at app start and merges it with the
+# shared actions.json (customactions.js `getSectionActions` iterates BOTH lists, file first).
+# That is the right home for our "Add" entries: no writing to a file we don't own, no stale
+# categories surviving an uninstall, and no browser cache of it (the file is fetched with a
+# `?r=<material version>` cache-buster, the CLI query is not — see 0.1.57).
+#
+# Capability test, not a version parse: a dev/test Material reports a non-numeric version, and
+# what actually matters is whether the sub is there. Package presence is guaranteed by the
+# isEnabled() guard at every call site.
+#
+# Returns the CODE REF, and the caller calls through it. Not cosmetic: a compiled
+# `Plugins::MaterialSkin::Plugin::registerCustomAction(...)` binds to that glob at OUR compile
+# time, which on a server is fine but ties the call to whatever the symbol table held when this
+# module loaded. Looking it up through ->can each run is what the capability test already does,
+# so use its answer rather than a second, staler route to the same sub.
+sub _useActionApi {
+    return Plugins::MaterialSkin::Plugin->can('registerCustomAction');
+}
+
+# registerCustomAction PUSHES — there is no unregister and no de-dupe, so registering twice
+# puts every entry in the menu twice. Register exactly once per server run (postinitPlugin);
+# the Settings save and the deferred radio re-write must not reach it.
+#
+# `our`, not `my`, purely so t_material_actions.pl can reset it between cases — "registers
+# exactly once" is the whole contract here, and a file-scoped lexical cannot be re-armed.
+#
+# It latches on the ATTEMPT, not on success: a retry inside the same server run would only
+# re-push whatever DID land. What Material refused is recovered by the FILE instead —
+# %UNREGISTERED holds those entries (cat => [ action, … ]) and _writeMaterialActions writes
+# exactly them, so a failed registration degrades to the legacy path rather than leaving the
+# user with the entry in neither place. Per ACTION, not per category, because the two lists
+# are merged client-side: file-writing one Material already took would show it twice.
+our $REGISTERED   = 0;
+our $REGISTERED_N = 0;   # how many entries Material actually took (0 = the API gave us nothing)
+our %UNREGISTERED;       # cat => [ actions registerCustomAction refused ] — file fallback
+
 # Can we actually save AND replay an album from this source? Only the local library and
 # the streaming services with an adapter in Sources.pm (Qobuz/Bandcamp/Tidal, when their
 # plugin is installed). Everything else — Deezer, Spotify, BBC Sounds, radio stations,
@@ -206,11 +244,10 @@ sub _migrateRebrandPrefs {
     return;
 }
 
-# Runs after all plugins have initialised — Material is then loadable. We add an
-# "Add to Listen Later" entry to Material's context menus via its custom-action
-# file, so it sits in the MAIN menu (next to Add to Favourites) rather than buried
-# in the providers' "More" submenu. Local item categories get it directly; the
-# per-app qobuz/bandcamp categories carry it onto streaming pages.
+# Re-run of the FILE write only, 60s after startup: the internet-radio directory loads
+# asynchronously, so the radio suppressors written at postinit miss TuneIn's categories
+# (0.1.56). Deliberately does NOT re-register — registerCustomAction has no de-dupe, and
+# nothing it registers depends on that directory anyway.
 sub _writeMaterialActionsDeferred {
     return unless $prefs->get('material_action')
         && Slim::Utils::PluginManager->isEnabled('Plugins::MaterialSkin::Plugin');
@@ -223,6 +260,14 @@ sub postinitPlugin {
 
     if ( $prefs->get('material_action')
       && Slim::Utils::PluginManager->isEnabled('Plugins::MaterialSkin::Plugin') ) {
+        # Material 6.4.6+: hand our entries straight to Material. On an older Material this is
+        # a no-op and _writeMaterialActions writes them to actions.json as before. Either way
+        # the file write runs — it still carries the parts the API cannot express (see
+        # _materialActionSet), and on the API path it is also what STRIPS our old file entries
+        # so an upgraded install doesn't show every "Add" twice.
+        eval { _registerMaterialActions(); 1 }
+            or $log->error("LL: failed to register Material custom actions: $@");
+
         eval { _writeMaterialActions(); 1 }
             or $log->error("LL: failed to write Material custom actions: $@");
 
@@ -276,7 +321,9 @@ sub _purgeTick {
 }
 
 # ---------------------------------------------------------------------------
-# Material custom actions (prefs/material-skin/actions.json)
+# Material custom actions — registered with Material on 6.4.6+ (see _useActionApi),
+# written to the shared prefs/material-skin/actions.json on older Material and, either
+# way, for the categories the registration API cannot express (see _materialActionSet).
 # ---------------------------------------------------------------------------
 sub _materialActionsFile {
     my $dir = File::Spec->catdir(Slim::Utils::Prefs::dir(), 'material-skin');
@@ -318,9 +365,36 @@ sub _writeMaterialActionsFile {
 # showing "Add"/keep suppressing another plugin's online-* fallback. Strips our actions
 # from every category, drops our own + legacy namespaces, then deletes any category WE
 # wrote that is now empty. Only-empty and only-ours, so a third party's entries survive.
+#
+# It can only clean the FILE. On Material 6.4.6+ the "Add" entries are registered with
+# Material at startup and there is no unregister API, so turning the pref off takes them out
+# of the menus at the NEXT RESTART (we simply don't register). Said in the log, and in the
+# pref's own description in strings.txt.
+#
+# **While those registered entries are still live, the EMPTY SUPPRESSORS MUST STAY** — they are
+# the only thing standing between the registered `online-*` pair and our own list / home shelf /
+# radio browse rows (an empty "<cmd>-<type>" category overrides "online-*", the 0.1.52 rule used
+# in reverse). Deleting them while the positives can't be withdrawn doesn't remove "Add", it
+# ADDS it where it was suppressed: every Listen Later/Played row would offer "Add to Listen
+# Later" until the restart, and using it on a Played row bounces that row back to Listen Later.
+# So the empties are kept — and re-asserted — until the run that registered them ends.
 sub _clearMaterialActions {
     my $file = _materialActionsFile();
-    return unless -e $file;   # nothing ever written
+
+    # Only when something was actually registered — if the API refused every entry they are
+    # in the FILE, which this sub clears here and now, so promising a restart would be wrong.
+    # Reachable from the SETTINGS save only: postinit calls this from the branch where the
+    # pref was already off at startup, so nothing can have registered on that path.
+    my $live = $REGISTERED_N ? 1 : 0;
+    $log->warn('LL: material_action is off — the registered "Add" entries go at the next '
+        . 'server restart (Material has no unregister API); the empty suppressor categories '
+        . 'stay in actions.json until then, so "Add" does not appear inside our own list')
+        if $live;
+
+    # Nothing ever written AND nothing live to suppress. When entries ARE live the file has to
+    # be (re)written even if it has gone missing — the suppressors are all that is holding
+    # "Add" off our own rows.
+    return unless $live || -e $file;
     my $data = _readMaterialActions($file);
 
     for my $cat (keys %$data) {
@@ -328,21 +402,70 @@ sub _clearMaterialActions {
         $data->{$cat} = [ grep { !_isOurAction($_) } @{ $data->{$cat} } ];
     }
 
-    delete $data->{$_} for qw(
+    my @ourSuppressors = qw(
         listenlater-album listenlater-track listenlater-artist
         LLHome-album LLHome-track LLHome-artist
-        listentolater-album listentolater-track listentolater-artist
-        LtLHome-album LtLHome-track LtLHome-artist
+    );
+    delete $data->{$_} for (
+        ($live ? () : @ourSuppressors),
+        qw(listentolater-album listentolater-track listentolater-artist
+           LtLHome-album LtLHome-track LtLHome-artist),
     );
 
     # Delete the categories we populate/suppress once they're empty: our top-level
-    # pairs (album/playlist/online-*) plus any per-command "<cmd>-album/-track/-artist"
-    # radio/scoping suppressor. Guarded on empty so another plugin's real entries stay.
+    # pairs (album/playlist/online-*) plus the per-command radio suppressors WE wrote.
+    # Guarded on empty so another plugin's real entries stay.
+    # With registrations live the radio suppressors are exempt (see the header) — only
+    # the top-level pairs go, and those suppress nothing: Material's per-app override reads
+    # "<command>-<type>", never a bare 'album'/'online-album'.
+    #
+    # The suppressor list is _radioSuppressorCats(), NOT a "*-album/-track/-artist" regex:
+    # an EMPTY per-command category is a deliberate Add-suppressor, so a regex here deletes
+    # any OTHER plugin's suppressors along with ours and silently breaks their hiding. This
+    # branch now runs from every Settings save, not just install, so that reach is real
+    # (0.1.101).
+    #
+    # The FILE-ONLY per-app categories go with them, NOT with %ourCats below: 'podcasts-*' is
+    # a "<command>-<type>" override, so once the strip pass has emptied it it SUPPRESSES the
+    # 0.1.52 rule the same way a radio empty does — deleting it while our online-* pair is
+    # still registered would put "Add" back on Podcasts rows, and leaving it behind when
+    # nothing is registered hides Add there for good (nothing else ever cleans it: the write
+    # pass that would is the one the pref being OFF stops from running). Hardcoded rather than
+    # read from _materialActionSet's %fileOnly, because that only emits 'podcasts-*' while
+    # Podcast::hasFeeds() is true — a user who unsubscribed everything would keep the husks.
+    my @radioSup = _radioSuppressorCats();
+    my @fileOnlySup = qw( podcasts-album podcasts-track );
+    my %suppressor = map { $_ => 1 } @radioSup, @fileOnlySup;
+    my %owned = %{ _ownedCats() };
     my %ourCats = map { $_ => 1 }
-        qw(album album-track playlist playlist-track online-album online-track);
+        qw(album album-track playlist playlist-track track queue-track
+           online-album online-track);
     for my $cat (keys %$data) {
         next unless ref $data->{$cat} eq 'ARRAY' && !@{ $data->{$cat} };
-        delete $data->{$cat} if $ourCats{$cat} || $cat =~ /-(?:album|track|artist)$/;
+        delete $data->{$cat}
+            if $ourCats{$cat} || (!$live && ($suppressor{$cat} || $owned{$cat}));
+    }
+
+    # Re-assert our own empties while the registered pair is live — the file may never have
+    # had them (a first-ever write that failed) or may have lost them to an older build.
+    # The RADIO empties go back with them, and that is not decoration: on the one path this
+    # branch exists for — registrations live, file gone — the delete-empties pass above has
+    # nothing to preserve, so leaving them out would let the registered online-* pair put
+    # "Add" back on every TuneIn/BBC Sounds row until the restart. Same regression class as
+    # the own-view suppressors, same reason — and the same argument covers the FILE-ONLY
+    # per-app categories, which are per-command overrides too. `||=` for both of those: the
+    # "<cmd>-*" namespace isn't ours to reset, so another plugin's real entries survive (and a
+    # present category, ours or theirs, still overrides online-* → Add hidden either way).
+    if ($live) {
+        my $dir = File::Spec->catdir(Slim::Utils::Prefs::dir(), 'material-skin');
+        File::Path::make_path($dir) unless -d $dir;
+        $data->{$_} = [] for @ourSuppressors;
+        $data->{$_} ||= [] for @radioSup, @fileOnlySup;
+        # Write down what we just asserted. THIS is the half that produced the 0.1.103 husks:
+        # the branch CREATES podcasts-* for a user with no subscriptions, a pair no write pass
+        # can emit — so a category written here and not recorded is one the next write cannot
+        # recognise as ours, and therefore can never sweep.
+        _setOwnedCats({ %owned, map { $_ => 1 } @ourSuppressors, @radioSup, @fileOnlySup });
     }
 
     _writeMaterialActionsFile($file, $data);
@@ -388,17 +511,69 @@ sub _unsupportedRadioCommands {
     return keys %cmds;
 }
 
-sub _writeMaterialActions {
-    my $file = _materialActionsFile();
-    my $dir  = File::Spec->catdir(Slim::Utils::Prefs::dir(), 'material-skin');
-    File::Path::make_path($dir) unless -d $dir;
+# The empty "<cmd>-album"/"-track" suppressor categories, for every radio browse command we
+# do not support. Its own sub because BOTH writers need the identical list and they compute
+# it from file-scoped lexicals declared BELOW _clearMaterialActions — a sub call resolves at
+# runtime, the variables would not resolve at all. _writeMaterialActions creates them;
+# _clearMaterialActions re-asserts them when it rebuilds a missing file with registrations
+# still live (see there). Sorted, so both writers produce the same order.
+# The OWNERSHIP LEDGER — what "this category is ours" is allowed to mean.
+#
+# Every husk this file has produced (0.1.51, 0.1.102, 0.1.103) is the same defect: ownership
+# was INFERRED, and the two passes inferred it differently. The write pass asked "did the
+# strip pass just empty it?" (%emptied); the clear pass asked a hardcoded list. Both are
+# guesses, and a category one of them creates is a category the other cannot recognise —
+# which is exactly the podcasts-* case, since the clear path's $live re-assert writes a pair
+# no write pass would ever emit (Podcast::hasFeeds() is false for a user with no
+# subscriptions). No single derived set fixes that, because there is nothing to derive it
+# from: the category is not in %fileOnly, by design.
+#
+# So don't infer it — RECORD it. Both passes read this list, and the rule is simply that
+# whatever LL writes to the file, LL writes down.
+#
+# An install that predates the ledger has no list, and gets a one-time seed of the only
+# pre-ledger litter that can exist: the empty per-service categories the 0.1.46-0.1.50
+# scoping experiments left, and the podcasts-* pair. Both are ours by construction — no other
+# plugin suppresses a service WE replay (an empty <cmd>-* there hides only our own Add), and
+# the Podcasts app override is one we wrote. 'listenlater' is excluded from the seed: our own
+# empty listenlater-* pair is the deliberate 0.1.52 suppressor and must never be swept.
+sub _ownedCats {
+    my $l = $prefs->get('material_owned_cats');
+    return { map { $_ => 1 } @$l } if ref $l eq 'ARRAY';
+    return { map { ("$_-album" => 1, "$_-track" => 1) }
+        'podcasts', grep { $_ ne 'listenlater' } keys %SUPPORTED_CMD };
+}
+sub _setOwnedCats { $prefs->set('material_owned_cats', [ sort keys %{ $_[0] } ]) }
 
-    my $data = _readMaterialActions($file);
+sub _radioSuppressorCats {
+    my %radioCmd = map { $_ => 1 } _unsupportedRadioCommands(), @KNOWN_RADIO_CMDS;
+    delete @radioCmd{ keys %SUPPORTED_CMD };
+    return map { ("$_-album", "$_-track") } sort keys %radioCmd;
+}
 
+# Build every custom action we offer, ONCE, for both delivery paths — the 6.4.6 registration
+# API and the legacy actions.json write. Returns two hashrefs of category => [ action, … ]:
+#
+#   %positive  the "Add to Listen Later" / "Add to Wish List" entries. These move to the
+#              registration API on Material 6.4.6+ (see _useActionApi).
+#   %fileOnly  entries that only work from actions.json, because Material decides whether an
+#              app's own "<browse-command>-<type>" category overrides the generic "online-*"
+#              with `appCat in customActions` — the FILE, never the plugin-registered list
+#              (verified in the served 6.4.7 bundle). Today that is the podcasts wording; the
+#              EMPTY suppressor categories (written below in _writeMaterialActions) are the
+#              same limitation from the other side — the API takes an action and pushes it,
+#              so "this category exists and is empty" cannot be expressed at all.
+#
+# Both paths get the SAME hashes, so there is only one spelling of the commands.
+sub _materialActionSet {
     # `lmscommand` must be a FLAT array (verb + tag params); Material substitutes the
     # $VARS from the item and runs it fire-and-forget. $FAVURL carries the item's play
-    # URL (qobuz://… etc.), which tells addctx the source. Unpopulated $VARS arrive as
-    # the literal token ("$ALBUMNAME") — addctx ignores those.
+    # URL (qobuz://… etc.), which tells addctx the source.
+    # An unpopulated $VAR usually arrives EMPTY, not as the literal token: doReplacements
+    # ends by stripping every name in its ACTION_KEYS list to ''. **$IMAGE is not in that
+    # list** (checked in the served bundle), so an item with no image really does send the
+    # literal "$IMAGE" — which is why addctx keeps its unsubstituted-$VAR filter. Every
+    # 0.1.98 gate tests length, so both spellings read as absent either way.
     my $albumCmd = [ 'listenlater', 'addctx',
         'name:$ALBUMNAME', 'artist:$ARTISTNAME', 'albumid:$ALBUMID', 'year:$YEAR',
         'favurl:$FAVURL', 'image:$IMAGE' ];
@@ -414,8 +589,9 @@ sub _writeMaterialActions {
     # The merged upstream Material (PR #1235, dev) sets i.service=<browse command> and
     # exposes it as $SERVICE — the clean replacement for the old "bake svc:<command>
     # into the lmscommand" hack. So pass svc:$SERVICE; addctx reads it as the
-    # authoritative source. (Unpopulated → literal "$SERVICE", which addctx's
-    # ^[a-z0-9]+$ check rejects → empty → cover-host fallback.)
+    # authoritative source. (Unpopulated → EMPTY — $SERVICE is in doReplacements' strip
+    # list — which addctx reads as "no container command"; a populated one is believed only when
+    # Sources::knownSource says it NAMES a service, else the cover-host fallback decides.)
     # These `online-*` categories are the generic fallback for every streaming/app
     # item (and the home-shelf cards, which have no per-service command). Only does
     # anything on a Material build that wires up custom actions for online items.
@@ -455,13 +631,15 @@ sub _writeMaterialActions {
     my $onlineAlbumBase = { cmd => $onlineCmd,      role => 'plain' };
     my $onlineTrackBase = { cmd => $onlineTrackCmd, role => 'plain' };
     my $podcastBase     = { cmd => $podcastCmd,     role => 'podcast' };
+    # Registered with Material (6.4.6+). Every one of these is RE-RESOLVED per browse
+    # response — so it does not matter when the plugin list reaches the client. ('track' and
+    # 'queue-track' are resolved client-side too, but ONCE, off a bus event; that is what
+    # they can't survive, so they are in %fileCats below.)
     my %cats = (
         'album'          => [ $albumBase ],
         'album-track'    => [ $trackBase ],
         'playlist'       => [ $albumBase ],
         'playlist-track' => [ $trackBase ],
-        'track'          => [ $npBase ],      # Now Playing — default = Add track; album is in "… → More"
-        'queue-track'    => [ $trackBase ],
         'online-album'   => [ $onlineAlbumBase ],
         'online-track'   => [ $onlineTrackBase ],
         # NB: deliberately NO 'online-artist' — we save albums/tracks, not artists. An
@@ -469,7 +647,29 @@ sub _writeMaterialActions {
         # one would store a junk record that can never replay.
     );
 
-    # The built-in Podcasts app, keyed on ITS browse command. '-album' is the category
+    # ---- The FILE half. Two separate reasons, both hard constraints. ----
+
+    # 1. Now Playing ('track') and the play queue ('queue-track'). FILE-ONLY because these are
+    # the only two of our categories Material resolves in the BROWSER, and it resolves them
+    # exactly once, on a bus event our half of the wiring never fires. Verified in the served
+    # 6.4.7 bundle: nowplaying-page and queue-page each do
+    #     bus.$on("customActions", () => getCustomActions("track"|"queue-track", false))
+    # and the ONLY $emit("customActions") is inside the `.then` of the axios GET of
+    # customactions.json. initCustomActions fires that GET and the ["material-skin",
+    # "plugin-actions"] CLI call side by side, and only the GET emits — so the snapshot is
+    # taken when the GET lands, whoever won. A static file beats a JSON-RPC POST through
+    # the Perl dispatcher essentially every time, which leaves `pluginCustomActions` still
+    # undefined at snapshot time and NO "Add" in either panel for the whole page session.
+    # Nothing re-emits, so it never recovers. Every other category above is re-resolved per
+    # browse response, and is immune to load order.
+    # (Neither is a per-app override, so the file costs us nothing here. The one price is the
+    # 0.1.57 stale-tab caching of customactions.json — a hard refresh after install.)
+    my %fileCats = (
+        'track'       => [ $npBase ],   # Now Playing — default = Add track; album is in "… → More"
+        'queue-track' => [ $trackBase ],
+    );
+
+    # 2. The built-in Podcasts app, keyed on ITS browse command. '-album' is the category
     # Material actually resolves for those rows (see $podcastCmd); '-track' is written with
     # the same pair purely as insurance, in case a future Material starts classifying them
     # as tracks — a populated category can only add an entry, never suppress one.
@@ -477,9 +677,12 @@ sub _writeMaterialActions {
     # be resolved against a subscribed feed; with none, the generic "Add album" stays and
     # keeps rejecting exactly as it does today, rather than promising a podcast add we
     # can't honour.
+    #
+    # FILE-ONLY, and it has to be: this is a per-app "<command>-<type>" override, and Material
+    # only consults one of those when the category is present in actions.json.
     if (Plugins::ListenLater::Podcast::hasFeeds()) {
-        $cats{'podcasts-album'} = [ $podcastBase ];
-        $cats{'podcasts-track'} = [ $podcastBase ];
+        $fileCats{'podcasts-album'} = [ $podcastBase ];
+        $fileCats{'podcasts-track'} = [ $podcastBase ];
     }
 
     # NB: deliberately NO 'favorites-*' category. FAVOURITES is the other route people take
@@ -490,51 +693,6 @@ sub _writeMaterialActions {
     # category would be pure duplication. (Anything a previous build wrote is emptied by the
     # strip pass and then removed by the delete-empties pass below, which is what stops an
     # empty leftover from SUPPRESSING the online-* fallback — the 0.1.52 rule.)
-
-    # First strip OUR entries from EVERY existing category (clears legacy 0.1.7 hash
-    # entries and any stale local ones); then add the current entry where we want it.
-    for my $cat (keys %$data) {
-        next unless ref $data->{$cat} eq 'ARRAY';
-        $data->{$cat} = [ grep { !_isOurAction($_) } @{ $data->{$cat} } ];
-    }
-
-    # Drop our pre-rebrand suppression categories (the old command was 'listentolater'
-    # and the old home-shelf tag 'LtLHome') so they don't linger as empty keys.
-    delete $data->{$_} for qw(
-        listentolater-album listentolater-track listentolater-artist
-        LtLHome-album LtLHome-track LtLHome-artist
-    );
-
-    # Clean up the stale per-command categories the 0.1.46–0.1.50 scoping experiments left
-    # in the SHARED actions.json. They persist across plugin updates, and an EMPTY
-    # "<service>-album" takes precedence over "online-*" — so a leftover empty
-    # "qobuz-album"/"tidal-album"/"bandcamp-album"/"listenbrainzfreshreleases-album" (etc.)
-    # HIDES "Add" on the very services we support (the 0.1.51 regression). We no longer scope
-    # per command — adds are gated at add time — so after the strip pass above every such
-    # category we wrote is empty. Delete every empty "*-album"/"*-track"/"*-artist" EXCEPT the
-    # ones we actively write (album/online-*/… below) and our own suppressors
-    # (listenlater-*/LLHome-*). Only-empty so another plugin's real entries are never touched;
-    # no other plugin in this stack writes empty per-command categories (LBF verified), so an
-    # empty one is our own cruft. This restores fall-through to the populated "online-*".
-    # Radio browse commands we want to suppress "Add" on (see the empty-category
-    # write below). Union the live 'radios' enumeration with the hardcoded TuneIn
-    # seed list (@KNOWN_RADIO_CMDS — present at init even before the async directory
-    # loads), minus any command we actually support. Their "<cmd>-album"/"-track"
-    # keys are exempted from the delete-empties pass below — otherwise the very
-    # empties we write here get deleted again (the 0.1.52 rule: an empty category is
-    # not neutral, it actively suppresses, which is exactly what we want here).
-    my %radioCmd = map { $_ => 1 } _unsupportedRadioCommands(), @KNOWN_RADIO_CMDS;
-    delete @radioCmd{ keys %SUPPORTED_CMD };
-    my @radioCats = map { ("$_-album", "$_-track") } sort keys %radioCmd;
-
-    my %keep = ( map { $_ => 1 } keys %cats, @radioCats,
-        qw(listenlater-album listenlater-track listenlater-artist
-           LLHome-album LLHome-track LLHome-artist) );
-    for my $cat (keys %$data) {
-        next unless $cat =~ /-(?:album|track|artist)$/;
-        next if $keep{$cat};
-        delete $data->{$cat} if ref $data->{$cat} eq 'ARRAY' && !@{ $data->{$cat} };
-    }
 
     # Per base command, two entries: "Add … to Listen Later" (the base command, which
     # defaults to the Listen Later list) and "Add … to Wish List" (the same command plus
@@ -556,20 +714,184 @@ sub _writeMaterialActions {
         # you don't buy podcast episodes. A role with no wishlist title writes one entry.
         podcast    => { later => 'Add to Listen Later' },
     );
-    for my $cat (keys %cats) {
-        for my $base (@{ $cats{$cat} }) {
-            my $t = $roleTitle{ $base->{role} };
-            push @{ $data->{$cat} ||= [] }, {
-                title      => $t->{later},
-                icon       => 'playlist_add',
-                lmscommand => $base->{cmd},
-            };
-            push @{ $data->{$cat} }, {
-                title      => $t->{wishlist},
-                icon       => 'shopping_cart',
-                lmscommand => [ @{ $base->{cmd} }, 'list:wishlist' ],
-            } if $t->{wishlist};
+
+    my $build = sub {
+        my ($cats) = @_;
+        my %out;
+        for my $cat (keys %$cats) {
+            for my $base (@{ $cats->{$cat} }) {
+                my $t = $roleTitle{ $base->{role} };
+                push @{ $out{$cat} ||= [] }, {
+                    title      => $t->{later},
+                    icon       => 'playlist_add',
+                    lmscommand => $base->{cmd},
+                };
+                push @{ $out{$cat} }, {
+                    title      => $t->{wishlist},
+                    icon       => 'shopping_cart',
+                    lmscommand => [ @{ $base->{cmd} }, 'list:wishlist' ],
+                } if $t->{wishlist};
+            }
         }
+        return \%out;
+    };
+
+    return ($build->(\%cats), $build->(\%fileCats));
+}
+
+# Hand %positive to Material (6.4.6+). No-op on an older Material, and no-op on every call
+# after the first — see $REGISTERED. Returns the number of entries registered.
+sub _registerMaterialActions {
+    return 0 if $REGISTERED;
+    my $register = _useActionApi() or return 0;
+
+    my ($positive) = _materialActionSet();
+    my ($n, %failed) = (0);
+    for my $cat (sort keys %$positive) {
+        for my $action (@{ $positive->{$cat} }) {
+            # NB a plain sub, not a method — Material's own signature is ($section, $action),
+            # so calling it with `->` would pass the class name as the section.
+            if ( eval { $register->($cat, $action); 1 } ) {
+                $n++;
+            }
+            else {
+                # Hand it back to the file write rather than losing it — see %UNREGISTERED.
+                push @{ $failed{$cat} ||= [] }, $action;
+                $log->error("LL: registerCustomAction('$cat') failed: $@");
+            }
+        }
+    }
+    %UNREGISTERED  = %failed;
+    $REGISTERED    = 1;
+    $REGISTERED_N  = $n;
+    $log->warn("LL: registered $n Material custom action(s) in "
+        . scalar(keys %$positive) . ' section(s) via the plugin API');
+    $log->error('LL: Material refused ' . scalar(map { @$_ } values %failed)
+        . ' custom action(s) — writing those to actions.json instead') if %failed;
+    return $n;
+}
+
+# Write the parts of the action set that live in Material's SHARED actions.json. On Material
+# 6.4.6+ that is only what the registration API cannot express (the podcasts override and the
+# empty suppressors); on an older Material it is everything, exactly as before 0.1.95.
+#
+# On the API path this is ALSO the upgrade path: the strip pass below removes the entries a
+# previous version wrote to the file, which is what stops every "Add" appearing twice (the
+# two lists are MERGED client-side, file first, then plugin-registered).
+sub _writeMaterialActions {
+    my $file = _materialActionsFile();
+    my $dir  = File::Spec->catdir(Slim::Utils::Prefs::dir(), 'material-skin');
+    File::Path::make_path($dir) unless -d $dir;
+
+    my $data = _readMaterialActions($file);
+
+    my ($positive, $fileOnly) = _materialActionSet();
+
+    # The API path is "registration has RUN", not "the API exists". Two cases the capability
+    # test alone gets wrong, both ending with the entry in neither place:
+    #   * registerCustomAction died — %UNREGISTERED holds what it refused, and those entries
+    #     are written to the file below (per action, so nothing Material took is doubled);
+    #   * registration hasn't run at all — the pref was off at startup and has just been
+    #     turned on from Settings, which re-runs THIS write but cannot register (no de-dupe,
+    #     no unregister, so registering outside postinit is not safe). Writing the full set
+    #     to the file is then correct AND is what makes the toggle work before a restart;
+    #     the next startup registers and this same write strips the file entries again.
+    my $api      = ($REGISTERED && _useActionApi()) ? 1 : 0;
+    my %fallback = $api ? %UNREGISTERED : ();
+
+    # First strip OUR entries from EVERY existing category (clears legacy 0.1.7 hash
+    # entries and any stale local ones); then add the current entry where we want it.
+    #
+    # %emptied records the categories this strip pass took from non-empty to EMPTY — i.e.
+    # the ones that held nothing but our own entries. It is the provenance signal the
+    # delete-empties pass below needs: it says "this empty is our leftover" without having to
+    # name the category, which is the whole problem there (see the comment on that pass).
+    my %emptied;
+    for my $cat (keys %$data) {
+        next unless ref $data->{$cat} eq 'ARRAY';
+        my $had = scalar @{ $data->{$cat} };
+        $data->{$cat} = [ grep { !_isOurAction($_) } @{ $data->{$cat} } ];
+        $emptied{$cat} = 1 if $had && !@{ $data->{$cat} };
+    }
+
+    # Drop our pre-rebrand suppression categories (the old command was 'listentolater'
+    # and the old home-shelf tag 'LtLHome') so they don't linger as empty keys.
+    delete $data->{$_} for qw(
+        listentolater-album listentolater-track listentolater-artist
+        LtLHome-album LtLHome-track LtLHome-artist
+    );
+
+    # Clean up the stale per-command categories the 0.1.46–0.1.50 scoping experiments left
+    # in the SHARED actions.json. They persist across plugin updates, and an EMPTY
+    # "<service>-album" takes precedence over "online-*" — so a leftover empty
+    # "qobuz-album"/"tidal-album"/"bandcamp-album"/"listenbrainzfreshreleases-album" (etc.)
+    # HIDES "Add" on the very services we support (the 0.1.51 regression). We no longer scope
+    # per command — adds are gated at add time — so after the strip pass above every such
+    # category we wrote is empty. Delete every empty "*-album"/"*-track"/"*-artist" EXCEPT the
+    # ones we actively write (album/online-*/… below) and our own suppressors
+    # (listenlater-*/LLHome-*). This restores fall-through to the populated "online-*".
+    #
+    # …and EXCEPT any empty category that was ALREADY empty when we read the file (%emptied).
+    # "Only-empty" is not the safe test it reads as: by this plugin's own 0.1.52 rule an empty
+    # per-command category is not litter, it is a deliberate Add-SUPPRESSOR — it is why we
+    # write our own — so sweeping empties disarms another plugin's hiding just as surely as
+    # deleting its entries would. That is the hazard `_clearMaterialActions` was hardened
+    # against in 0.1.101; this twin was left alone then because it "has to delete cruft it
+    # cannot name". It doesn't have to NAME it: the cruft is exactly the categories the strip
+    # pass just emptied, because the 0.1.46–0.1.50 scoping experiments wrote OUR entries into
+    # them (that is what makes them ours). An empty that arrived empty was never ours — no
+    # run of this code can leave one behind, since the same pass that creates one deletes it —
+    # so %emptied loses nothing and stops us touching a category we never wrote.
+    # Matters more than the clear path does: this write runs at every startup, on every
+    # Settings save (0.1.97) and on the +60s deferred write.
+    # Radio browse commands we want to suppress "Add" on (see the empty-category
+    # write below). Union the live 'radios' enumeration with the hardcoded TuneIn
+    # seed list (@KNOWN_RADIO_CMDS — present at init even before the async directory
+    # loads), minus any command we actually support. Their "<cmd>-album"/"-track"
+    # keys are exempted from the delete-empties pass below — otherwise the very
+    # empties we write here get deleted again (the 0.1.52 rule: an empty category is
+    # not neutral, it actively suppresses, which is exactly what we want here).
+    my @radioCats = _radioSuppressorCats();
+
+    # The categories THIS FILE still owns. On the API path the positive ones are no longer
+    # written here, so they must NOT be in %keep — an emptied leftover has to be deleted, not
+    # preserved (the 0.1.52 rule: an empty category is not neutral, it suppresses).
+    my %owned = %{ _ownedCats() };
+    my %keep = ( map { $_ => 1 } keys %$fileOnly, @radioCats,
+        qw(listenlater-album listenlater-track listenlater-artist
+           LLHome-album LLHome-track LLHome-artist) );
+    $keep{$_} = 1 for $api ? keys %fallback : keys %$positive;
+    for my $cat (keys %$data) {
+        next unless $cat =~ /-(?:album|track|artist)$/;
+        next if $keep{$cat};
+        next unless $emptied{$cat} || $owned{$cat};   # ours by the ledger, or emptied just now
+        delete $data->{$cat} if ref $data->{$cat} eq 'ARRAY' && !@{ $data->{$cat} };
+    }
+
+    # The delete-empties pass above only matches "*-album/-track/-artist", so the two
+    # UNSUFFIXED categories we used to write — 'album' and 'playlist' — would survive as
+    # empty husks once they move to the registration API (the hyphenated ones, 'album-track'
+    # /'playlist-track'/'online-*', are already covered by it). Harmless in themselves (an empty
+    # FILE section contributes nothing to the merged list) but they are our litter in a shared
+    # file, and a stale empty 'album' is exactly the shape that has bitten before. Only-empty,
+    # so another plugin's entries in the same category are never touched.
+    if ($api) {
+        for my $cat (keys %$positive) {
+            next if $fallback{$cat};   # about to be re-written below
+            delete $data->{$cat}
+                if ref $data->{$cat} eq 'ARRAY' && !@{ $data->{$cat} };
+        }
+    }
+
+    # Write the action set. On Material 6.4.6+ the positive entries went to Material directly
+    # (_registerMaterialActions) and writing them here as well would show every "Add" TWICE —
+    # the client merges the file and the plugin list. The file-only set is written on both
+    # paths; on the legacy path it is simply part of the same one write. %fallback is the
+    # exception on the API path: entries Material REFUSED, which live in neither place unless
+    # written here (and can't double, since Material never took them).
+    my %write = ( %$fileOnly, $api ? %fallback : %$positive );
+    for my $cat (keys %write) {
+        push @{ $data->{$cat} ||= [] }, @{ $write{$cat} };
     }
 
     # Suppress the generic streaming "Add" inside our OWN surfaces (the plugin list
@@ -602,14 +924,35 @@ sub _writeMaterialActions {
     # reject any source we can't replay (_isReplayableSource), so an unsupported service's
     # "Add" is a harmless no-op rather than a stored-but-unplayable record. The radio block is
     # the one exception because radios ARE cleanly command-scoped in the browse menu and are
-    # never legitimately addable. It covers browse rows only; a radio HOME-SHELF card has no
-    # per-command identity (all shelves arrive in one 'material-skin' home-extra call) and
-    # falls back to "online-*", so its Add can't be hidden here — it stays an add-time reject.
+    # never legitimately addable. It covers browse rows only; a radio HOME-SHELF card can't be
+    # hidden here — all shelves arrive in one 'material-skin' home-extra call, so the category
+    # resolves through the shared "online-*" and it stays an add-time reject.
+    #
+    # NB a home shelf DOES have a per-command identity — it just isn't the service tag. Browsing
+    # one dispatches through the home-extra id (the stock Qobuz plugin's "Qobuz" shelf is
+    # 'QobuzExtrasqobuz'), which is what Material then passes as $SERVICE. That is why `svc` is
+    # validated against Sources::knownSource and not by shape — see _addCtxCommand (0.1.96).
 
+    # Record the set before writing it — see _ownedCats. Everything this pass asserted: the
+    # entries themselves, the radio empties, the file-only overrides, and our own suppressors.
+    _setOwnedCats({ map { $_ => 1 } keys %write, @radioCats, keys %$fileOnly,
+        qw(listenlater-album listenlater-track listenlater-artist
+           LLHome-album LLHome-track LLHome-artist) });
     _writeMaterialActionsFile($file, $data);
     $log->warn("LL: wrote Material custom actions to $file");
 
-    _dumpMaterialState($file, $data, \@radioCats) if $prefs->get('debug_log');
+    # What the API half actually DELIVERED, per category — not what we built. A failed
+    # registration builds an entry and Material never gets it, so counting %positive would
+    # report "streaming Add active" for a menu with nothing in it.
+    my %regCount;
+    if ($api) {
+        for my $cat (keys %$positive) {
+            my $n = scalar(@{ $positive->{$cat} }) - scalar(@{ $fallback{$cat} || [] });
+            $regCount{$cat} = $n if $n > 0;
+        }
+    }
+
+    _dumpMaterialState($file, $data, \@radioCats, \%regCount, $api) if $prefs->get('debug_log');
     return;
 }
 
@@ -623,10 +966,13 @@ sub _writeMaterialActions {
 #   3. a NON-empty "<svc>-album"  → a leftover/foreign category SHADOWS "online-*" and
 #      hides Add on that one service (Material prefers a present per-command category).
 # (A separate, expected cause the log can't show is Material's app-start cache of
-# customactions.json — if the file below is correct but the UI still lacks Add, it's a
-# stale cached tab; hard-refresh Material once. See CLAUDE.md 0.1.57.)
+# customactions.json — if the FILE half below is correct but the UI still lacks Add, it's a
+# stale cached tab; hard-refresh Material once. See CLAUDE.md 0.1.57. On Material 6.4.6+ the
+# "Add" entries no longer come from that file at all — they are fetched over the CLI, which
+# is not browser-cached — so a stale tab only affects the suppressors and the podcasts
+# wording. Which half of the wiring a category is on is the first line of the dump.)
 sub _dumpMaterialState {
-    my ($file, $data, $radioCats) = @_;
+    my ($file, $data, $radioCats, $regCount, $api) = @_;
 
     # Accumulate every line so we can BOTH log it (server.log, tagged LL[dbg]) AND stash the
     # whole snapshot in a pref, which the Settings page renders in a copy-paste textarea — so
@@ -658,12 +1004,40 @@ sub _dumpMaterialState {
         . (defined $ver ? ($online_ok ? 'YES' : 'NO — streaming rows get NO Add on this Material; only local works')
                         : 'UNKNOWN'));
     $emit->("actions.json = $file");
+    $emit->('custom-action delivery = '
+        . (!$api        ? 'actions.json (this Material has no registerCustomAction, or '
+                        . 'registration has not run yet — either way the file carries everything)'
+         : %$regCount   ? 'plugin API (Material 6.4.6+, registerCustomAction) — the "Add" entries are '
+                        . 'served over ["material-skin","plugin-actions"], NOT from actions.json'
+         :                'actions.json — registerCustomAction EXISTS but refused every entry, '
+                        . 'so they were written to the file as a fallback (see server.log for why)'));
 
-    # online-* must be populated or NO streaming row shows Add anywhere.
+    # The Add entries must be present or NO streaming row shows Add anywhere. Count BOTH
+    # halves and say which is which: reading only the file would report "WILL NOT SHOW" for a
+    # perfectly working API install, and reading only the built set would report "active"
+    # for entries registerCustomAction refused — the one failure this dump exists to expose.
+    my $count = sub {
+        my ($c) = @_;
+        my $f = ref $data->{$c} eq 'ARRAY' ? scalar @{ $data->{$c} } : undef;
+        my $a = $regCount->{$c};
+        return (undef, undef) unless defined $f || defined $a;
+        return ($f // 0, $a // 0);
+    };
+    my %total;
     for my $c (qw(online-album online-track)) {
-        my $n = ref $data->{$c} eq 'ARRAY' ? scalar @{ $data->{$c} } : -1;
-        $emit->("category '$c' = " . ($n < 0 ? 'MISSING (!)' : "$n entr" . ($n == 1 ? 'y' : 'ies'))
+        my ($f, $a) = $count->($c);
+        my $n = defined $f ? $f + $a : -1;
+        $total{$c} = $n;
+        $emit->("category '$c' = " . ($n < 0 ? 'MISSING (!)' : "$n entr" . ($n == 1 ? 'y' : 'ies')
+                . ($api ? " ($a registered, $f in actions.json)" : ''))
             . ($n > 0 ? ' — streaming Add active' : ' — streaming Add WILL NOT SHOW'));
+    }
+    if ($api) {
+        $emit->(%$regCount
+            ? 'registered sections = '
+                . join(', ', map { "$_($regCount->{$_})" } sort keys %$regCount)
+            : 'registered sections = NONE — registerCustomAction refused every entry; '
+                . 'they were written to actions.json instead (see the counts above)');
     }
 
     # Radio browse commands we deliberately suppress Add on (empty <cmd>-album/-track).
@@ -673,13 +1047,24 @@ sub _dumpMaterialState {
         . (@radios ? join(', ', @radios) : '(none)'));
 
     # Any NON-empty per-command "<svc>-album/-track" category shadows online-* and hides
-    # Add on that service. Ours are always empty; a populated one is foreign/leftover and
-    # is the thing to look at if Add is missing on exactly one service.
+    # Add on that service. Ours are always empty (or, for 'podcasts-*', deliberately
+    # POPULATED — it's what makes a podcast row say "Add to Listen Later" and route
+    # kind:podcast); a populated one that ISN'T ours is foreign/leftover and is the thing to
+    # look at if Add is missing on exactly one service.
+    #
+    # Exempt by FULL category name, read from the same source of truth the writers use —
+    # never a hand-list of prefixes. Three of our own populated categories (album-track,
+    # playlist-track, queue-track) are not "<svc>-<type>" shaped at all, so a prefix test
+    # reads them as foreign and this diagnostic — which exists purely for remote triage —
+    # reports our own entries as the fault (0.1.101). Taking the names from
+    # _materialActionSet/_radioSuppressorCats also self-corrects the next time the
+    # register/file split moves.
+    my ($posCats, $fileCats) = _materialActionSet();
+    my %ours = map { $_ => 1 } keys %$posCats, keys %$fileCats, @$radioCats;
     my @shadow;
     for my $cat (sort keys %$data) {
-        next unless $cat =~ /^(.+)-(?:album|track)$/;
-        my $svc = $1;
-        next if $svc eq 'online' || $svc eq 'listenlater' || $svc eq 'LLHome';
+        next unless $cat =~ /-(?:album|track)$/;
+        next if $ours{$cat} || $cat =~ /^(?:listenlater|LLHome)-/;
         my $n = ref $data->{$cat} eq 'ARRAY' ? scalar @{ $data->{$cat} } : 0;
         push @shadow, "$cat($n)" if $n > 0;
     }
@@ -693,7 +1078,7 @@ sub _dumpMaterialState {
     # ("via LBF") register under 'radios' (menu=>'radios', tag=listenbrainzfreshreleases) —
     # so a report about "LBF" is only covered if we scan 'radios' too. De-duped by command.
     my %seen;
-    my $online_pop = ref $data->{'online-album'} eq 'ARRAY' && @{ $data->{'online-album'} };
+    my $online_pop = $total{'online-album'} > 0;
     for my $menu (['apps', 'appss_loop'], ['radios', 'radioss_loop']) {
         my $loop = eval {
             my $req = Slim::Control::Request::executeRequest(undef, [$menu->[0], 0, 500]);
@@ -703,16 +1088,19 @@ sub _dumpMaterialState {
             my $cmd = $a->{cmd} or next;
             next if $seen{$cmd}++;
             my $name = $a->{name} // $cmd;
-            my $shadowed = (ref $data->{"$cmd-album"} eq 'ARRAY' && @{ $data->{"$cmd-album"} })
-                || (grep { $_ eq "$cmd-album" } @$radioCats);
+            # A per-command category in the FILE (only the file — Material's override test is
+            # `appCat in customActions`) decides this service on its own: populated it shows
+            # its own entries, empty it hides Add entirely. Otherwise the generic online-*.
+            my $ownCat  = exists $data->{"$cmd-album"} || (grep { $_ eq "$cmd-album" } @$radioCats);
+            my $ownPop  = ref $data->{"$cmd-album"} eq 'ARRAY' && @{ $data->{"$cmd-album"} };
             my $verdict = !$online_ok      ? "no Add (Material < 6.4.4)"
-                        : $shadowed        ? "Add HIDDEN (per-command category present)"
+                        : $ownPop          ? "Add shown (via its own '$cmd-album' category)"
+                        : $ownCat          ? "Add HIDDEN (empty per-command category)"
                         : $online_pop      ? "Add shown (via online-*)"
                         :                    "no Add (online-* empty)";
             $emit->("service '$cmd' ($name) [$menu->[0]]: $verdict");
         }
     }
-    _dbg('==== end diagnostics ====');
     $prefs->set('material_debug_snapshot', join("\n", @lines));
     _dbg('==== end diagnostics ====');
     return;
@@ -935,9 +1323,30 @@ sub _addCommand {
 # and its only feedback hook is a generic "'…' failed" snackbar we can't customise.
 # The point of the gate is to keep unplayable junk out of the list. Shared by both paths.
 sub _rejectAdd {
-    my ($request, $source, $album) = @_;
-    $log->warn("LL: rejected add — unsupported source '" . ($source // '?')
-        . "' (" . ($album // '?') . ")");
+    my ($request, $source, $album, $reason) = @_;
+
+    # `// '?'` was not enough, and since 0.1.96 that is the COMMON case rather than an edge:
+    # `svc` is believed only when it NAMES a service, so every container verb that isn't one
+    # (favorites, search, bbcsounds, a home-shelf id) leaves $source an EMPTY STRING — which
+    # is defined, so the line read "unsupported source ''" and named nothing whatsoever. This
+    # warn is the ONLY trace a rejected add leaves (the reject is silent to the user by
+    # necessity, see above), so it has to say what arrived: the container verb is what
+    # identifies the surface, and it is the thing to look at when an add "does nothing".
+    my $svc = $request->getParam('svc');
+    $svc = undef if defined $svc && $svc =~ /^\$[A-Z]/;   # an unsubstituted Material $VAR
+
+    # ...and for the same reason it has to name the clause that ACTUALLY failed. Most of the
+    # gates test more than the source — a track add also needs a play url and a title, an
+    # episode needs an enclosure — and reporting every one of those as "unsupported source
+    # 'qobuz'" sends triage after the service when the real cause was an empty title. A call
+    # site that knows which clause it failed passes it; the rest keep the source clause,
+    # which stays the common case and the wording older logs use.
+    my $src = (defined $source && length $source) ? "'$source'" : '(none identified)';
+    $log->warn('LL: rejected add — '
+        . ((defined $reason && length $reason) ? "$reason (source $src)"
+                                               : "unsupported source $src")
+        . ((defined $svc    && length $svc)    ? " via container '$svc'" : '')
+        . ' (' . ((defined $album && length $album) ? $album : '?') . ')');
     $request->addResult('count', 0);
     $request->setStatusDone;
     return;
@@ -945,7 +1354,8 @@ sub _rejectAdd {
 
 # Track-save: build a kind='track' record from resolved fields and store it. The play url
 # + source are worked out from the given url (a streaming scheme names its own source), a
-# library track id, or — for a Material Now Playing add that carries neither — the
+# track id (library, or a NEGATIVE remote one — see below), or — for a Material Now Playing
+# add that carries neither — the
 # currently-playing track (_nowPlayingTrackFallback). Rejects (silently, like the album
 # path) a source we can't replay or a track with no resolvable play url. Reached ONLY from
 # the Material custom action (addctx kind:track / a track-shaped favurl); the local
@@ -963,18 +1373,74 @@ sub _saveTrackRecord {
     if ($scheme && $scheme ne 'file') {
         $source = Plugins::ListenLater::Sources::sourceFromUrl($url);
     }
-    elsif (defined $trackId && $trackId =~ /^\d+$/) {
-        # Library track by id — take the canonical url + metadata from the object.
+    elsif (defined $trackId && $trackId =~ /^-?\d+$/) {
+        # A track id — take the canonical url + metadata from the object.
+        #
+        # A NEGATIVE id is not junk: it is LMS's own spelling of a REMOTE track. `Slim::Schema
+        # ::find` tests `$_[0] < 0` and routes it to `Slim::Schema::RemoteTrack->fetchById`
+        # (verified in the 9.1 source), and the ids the status query serves for a streaming
+        # queue row are exactly those (verified live: `qobuz://420282127.flac` sits at
+        # id=-94606967849352). Material builds a queue row's id as "track_id:"+i.id and
+        # substitutes it into $TRACKID, while those rows carry NO presetParams at all — so on
+        # a remote queue row the id is the only identity that arrives, and refusing it here is
+        # what made every one of them unaddable. Resolve it; don't relax the gate below.
         my $t = eval { Slim::Schema->find('Track', $trackId) };
-        if ($t) {
-            $source  = 'library';
-            $url     = $t->url;
-            $track   = (eval { $t->title }) // $track;
-            $artist  = (eval { $t->artistName }) // $artist;
+        my $turl = $t ? eval { $t->url } : undef;
+        if ($t && defined $turl && length $turl) {
+            # NOT hardcoded 'library' — a remote row's url names its own service, and storing
+            # a qobuz:// url under source 'library' would give a row that can never replay.
+            # Same file://-is-local rule as the scheme branch above: sourceFromUrl only
+            # answers 'library' for a url with NO scheme, and a library track's url has one.
+            my $tscheme = ($turl =~ m|^(\w+)://|) ? lc $1 : '';
+            $source  = (!$tscheme || $tscheme eq 'file') ? 'library'
+                     : Plugins::ListenLater::Sources::sourceFromUrl($turl);
+            $url     = $turl;
+            # NOT `//`. A RemoteTrack answers '' — not undef — for metadata it doesn't hold
+            # (confirmed live on a qobuz:// track: ->artistName and ->albumname are both '',
+            # which is why _nowPlayingFallback has to fail open on it). '' is defined, so `//`
+            # KEEPS it and wipes the good title/artist Material substituted from the row. On
+            # the artist that stores artist='', which then skips BOTH dedupe guards in
+            # _insertTrackRow (they test `length $artist`), never matches in
+            # Played::_matchRecord and renders with no artist; on the title it fails the add
+            # gate below outright — the very case resolving a negative id was added to fix.
+            # Take the object's value only when it HAS one (same rule as the $album lines).
+            my $ttitle  = eval { $t->title };
+            my $tartist = eval { $t->artistName };
+            $track   = $ttitle  if defined $ttitle  && length $ttitle;
+            $artist  = $tartist if defined $tartist && length $tartist;
+            # A library Track's ->album is the Album ROW. A RemoteTrack's is UNDEF — NOT the
+            # album name, which is what this comment used to claim. Verified against
+            # Slim/Schema/RemoteTrack.pm (9.1) 2026-08-27: `album` and `albumname` are two
+            # INDEPENDENT rw accessors (both in @allAttributes), and setAttributes rewrites
+            # every incoming key through %localTagMapping, which maps `album => 'albumname'`
+            # — so the `album` slot is declared and then never written by anything. There is
+            # no `sub album`, init_accessor doesn't set it, and the base (Slim::Utils::Accessor)
+            # has no AUTOLOAD. The album STRING lives only in ->albumname.
+            # So `ref $alb` is the right test for "library row vs remote", and it stays — it
+            # just separates a row from UNDEF rather than from a string.
             my $alb  = eval { $t->album };
-            $album   = (eval { $alb ? $alb->title : undef }) // $album;
-            $year  ||= (eval { $alb ? $alb->year  : undef });
-            $artwork = (eval { $alb && $alb->artwork ? 'music/' . $alb->artwork . '/cover' : undef }) // $artwork;
+            if (ref $alb) {
+                $album   = (eval { $alb->title }) // $album;
+                $year  ||= (eval { $alb->year })  || undef;
+                $artwork = (eval { $alb && $alb->artwork ? 'music/' . $alb->artwork . '/cover' : undef }) // $artwork;
+            }
+            else {
+                # Keep what the row sent (Material populates $ALBUMNAME on queue rows); fall
+                # back to the track object only for what it didn't.
+                #
+                # The `//` here is deliberate and is NOT the bug it reads as — settled
+                # 2026-08-27, don't re-raise it. The neighbouring lines use `defined &&
+                # length` because a bare RemoteTrack answers '' and that '' would overwrite
+                # a GOOD value Material sent. Neither hazard exists on this line: the
+                # statement modifier means it only runs when $album is ALREADY undef or '',
+                # so the value `//` could wrongly keep ('') is identical to the fallback it
+                # would keep it from. The `// $alb` term was dropped with the same finding —
+                # $alb is undef on every path that reaches this branch (see above), so it
+                # could never contribute.
+                $album = (eval { $t->albumname }) // $album
+                    unless defined $album && length $album;
+                $year ||= (eval { $t->year }) || undef;
+            }
         }
     }
     elsif ($scheme eq 'file') {
@@ -983,7 +1449,30 @@ sub _saveTrackRecord {
 
     # Now Playing track add (Material's `track` category): no favurl, no track id — recover
     # the play url straight from the currently-playing song on this client.
-    if ((!defined $url || !length $url) && $request->client) {
+    #
+    # THE GATE IS WHAT MAKES THIS SAFE, because _nowPlayingTrackFallback deliberately has no
+    # match guard of its own (a Now Playing track add IS the playing track, and a streaming
+    # Track exposes no metadata to match against anyway). So the caller has to establish that
+    # this really came from the Now Playing panel and not from a tapped ROW. Two conditions,
+    # beyond the empty play url:
+    #
+    #   * NO container command. `svc` names the menu the row was browsed in; the Now Playing
+    #     action ($trackCmd) carries no `svc:` param at all, so a populated one means a browse
+    #     row. This is the same test the album path makes, for the same reason — but here it
+    #     is NOT sufficient on its own, because `queue-track` uses the very same $trackCmd
+    #     and therefore also arrives with no svc.
+    #   * NO track id. That is what separates the queue from Now Playing: Material substitutes
+    #     the tapped item's own values, and any real row carries an id, while the Now Playing
+    #     panel item has neither id nor favurl to substitute (0.1.64). Testing PRESENCE, not
+    #     validity, is deliberate — the id branch above resolves EITHER sign (a library id and
+    #     a remote one both name a real track), so if we are still here with an id it named
+    #     nothing this server could resolve, and adopting the playing song for it is exactly
+    #     the bug: the user taps queue row 7 while row 1 plays and gets row 1's title and play
+    #     url stored under row 7's album and artist. An unresolvable id is rejected instead.
+    if ((!defined $url || !length $url)
+        && !(defined $f{svc}     && length $f{svc})
+        && !(defined $trackId    && length $trackId)
+        && $request->client) {
         my ($npSrc, $npUrl, $npTrack, $npArtist, $npAlbum, $npYear, $npArt)
             = _nowPlayingTrackFallback($request->client, $track, $artist);
         if ($npSrc && $npUrl) {
@@ -1001,10 +1490,15 @@ sub _saveTrackRecord {
     # Strip a trailing " (YYYY)" off the album (Material appends it) for a clean subtitle.
     if (defined $album && $album =~ s/\s*\((\d{4})\)\s*$//) { $year ||= $1; }
 
-    return _rejectAdd($request, $source, $track)
-        unless _isReplayableSource($source)
-            && defined $url   && length $url
-            && defined $track && length $track;
+    # Three separate ways to fail one `unless`, so say which — an add that arrived with a
+    # perfectly good source and an empty title used to log "unsupported source 'qobuz'".
+    if (!_isReplayableSource($source) || !(defined $url && length $url)
+                                      || !(defined $track && length $track)) {
+        return _rejectAdd($request, $source, $track,
+            !_isReplayableSource($source)   ? undef                # the default source clause
+          : !(defined $url && length $url)  ? 'no play url'
+          :                                   'no track title');
+    }
 
     my %tf = (
         source => $source, url  => $url,  track   => $track,   artist  => $artist,
@@ -1048,7 +1542,7 @@ sub _savePodcastEpisode {
     my $title = $p->{name};
     unless (defined $title && length $title) {
         $log->warn('LL: podcast add with no title — rejected');
-        return _rejectAdd($request, $rejectSource, undef);
+        return _rejectAdd($request, $rejectSource, undef, 'no episode title');
     }
 
     # The Wish List is for things you might BUY — which a podcast episode never is. The
@@ -1065,7 +1559,11 @@ sub _savePodcastEpisode {
     # inserts via _insertTrackRow directly (it doesn't go through _saveTrackRecord), so the
     # check has to be made here — and it's made BEFORE the async feed work, so a server
     # without the podcast:// handler costs nothing.
-    return _rejectAdd($request, $rejectSource, $title) unless _isReplayableSource('podcast');
+    # The tested source is 'podcast', NOT $rejectSource (which is the container the row came
+    # in under) — so say so, or the line blames whatever menu was open for a server with no
+    # podcast:// handler.
+    return _rejectAdd($request, $rejectSource, $title, 'no podcast:// handler on this server')
+        unless _isReplayableSource('podcast');
 
     # A show/section row (not an episode) resolves to nothing and is rejected below. The
     # per-command category can't be scoped to episodes only: Material's per-action filter
@@ -1077,7 +1575,12 @@ sub _savePodcastEpisode {
         my ($ep) = @_;
         return if $done; $done = 1;
 
-        return _rejectAdd($request, $rejectSource, $title) unless $ep && $ep->{url};
+        # NOT a source problem: the row came in under whatever container it was browsed in
+        # (usually 'favorites'), and what failed is that no subscribed feed yielded an
+        # enclosure for it — either a show/section row rather than an episode, or a feed
+        # that didn't resolve. Naming the source here is what sent triage the wrong way.
+        return _rejectAdd($request, $rejectSource, $title,
+            'no podcast episode resolved from the subscribed feeds') unless $ep && $ep->{url};
 
         # artist is left EMPTY and the show goes in album_title: the row then reads
         # "♪ <episode>" with "Podcast · <show>" beneath it, rather than repeating the show
@@ -1248,8 +1751,12 @@ sub _saveTrackClassify {
 # Recover (source, url, title, artist, album, year, artwork) for a Now Playing TRACK add
 # from the client's currently-playing song — the Material `track` action supplies no
 # favurl/id. Unlike the album Now-Playing fallback there's no album-match guard: a track
-# add from Now Playing is unambiguously *this* playing track. Prefers a non-http url so the
-# scheme still names the service; fills streaming album/artist/cover from the handler meta.
+# add from Now Playing is unambiguously *this* playing track, and a streaming Track exposes
+# no title/album to match against in any case (Qobuz/Tidal serve that dynamically). **That
+# makes the CALLER'S gate the only protection — see _saveTrackRecord: it must establish that
+# no container command and no track id arrived, or a tapped queue row adopts whatever happens
+# to be playing.** Prefers a non-http url so the scheme still names the service; fills
+# streaming album/artist/cover from the handler meta.
 sub _nowPlayingTrackFallback {
     my ($client, $wantTrack, $wantArtist) = @_;
 
@@ -1568,8 +2075,9 @@ sub _stripPrivateParams {
 sub _addCtxCommand {
     my $request = shift;
 
-    # Unpopulated Material $VARS arrive as the literal token (e.g. "$ALBUMNAME") —
-    # treat those as undef.
+    # An unpopulated Material $VAR arrives EMPTY for every name in doReplacements'
+    # ACTION_KEYS list, but as the LITERAL token for one that isn't in it — $IMAGE, the
+    # only such var we send. Map the literal to undef so both spellings read as absent.
     my %p = map {
         my $v = $request->getParam($_);
         $v = undef if defined $v && $v =~ /^\$[A-Z]/;
@@ -1586,6 +2094,26 @@ sub _addCtxCommand {
 
     $log->warn('LL: addctx params -> '
         . join(', ', map { "$_=" . (defined $p{$_} ? $p{$_} : '(undef)') } qw(name artist albumid year trackname trackid favurl image svc)));
+
+    # Never add from one of OUR OWN surfaces. Every row there is already in the list, and
+    # re-adding one bounces a Played album back to Listen Later — which is precisely what the
+    # empty 'listenlater-*'/'LLHome-*' suppressor categories exist to prevent. But a written
+    # category is not a gate: Material serves customactions.json from cache, so there is a
+    # post-upgrade window where the old file is still in force (the documented 0.1.57
+    # window), and the add COMMAND is this plugin's one reliable gate everywhere else.
+    #
+    # It used to be gated here too, by accident: the old `^[a-z0-9]+$` shape test made
+    # svc='LLHome' the $source, and an unreplayable source was rejected two screens down.
+    # knownSource (rightly, 0.1.96) leaves a non-service command EMPTY so the cover-URL sniff
+    # can identify a home-shelf row — but OUR cards carry the original streaming cover, so
+    # that sniff now answers 'qobuz' for a row we saved from Qobuz and the re-add succeeds.
+    # Name the surfaces explicitly rather than leaning on a side effect of how svc is judged.
+    #
+    # Ahead of every branch below, including kind:podcast: a podcast episode in our own list
+    # is no more re-addable than an album.
+    if (Plugins::ListenLater::Sources::ownSurface($p{svc})) {
+        return _rejectAdd($request, '', $p{name}, 'row is already in Listen Later');
+    }
 
     # Track save. Two signals decide album-vs-track:
     #  (1) an explicit kind:track category — library album-track / playlist-track /
@@ -1611,7 +2139,15 @@ sub _addCtxCommand {
         # parent album is unknown → leave it to the '&al=' handshake (usually undef).
         my $album = defined $p{trackname} ? ($favAlbum // $p{name}) : $favAlbum;
         return _saveTrackRecord($request, $list,
-            source  => (($p{svc} && $p{svc} =~ /^[a-z0-9]+$/i) ? lc $p{svc} : ''),
+            # `svc` is only trusted when it NAMES a service (Sources::knownSource) — Material's
+            # $SERVICE is the browse command, which on a home shelf is the shelf id. Masked on
+            # this path today (a track row's favurl names its own source below), but the hole
+            # is identical, so it's closed in both places.
+            source  => (Plugins::ListenLater::Sources::knownSource($p{svc}) ? lc $p{svc} : ''),
+            # The RAW svc as well as the source it yielded: _saveTrackRecord's now-playing
+            # fallback needs to know whether a container command arrived AT ALL, and a
+            # non-service one (favorites, a home-shelf id) leaves `source` empty.
+            svc     => $p{svc},
             artist  => ($p{artist} // $favArtist),
             album   => $album,
             track   => $trackTitle,
@@ -1708,10 +2244,20 @@ sub _addCtxCommand {
         # explicitly as svc (a Material view belongs to one service), else inferred from
         # the cover host. NB: do NOT invent a default service here — if svc and the cover
         # host both come up empty we genuinely can't identify the item (e.g. an LB
-        # playlist row: hyphenated svc that fails the ^[a-z0-9]+$ test + a plugin-PNG
-        # image), so leave $source empty and let the reject gate below refuse it, rather
-        # than guessing 'qobuz' and storing an unplayable row.
-        my $svc = ($p{svc} && $p{svc} =~ /^[a-z0-9]+$/i) ? lc $p{svc} : '';
+        # playlist row: a hyphenated svc + a plugin-PNG image), so leave $source empty and
+        # let the reject gate below refuse it, rather than guessing 'qobuz' and storing an
+        # unplayable row.
+        #
+        # `svc` must NAME a service to be believed (Sources::knownSource), not merely LOOK like
+        # one. Material's $SERVICE is the browse COMMAND, and on a home shelf that command is
+        # the home-extra id — so the stock Qobuz plugin's own "Qobuz" shelf sends
+        # svc='QobuzExtrasqobuz' for exactly the rows the Apps menu sends svc='qobuz' for.
+        # The old shape test (`^[a-z0-9]+$`) accepted that, which made $svc truthy and
+        # short-circuited the `||` — so the cover sniff below, which had the right answer
+        # sitting in a static.qobuz.com URL, was never consulted and the add was rejected.
+        # (Its hyphenated sibling shelves — QobuzExtrasnew-releases-full etc. — failed the
+        # shape test and therefore worked, which is why this went unreported for so long.)
+        my $svc = Plugins::ListenLater::Sources::knownSource($p{svc}) ? lc $p{svc} : '';
         $source = $svc || Plugins::ListenLater::Sources::sourceFromImage($artwork) || '';
         $ref    = { _svc => $source };
         # Qobuz browse rows carry no favurl/album id, but the cover URL embeds the album
@@ -1734,7 +2280,19 @@ sub _addCtxCommand {
     # straight from the player's current song. Guarded inside _nowPlayingFallback by
     # matching the playing track's album/artist to the params, so a stray empty-favurl
     # Add (e.g. an LB playlist tile) can never adopt an unrelated playing track.
-    if (!length($source // '') && $request->client) {
+    #
+    # It also requires that NO container command arrived. `svc` names the menu the row was
+    # browsed in, and the Now Playing action ($trackCmd) does not carry a `svc:` param at
+    # all — so a populated one means this add came from a browse ROW, not the Now Playing
+    # panel, and the playing track is unrelated by construction. That test used to be
+    # implicit in `$source`: before 0.1.96 a shape-passing svc ('favorites', 'search',
+    # 'bbcsounds', a home-shelf id) BECAME the source and closed this gate. knownSource
+    # (rightly) leaves those empty, which would open it — and _nowPlayingFallback FAILS
+    # OPEN when the playing track exposes no album/artist to match against, which is the
+    # normal case for a streaming track. A podcast episode added from Favourites while a
+    # Qobuz track played would then be stored as a qobuz album (unplayable), and the
+    # last-resort podcast resolve below — the whole point of 0.1.85 — would never run.
+    if (!length($source // '') && !(defined $p{svc} && length $p{svc}) && $request->client) {
         my ($npSrc, $npRef, $npAlbum, $npArtist, $npYear, $npArt)
             = _nowPlayingFallback($request->client, $album, $artist);
         if ($npSrc) {

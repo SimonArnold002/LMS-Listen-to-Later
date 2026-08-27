@@ -69,6 +69,12 @@ use warnings;
     sub preferences { return bless { ns => $_[0] }, 'Slim::Utils::Prefs::Obj' }
     sub set_test_pref { $VALUES{$_[0]} = $_[1] }
     sub set_test_pref_ns { my ($ns,$k,$v) = @_; _store($ns)->{$k} = $v }
+    # Slim::Utils::Prefs::dir() — the server's prefs directory. Plugin.pm builds the path to
+    # Material's shared actions.json from it, so a suite touching that sets $DIR to a temp dir.
+    # Defaults to nothing, so a test that forgets writes to './material-skin' rather than
+    # silently editing a real one.
+    our $DIR;
+    sub dir { return defined $DIR ? $DIR : '.' }
     package Slim::Utils::Prefs::Obj;
     sub _s   { return Slim::Utils::Prefs::_store($_[0]->{ns}) }
     sub get  { return $_[0]->_s->{ $_[1] } }
@@ -131,6 +137,23 @@ BEGIN { *CORE::GLOBAL::time = sub () { CORE::time() + ($TestClock::OFFSET || 0) 
     sub AUTOLOAD {} sub DESTROY {}
     $INC{'Slim/Utils/PluginManager.pm'} = __FILE__;
 }
+# Slim::Control::Request — executeRequest() answers with whatever a test puts in %RESULTS,
+# keyed by the first word of the command ('radios', 'apps'), and NOTHING by default. The
+# radio-suppressor write enumerates the server's 'radios' menu, so leaving this empty is what
+# makes that write depend only on the hardcoded @KNOWN_RADIO_CMDS seed — i.e. deterministic.
+{
+    package Slim::Control::Request;
+    our %RESULTS;
+    sub executeRequest {
+        my ($client, $cmd) = @_;
+        my $loop = $RESULTS{ $cmd->[0] // '' } or return undef;
+        return bless { loop => $loop }, 'Slim::Control::Request::Obj';
+    }
+    sub addDispatch {}
+    package Slim::Control::Request::Obj;
+    sub getResult { return $_[0]->{loop} }
+    $INC{'Slim/Control/Request.pm'} = __FILE__;
+}
 {
     package Slim::Networking::SimpleAsyncHTTP;
     sub AUTOLOAD {} sub DESTROY {}
@@ -172,14 +195,60 @@ BEGIN { *CORE::GLOBAL::time = sub () { CORE::time() + ($TestClock::OFFSET || 0) 
     # find('Album', $id) — set $ALBUM_YEAR to what the local library should report, or leave
     # it undef for "no such album" (the default, so nothing passes by accident).
     our $ALBUM_YEAR;
+    # find('Track', $id) — the id branch of Plugin::_saveTrackRecord. A test registers the
+    # tracks the server is supposed to know about (add_test_track); anything else is NOT
+    # FOUND, so an assertion can never pass against a track the test didn't create.
+    #
+    # A NEGATIVE id is LMS's own spelling of a REMOTE track: the real find() tests `< 0` and
+    # hands off to Slim::Schema::RemoteTrack->fetchById. A RemoteTrack has no Album ROW — its
+    # ->album answers the album NAME (a plain string) and ->albumname/->year sit on the track
+    # itself. The plugin branches on exactly that difference, so the stub has to have it.
+    our %TRACKS;
+    sub add_test_track {
+        my (%t) = @_;   # id, url, title, artist, album (string OR an Album object), year
+        $TRACKS{ $t{id} } = bless {%t}, 'Slim::Schema::Track';
+        return $TRACKS{ $t{id} };
+    }
+    sub clear_test_tracks { %TRACKS = () }
     sub search { return bless {}, 'Slim::Schema::Rs' }
     sub find   {
         my (undef, $kind, $id) = @_;
+        return $TRACKS{$id} if ($kind // '') eq 'Track' && defined $id;
         return undef unless ($kind // '') eq 'Album' && defined $ALBUM_YEAR;
         return bless { year => $ALBUM_YEAR }, 'Slim::Schema::Album';
     }
+    package Slim::Schema::Track;
+    # A REMOTE track (negative id) answers '' — never undef — for metadata it doesn't hold:
+    # Qobuz/Tidal serve it dynamically through a metadata provider, so the RemoteTrack row
+    # itself is bare (confirmed live: a qobuz:// track's ->artistName and ->albumname are
+    # both ''). Handing back undef for a field the test didn't supply would be the ONE thing
+    # that makes a `//` fallback in the plugin look like it works, so the stub has to answer
+    # the way the server does. A library Track keeps undef.
+    sub _meta {
+        my ($self, $key) = @_;
+        return $self->{$key} if defined $self->{$key};
+        return (($self->{id} // 0) < 0) ? '' : undef;
+    }
+    sub _isRemote  { return (($_[0]->{id} // 0) < 0) ? 1 : 0 }
+    sub url        { return $_[0]->{url} }
+    sub title      { return $_[0]->_meta('title') }
+    sub artistName { return $_[0]->_meta('artist') }
+    # ->album on a REMOTE track is UNDEF, not the album name — verified against
+    # Slim/Schema/RemoteTrack.pm (9.1) 2026-08-27, correcting what this stub and the plugin
+    # both used to say. `album` and `albumname` are two INDEPENDENT rw accessors (both in
+    # @allAttributes), and `setAttributes` rewrites every incoming key through
+    # %localTagMapping, which maps `album => 'albumname'` — so the `album` slot is declared
+    # and never written by anything. `init_accessor` doesn't set it, there is no `sub album`,
+    # and the base is Slim::Utils::Accessor with no AUTOLOAD. The album STRING is only ever
+    # in `albumname`.
+    sub album      { return _isRemote($_[0]) ? undef : $_[0]->_meta('album') }
+    # albumname is the RemoteTrack side of that pair; a library Track has no such accessor.
+    sub albumname  { return _isRemote($_[0]) ? $_[0]->_meta('album') : undef }
+    sub year       { return $_[0]->{year} }
     package Slim::Schema::Album;
-    sub year { return $_[0]->{year} }
+    sub year    { return $_[0]->{year} }
+    sub title   { return $_[0]->{title} }
+    sub artwork { return $_[0]->{artwork} }
     package Slim::Schema::Rs;
     sub count { return $Slim::Schema::TRACK_COUNT }
     $INC{'Slim/Schema.pm'} = __FILE__;

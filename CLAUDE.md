@@ -3,6 +3,93 @@
 ## Project Overview
 A plugin for Lyrion Music Server (LMS) that lets you save an album — from the local library or any streaming service (Qobuz, Bandcamp, Tidal, Deezer) — into a curated **Listen Later** list, browse it like a playlist *of albums*, and have albums move to a **Played** section once most of the album has been heard. A separate **Wish List** wishlist (0.1.22) sits alongside, and albums can be moved freely between the three lists. It also adds a **Material home-page shelf** for the list. Targets LMS v9.x, Material Skin preferred (classic best-effort). Storage is a plugin-owned SQLite database so the list is sortable, deduped, history-bearing, and ready for future features.
 
+## Review Ledger — READ THIS BEFORE REPORTING ANY FINDING
+
+**Why this exists.** Reviews kept re-reporting things that had already been
+decided — deliberate conventions read as defects, and verdicts that lived only in
+a chat transcript. Review and fix happen in separate sessions, so nothing carries
+a decision forward. Everything below has already been settled; re-raising it costs
+a round trip and teaches the next review nothing.
+
+*Measured 2026-08-26, and worth recording because the obvious explanation is
+WRONG: this is not caused by the uncommitted baseline. Pitchfork Reviews ran five
+review rounds against a single uncommitted tree of 13,227 insertions, with a
+baseline frozen for 13 days, and converged 4 → 4 → 4 → 2 → 1 → clean on one
+commit. Diff size and commit cadence are not the variable. An undecided verdict
+with nowhere to live is.*
+
+**If you are reviewing:** read sections A and B first, and report an item from
+them only if you have genuinely NEW information — a case the recorded reasoning
+does not cover. Say which ledger entry you are challenging and what changed.
+
+### A. NOT FINDINGS — deliberate, fleet-wide
+
+- **The zip is not rebuilt and `repo.xml <sha>` is not recomputed in the working
+  tree.** Both happen at build time, together with the version bump. A stale zip
+  or sha on `dev` is the normal state, not a defect.
+- **`CHANGELOG.md` and `README` are written at the MERGE TO MAIN, not on dev
+  builds.** A CHANGELOG whose newest entry is many versions behind `install.xml`
+  is CORRECT on `dev`. Dev builds update `CLAUDE.md`, `docs/*.md` and the memory
+  notes only.
+- **The large uncommitted working tree is deliberate.** It is the review diff.
+  Do not report it, and do not prompt to commit as a fix for anything.
+- **`install.xml` / `repo.xml` being ahead of the docs on `dev`** follows from the
+  two rules above.
+
+### A2. NOT FINDINGS — Listen Later specific
+
+- **LL's matcher copy is a deliberately LENIENT, hash-pinned variant**, not drift.
+  A saved streaming item replays with EMPTY artist metadata (0.1.66), so an empty
+  artist must match. The pins live in
+  `../LMS-ListenBrainz-New-Releases/tools/matcher_sync_check.py` (`_norm`,
+  `_albumMatches`, `_artistMatch`) and the check passes them as documented
+  variants. Do not "fix" the leniency.
+- **An ASSERTED release type inserts immediately and corrects in the background.**
+  Only an UNKNOWN type blocks the add. This is a settled UX call: a visible delay
+  on every add is worse than a type that self-corrects seconds later.
+- **Drag-and-drop to move between sections is NOT feasible** — Material hardcodes
+  `canDrop` to Favourites/editable playlists/the queue. It needs an upstream
+  Material change; see the section below.
+- **Custom actions on Material HOME shelves work only after a streaming browse.**
+  Diagnosed to a main-bundle limitation, and **deliberately left unpatched** to
+  keep the Material footprint to the single deferred-bundle patch.
+- **Individual-Track saves are SCOPED BUT NOT BUILT** (~1 day). Known risks are
+  recorded. "Tracks aren't supported" is not a finding.
+
+### B. KNOWN-OPEN AND ACCEPTED — do not re-report as new
+
+- **`matcher_sync_check.py` exits 1 fleet-wide.** A known, deliberate hold while
+  DSC's provisional `_albumMatches` alias pass proves in the field. LL's own
+  copies are pinned variants and pass. Not a regression here.
+
+- **The `//` on `$t->albumname` is NOT a defect — SETTLED 2026-08-27 against the LMS source.
+  Do not re-raise it.** The finding was that the line uses `//` where its neighbours use
+  `defined && length`, so a RemoteTrack's `''` would win over `$alb`. Probed
+  `Slim/Schema/RemoteTrack.pm` (9.1): the harm cannot occur, for two independent reasons.
+  (1) `$alb` is **undef** on every path reaching that branch — `album` and `albumname` are two
+  independent rw accessors and `setAttributes` maps every incoming `album` key to `albumname`
+  via `%localTagMapping`, so the `album` slot is declared and never written; the term was dead
+  and has been removed. (2) The statement modifier means the line only runs when `$album` is
+  already undef or `''`, so the `''` that `//` would wrongly keep is identical to the fallback
+  it would keep it from. **The real error was the COMMENT** — both here and in `t_stubs.pl` it
+  claimed a RemoteTrack's `->album` is the album name. It is undef. Both corrected, and the
+  stub now models `album`/`albumname` as the separate accessors they are; the suite stays green
+  through the correction, which is what shows behaviour never depended on it.
+
+### C. CLOSED FINDINGS
+
+The version history below records review fixes inline (0.1.26, 0.1.32 onward).
+Check it before reporting — the July `%counting`, `classifyRelType` and
+`_verifyRelease` findings are all fixed and verified (`COUNT_STALE_SECS` is the
+escape for the first).
+
+### D. ADDING TO THIS LEDGER
+
+When a finding is declined, or accepted-but-deferred, add it here in the same
+session — one line, with the reason. A decision that lives only in a chat
+transcript will be rediscovered as a finding within days. That is the whole
+mechanism this ledger replaces.
+
 ## Server Details
 - **LMS Server**: 192.168.1.234:9000
 - **OS**: DietPi (Debian Bookworm)
@@ -67,10 +154,81 @@ Three section icons, set in `Browse.pm` (`_iconFor($status)` → `_header`/`_alb
 - **Why Wish List uses the font but Played can't**: Material's bundled icon font (Release 6.4.3, matching the box) **has** `shopping_cart` but **not** `music_history` (verified via the font's GSUB ligatures with fontTools) — an `_MTL_icon_music_history` would render blank. So Played's `music_history` had to be shipped as a recoloured `.svg` instead. (Confirm new font icons exist in `test-artifacts/lms-material/.../font/MaterialIcons.ttf` before using `_MTL_icon_`.)
 - **No SVG rasteriser on this Mac** (no cairo/rsvg/inkscape; svglib's renderPM needs cairo). The PNGs are generated **qlmanage → Pillow** (the documented sibling-plugin path): `qlmanage -t -s 512` renders the `.svg` onto white, then Pillow does luminance→alpha (black art, transparent bg), trims to content bbox, and centres on a 256² canvas with 8% pad. Black-on-transparent so both the recolour and classic fallbacks look right.
 
+## How the "Add" entries REACH Material (0.1.95) — registered, not written
+
+**Material 6.4.6 added a registration API and that is now the primary path.**
+`Plugins::MaterialSkin::Plugin::registerCustomAction($section, $action)` stores the entry in
+Material's own `$PLUGIN_CUSTOM_ACTIONS`, which it serves over the CLI query
+`["material-skin","plugin-actions"]`; `customactions.js` fetches that at app start into
+`pluginCustomActions` and `getSectionActions` walks **both** lists — `customactions.json` first,
+plugin-registered second. Upstream commit `4f16fc9f`, ChangeLog 6.4.6 item 7.
+
+**What LL sends which way** (`Plugin::_materialActionSet` builds both sets from ONE definition,
+so there is never a second spelling of a command):
+
+| | delivery | why |
+|---|---|---|
+| `album`, `album-track`, `playlist`, `playlist-track`, `online-album`, `online-track` | **registered** (6.4.6+), file on older Material | the actual "Add" entries, and Material RE-RESOLVES all six per browse response (immune to load-order) |
+| `track` (Now Playing), `queue-track` | **file, always** | the only two Material resolves in the BROWSER, and it snapshots them once — on an event our half never fires (0.1.97) |
+| `podcasts-album`/`-track` | **file, always** | a per-app override, and Material only consults those from the file |
+| `listenlater-*`, `LLHome-*`, the radio empties | **file, always** | an EMPTY category cannot be registered at all |
+
+**THE FAILURE MODE TO KNOW: the two lists are MERGED, so registering while our old entries are
+still in the file shows every "Add" TWICE.** `_writeMaterialActions` runs on both paths and its
+existing strip pass is what removes them — that is why the file write still happens on 6.4.6+,
+and why it must never be skipped just because the API is available. Pinned by
+`tools/t_material_actions.pl`.
+
+**`registerCustomAction` PUSHES — no de-dupe, and no unregister.** Registering twice duplicates
+every entry, so it happens exactly once per server run (`$REGISTERED`, set in `postinitPlugin`);
+the Settings save and the +60s deferred radio write both re-run the FILE write only. And with no
+unregister, turning the `material_action` pref OFF removes the registered entries **at the next
+restart** — the file half clears immediately, on the Settings save itself (0.1.97). Said in the
+pref description and in the log.
+
+**And while those registered entries are still live, the EMPTY SUPPRESSORS MUST NOT BE DELETED
+(0.1.98).** They are the only thing holding the registered `online-*` pair off our own list, the
+home shelf and radio browse rows — so clearing them "to turn the feature off" does the opposite of
+what it says: "Add" appears on every Listen Later/Played row until the restart, and using it on a
+Played row bounces that row back. `_clearMaterialActions` therefore keeps and re-asserts them
+whenever `$REGISTERED_N` is non-zero — **all three families, the radio ones
+(`_radioSuppressorCats`) included, because with the file missing there is nothing on disk to
+keep and they have to be re-created** — and clears them only on the path where nothing
+registered. This is the 0.1.52 rule (an empty category is not neutral, it suppresses) meeting the no-unregister
+one, and it is why the two halves cannot be torn down in the same order.
+
+**Three things the API cannot express, and why** (all verified against the SERVED 6.4.7 bundle,
+not inferred): Material decides whether an app's own `<command>-<type>` category overrides the
+generic `online-*` with `appCat in customActions` — the **file object only**, never
+`pluginCustomActions`; `registerCustomAction` takes an action and pushes it, so "this
+category exists and is empty" has no spelling; and `track`/`queue-track` are snapshotted in the
+browser on `bus.$on("customActions", …)`, whose only `$emit` is inside the `.then` of the
+`customactions.json` GET — the plugin-actions CLI response does not emit, so anything registered
+in those two sections is typically not there yet when the snapshot is taken, and never recovers
+(0.1.97). A ~5-line upstream fix for both is drafted in
+`docs/material-plugin-action-sections.patch` + `docs/PR-body-plugin-sections.md` (check either
+list for the category; make `$action` optional). **When that ships, the whole actions.json
+apparatus — `_writeMaterialActions`, `_clearMaterialActions`, `_readMaterialActions`,
+`_materialActionsFile`, the radio empties — can be deleted outright.**
+
+**The 0.1.57 app-start cache lesson now applies to the FILE HALF ONLY.** `customactions.json` is
+fetched with a `?r=<material version>` cache-buster, so a late write is invisible to an open tab
+until a hard refresh; the plugin-actions CLI query is not browser-cached, so a registered entry
+is current on every app start. The `debug_log` snapshot's first line says which half a category
+is on.
+
+**Custom actions on SEARCH results came free in 6.4.6** — `buildSearchResp` now emits
+`itemCustomActions` as a map keyed by type, `browse-page.itemCustomActs(item)` picks the right
+list from the item's own id (`album_id:` → `album`), and `browseActions` falls back to
+`getCustomActions(<category for the stdItem>)` when the view property is empty. LL's existing
+`album`/`album-track`/`playlist` categories therefore appear on library search results with **no
+plugin change**. (Same upstream fix closes the "no entry on search results" limit recorded in
+the Discography repo.)
+
 ## Material custom actions on streaming "…" menus (the hard problem — solved, released in Material 6.4.4)
 Goal: an **"Add to Listen Later"** entry on a streaming **album row while browsing** (Qobuz New Releases, etc.), where the service plugin owns the "…" menu so TrackInfo/AlbumInfo providers can't reach it. Material's **custom actions** (`prefs/material-skin/actions.json`, served at `/material/customactions.json`) are the only hook — but out of the box they appear on **library** items only.
 
-**STATUS (2026-07): MERGED upstream AND RELEASED in Material 6.4.4** — [PR #1235](https://github.com/CDrummond/lms-material/pull/1235) landed on `dev` (`b631754`), merged to `master` (`519b03a`), and shipped in the **Material 6.4.4** release (tag `6.4.4`, master `9be80db`). So there is **no more local bundle patching** — the feature ships in stock Material. Verified live on the box: it runs the stock 6.4.4 deferred bundle (561 KB, i.e. the un-patched size — the old patched build was 889 KB) and the streaming online actions are served and functional. The released code does exactly what the patch did — sets `i.service`=browse command (exposed as **`$SERVICE`**), sets `i.album=i.title`/`i.artist=i.subtitle`, and resolves the per-app `<command>-<type>` category with `online-<type>` fallback. The `$SERVICE` streaming feature is **6.4.4+**; `header-basic` (below) predates it (**6.4.3+**). On Material older than 6.4.4 the streaming-browse "Add" degrades to *entry absent* (the online browse path doesn't exist there) — every other add path is unaffected. No Perl-side `registerAction` API was added upstream, so the plugin's direct `actions.json` write (`_writeMaterialActions`) remains the correct mechanism. The original full trace, kept for context:
+**STATUS (2026-07): MERGED upstream AND RELEASED in Material 6.4.4** — [PR #1235](https://github.com/CDrummond/lms-material/pull/1235) landed on `dev` (`b631754`), merged to `master` (`519b03a`), and shipped in the **Material 6.4.4** release (tag `6.4.4`, master `9be80db`). So there is **no more local bundle patching** — the feature ships in stock Material. Verified live on the box: it runs the stock 6.4.4 deferred bundle (561 KB, i.e. the un-patched size — the old patched build was 889 KB) and the streaming online actions are served and functional. The released code does exactly what the patch did — sets `i.service`=browse command (exposed as **`$SERVICE`**), sets `i.album=i.title`/`i.artist=i.subtitle`, and resolves the per-app `<command>-<type>` category with `online-<type>` fallback. The `$SERVICE` streaming feature is **6.4.4+**; `header-basic` (below) predates it (**6.4.3+**). On Material older than 6.4.4 the streaming-browse "Add" degrades to *entry absent* (the online browse path doesn't exist there) — every other add path is unaffected. *(That was true of 6.4.4: no Perl-side registration API existed, so the plugin's direct `actions.json` write was the only mechanism. **Material 6.4.6 added one** — see the section above; the streaming `$SERVICE` mechanics described below are unchanged, only the delivery of the entries moved.)* The original full trace, kept for context:
 
 - **Bundles**: Material ships two minified JS bundles. `material.min.js` (**main**) contains `customactions.js` (`getCustomActions`, `doReplacements`, `doCustomAction`) and `browse-page.js` (renders the menu). `material-deferred.min.js` (**deferred**) contains `browse-resp.js`, `browse-functions.js`, `standarditems.js`. The deferred build list is the `addJsToDocument("html/js/",[…])` array in `index.html`.
 - **Why library-only**: per-item custom actions are added in `browse-functions.js` only when `item.stdItem < STD_ITEMS.length` **and** `STD_ITEMS[item.stdItem].actionMenu` contains the `CUSTOM_ACTIONS` (`-2`) marker. Online items have `stdItem` **300/301** (`STD_ITEM_ONLINE_ARTIST/ALBUM`), far beyond `STD_ITEMS.length` (~16) — so they **bypass that whole path**. (And `standarditems.js` has `CUSTOM_ACTIONS` commented out on the online-album entry anyway.)
@@ -516,8 +674,8 @@ The "Add to Listen Later"/"Add to Wish List" custom actions appear on streaming 
   ours; another plugin's real entries survive and still override `online-*` → Add hidden either way), and adds
   those keys to `%keep` so the 0.1.52 delete-empties pass leaves them — the one place we WANT an empty category
   to persist (empty overrides `online-*`, which is exactly the suppression we want; cf. 0.1.52's lesson used in
-  reverse). **Browse rows only.** A radio HOME-SHELF card has no per-command identity (all shelves arrive in one
-  `material-skin` home-extra call → resolves via shared `online-*`), so its Add can't be hidden here — it stays
+  reverse). **Browse rows only.** A radio HOME-SHELF card can't be hidden here (all shelves arrive in one
+  `material-skin` home-extra call → resolves via shared `online-*`) — it stays
   a harmless add-time reject (0.1.51). This does NOT resurrect the full 0.1.46–0.1.50 saga (apps blocklist,
   scheme filter, home-shelf scoping) — only the radios slice, which is legitimate and self-contained.
 - **0.1.56** — **Fix: 0.1.55 only blocked BBC Sounds, not TuneIn.** The `radios` enumeration runs at
@@ -1110,6 +1268,494 @@ The "Add to Listen Later"/"Add to Wish List" custom actions appear on streaming 
   code, the decisive one reproducing the live symptom exactly: `90 survives the copy that used to
   undo it → got '60'`).
 
+- **0.1.95** — **The Material "Add" entries are REGISTERED with Material instead of written
+  into its shared actions.json.** Material 6.4.6 added `registerCustomAction($section,
+  $action)`; LL now hands over its eight menu categories on 6.4.6+ and keeps the file write
+  only for what the API cannot express — the empty suppressors (own list, home shelf, radio
+  browse rows) and the `podcasts-*` override, because Material resolves an app's own
+  `<command>-<type>` category from the FILE object alone (`appCat in customActions`, verified
+  in the served 6.4.7 bundle). Older Material is untouched: `_useActionApi` is a `->can` test,
+  and without the API the file gets everything exactly as before, byte for byte.
+  **The one dangerous property is that the two lists are MERGED** — file first, then
+  plugin-registered — so registering while our old entries are still in the file shows every
+  "Add" TWICE. That is why `_writeMaterialActions` still runs on the API path: its strip pass
+  is the upgrade. `_materialActionSet` builds both sets from one definition, so the registered
+  and written entries can't drift. **`registerCustomAction` pushes, with no de-dupe and no
+  unregister**, so registration is once per server run (`$REGISTERED` — `our`, so a test can
+  re-arm it) and turning the pref off takes effect at the next restart, which the pref
+  description now says. Also **new for free from 6.4.6: "Add" on library SEARCH results**, from
+  the categories LL already defines — no plugin change, just a check. Covered by
+  `tools/t_material_actions.pl`, anti-tested against three injected bugs (write the positives to
+  the file as well → 4 failures; drop the once-only guard → 3; keep the emptied categories → 1).
+  The upstream fix that would let the last three categories move too is drafted in
+  `docs/material-plugin-action-sections.patch`.
+
+- **0.1.96** — **A Material HOME SHELF's browse verb is not a service name — Qobuz adds from the
+  home screen were silently refused.** Reported as "can't add from Qobuz New Releases, but a
+  playlist works"; unreproducible on the dev box for weeks because it depends on WHICH DOOR you
+  enter Qobuz by, not on any version.
+  **What `$SERVICE` actually is.** Material takes it verbatim from `data.params[1][0]` — the
+  browse COMMAND of the menu the row came from. From **Apps → Qobuz** that is `qobuz`. From the
+  Material **home screen's "Qobuz" shelf** it is the home-extra id: the stock Qobuz plugin
+  registers `3rdparty_QobuzExtrasqobuz` ("Qobuz"), `QobuzExtrasnew-releases-full`,
+  `QobuzExtrasbest-sellers`, `QobuzExtraspress-awards`. Verified live on the dev server with no
+  third-party plugin involved: `["QobuzExtrasqobuz","items",0,11,"menu:QobuzExtrasqobuz"]` returns
+  the **identical 11-item Qobuz app menu**, New Releases included. So the user was right that he
+  was browsing the main Qobuz plugin's New Releases — same content, different dispatch.
+  **The defect was ours.** `_addCtxCommand` validated `svc` by SHAPE (`^[a-z0-9]+$`, written only
+  to reject Material's unpopulated literal `"$SERVICE"` and hyphenated non-services). An
+  all-alphanumeric shelf id passes it, so `$svc` was truthy, the `||` short-circuited, and
+  `sourceFromImage` — which had the right answer sitting in the row's `static.qobuz.com` cover —
+  was never consulted. `$source` became `'qobuzextrasqobuz'`, `_isReplayableSource` said no, and
+  `_rejectAdd` dropped it **silently** (`count:0`, no toast by design since 0.1.51).
+  **Why it went unreported for so long, which is the useful half:** the hyphenated shelves
+  (`…new-releases-full`, `…best-sellers`) FAIL the shape test and therefore fell through to the
+  cover sniff and worked. Only the one shelf whose id happens to be all letters broke. So the
+  Qobuz **"New Releases" shelf** worked while the Qobuz **"Qobuz" shelf** — which contains New
+  Releases — did not.
+  **Fix:** `Sources::knownSource` — `svc` is believed only when it NAMES a service, never when it
+  merely looks like one; otherwise fall through to the cover sniff. Applied at BOTH call sites
+  (the album path, and the track path where the same hole is masked by a favurl naming its own
+  source). Deliberately an EXACT match, never a substring: `QobuzExtrasqobuz` contains `qobuz`,
+  and so would a hypothetical `tidalqobuz`. `deezer`/`spotify` stay IN the known list even though
+  they can't be replayed, so an add naming them is still refused under its own name rather than
+  re-sniffed from a cover — behaviour there is unchanged.
+  **Blast radius beyond Qobuz** (from the live `LMS_3RDPARTY_HOME_EXTRA`): `TIDALExtrastidal`,
+  `Bandcampweekly`, `Bandcampdaily`, `BBCSoundsExtras*` are all the same shape. In practice it
+  bit only Qobuz, because a favurl takes the `$streaming` branch and never consults `svc` at all —
+  and Qobuz album rows are the ones with no `presetParams` whatsoever.
+  **Corrects a standing assumption in this file**: the note beside the radio suppressors said a
+  home-shelf card "has no per-command identity". It has one — it just isn't the service tag.
+  Covered by `t_addpath.pl`, anti-tested: reverting the album-path line reproduces the live
+  symptom exactly (home-shelf verb REJECTED, while the Apps verb and the hyphenated shelf both
+  keep working). Podcast `CACHE_VER` bumped with the build per the dev-build cache rule; nothing
+  in this change touches feed parsing.
+
+  **Two code-review findings on the 0.1.95–0.1.96 work, both fixed before release
+  (2026-08-23). Neither shipped.**
+
+  1. **`knownSource` widened the NOW-PLAYING FALLBACK, and that fallback fails open.** The
+     fallback (0.1.64) recovers the source from the PLAYING track when an add arrives with
+     nothing to identify it, and it deliberately **fails open on its own match guard** — a
+     streaming Track exposes no `albumname`/`artistName` to match against (Qobuz/Tidal serve
+     that dynamically), so refusing there would reject every legitimate Now Playing add. What
+     actually kept it out of browse adds was `$source` being non-empty, and *that* is what
+     0.1.96 changed: every container command that isn't a service name (`favorites`, `search`,
+     `bbcsounds`, any home-shelf id) now leaves `$source` empty and opens the gate. Reproduced
+     against this tree — a podcast episode added from **Favourites** while a Qobuz track played
+     was stored as `source=qobuz` (an unplayable row), and the 0.1.85 last-resort podcast
+     resolve never ran, because the row now looked replayable. **Fix:** the gate also requires
+     that no `svc` arrived at all. Material's Now Playing action (`$trackCmd`) carries no
+     `svc:` param, so a populated one means a browse ROW and the playing track is unrelated by
+     construction. Strictly tighter than both the old shape test and the new one. Covered by
+     `t_addpath.pl`, anti-tested (reverting the gate stores the podcast as a qobuz album while
+     the genuine Now Playing add keeps working, so neither assertion can pass by the fallback
+     simply being off).
+  2. **A refused `registerCustomAction` left the entries in NEITHER place.** `$REGISTERED` was
+     latched even when every call died, and `_writeMaterialActions` chose its path with the
+     CAPABILITY test (`_useActionApi`) rather than with what registration actually achieved —
+     so a failure stripped our entries from `actions.json` and registered nothing. The
+     diagnostics couldn't show it either: on the API path the dump counted `%positive`, i.e.
+     what was *built*, so `online-*` always read "Add active". **Fix:** `%UNREGISTERED` records
+     what the API refused, **per action** (the two lists are merged client-side, so
+     file-writing something Material took would double it), the write path is chosen by
+     `$REGISTERED && _useActionApi()`, and those refused entries are written to the file. The
+     dump now counts both halves separately (`2 registered, 0 in actions.json`) and says so on
+     the delivery line. `$REGISTERED_N` (how many Material actually took) replaces `$REGISTERED`
+     as the condition for the "…go at the next restart" warning in `_clearMaterialActions` —
+     if nothing registered, there is nothing to wait for. **A side benefit worth knowing:**
+     the same gate fixes turning `material_action` ON from Settings mid-run. That re-runs the
+     FILE write but must not register (no de-dupe, no unregister outside postinit), and the old
+     capability gate wrote nothing — so the toggle did nothing until a restart. Covered by
+     `t_material_actions.pl` (total failure, partial failure, and the pref-turned-on case),
+     anti-tested → 6 failures against the capability gate.
+
+  Nit from the same review, also fixed: the comment above `$onlineCmd` still described the
+  `^[a-z0-9]+$` test that 0.1.96 removed.
+
+- **0.1.97** — **0.1.95 moved Now Playing and the play queue to the registration API, and
+  Material's client-side snapshot silently dropped both.** Found by review of 0.1.96, verified
+  against the SERVED 6.4.7 bundle and the live server. **Six of our eight categories are
+  RE-RESOLVED per browse response, so it never matters when the plugin list
+  arrives. `track` (Now Playing) and `queue-track` are the exceptions — Material resolves those
+  two ONCE, off a bus event:**
+
+      bus.$on("customActions", () => getCustomActions("track"|"queue-track", false))
+
+  and the **only** `$emit("customActions")` in the bundle is inside the `.then` of the axios GET
+  of `customactions.json`. `initCustomActions` fires that GET and the `["material-skin",
+  "plugin-actions"]` CLI call side by side, and only the GET emits — so whichever wins, the
+  snapshot is taken when the *file* lands. A static file beats a JSON-RPC POST through the Perl
+  dispatcher essentially every time, which leaves `pluginCustomActions` still `undefined` at
+  snapshot time. Nothing re-emits, so **"Add" is missing from Now Playing and the queue for the
+  whole page session.** Confirmed live: `["material-skin","plugin-actions"]` returns all eight
+  sections including both of these, and the served `customactions.json` has no LL entry in
+  either. **Fix:** `track` and `queue-track` move back to the FILE half of `_materialActionSet`.
+  Neither is a per-app override, so the file costs nothing; the one price is the 0.1.57 stale-tab
+  cache (a hard refresh after install). The upstream one-liner — emit from the plugin-actions
+  `.then` too — is a Material change, not ours.
+
+  Two more from the same review:
+  1. **The Settings save didn't do what its comment claimed.** "Turning `material_action` ON
+     from Settings mid-run now works" (0.1.96) was only true with `debug_log` ALSO on — i.e.
+     never, on the default config. **Fix:** `Settings::handler` now mirrors `postinitPlugin`'s
+     two branches exactly — ON → `_writeMaterialActions`, OFF → `_clearMaterialActions` —
+     gated on MaterialSkin alone. `debug_log` gates the diagnostics SNAPSHOT, which is all it
+     was ever meant to gate.
+  2. **The "entries go at the next restart" warning was unreachable.** `_clearMaterialActions`
+     was only ever called from `postinitPlugin`'s `elsif`, which is mutually exclusive with the
+     branch that sets `$REGISTERED_N` — so within one server run the condition could never be
+     true. Fix (1) is what makes it live: turning the pref OFF from Settings, after postinit
+     registered, is exactly the case the warning describes. Kept, not deleted.
+
+  Covered by `t_material_actions.pl` (54 cases): the two client-resolved surfaces are file-only
+  and *not* also registered, the file half survives the API-path strip pass, and both Settings
+  directions with `debug_log` off. Anti-tested — putting the pair back on the API path fails 8,
+  restoring the `debug_log` gate fails 3.
+
+- **0.1.98** — **Three code-review findings on the 0.1.95–0.1.97 work. None shipped; no
+  feature change.** All three sit on paths that 0.1.96/0.1.97 opened or widened.
+
+  1. **Turning the pref OFF *added* "Add" where it had been suppressed.** `_clearMaterialActions`
+     deleted the empty `listenlater-*`/`LLHome-*` suppressors (and, via the delete-empties pass,
+     the radio ones) unconditionally — but on Material 6.4.6+ the registered `online-*` pair
+     **cannot be withdrawn**, so removing what was hiding it is the exact opposite of turning the
+     feature off: every Listen Later/Played row gains "Add to Listen Later" until the next
+     restart, and using it on a Played row bounces that row back to Listen Later. Reproduced by
+     driving the real code against a fake 6.4.6 — 12 actions still registered, all three
+     suppressor families gone from the file. **Fix:** while `$REGISTERED_N` is non-zero the
+     suppressors are KEPT and re-asserted (the `-e $file` early return no longer skips that), and
+     the per-command delete-empties pass is skipped; only the top-level `album`/`playlist`/
+     `online-*` husks go, and those suppress nothing — Material's per-app override reads
+     `<command>-<type>`, never a bare `album`. The pref-was-off-at-startup path
+     (`$REGISTERED_N == 0`) still clears everything, exactly as before. Newly reachable only
+     because 0.1.97 made the Settings save call this sub at all.
+     **Amended after a second review pass:** the first fix re-asserted only the
+     `listenlater-*`/`LLHome-*` families. Preserving the radio empties was left to the
+     exempted delete-empties pass, which preserves what is on DISK — so on the one path this
+     hunk exists for, *live registrations + the file gone* (a first-ever write that failed,
+     or someone deleting actions.json to reset it), the radio empties were never re-created
+     and TuneIn/BBC Sounds browse rows regained a live "Add" until the restart. That is the
+     regression class the hunk exists to prevent, so it now re-asserts those too. The list
+     moved into **`_radioSuppressorCats()`** — its own sub because both writers need the
+     identical list and they compute it from lexicals declared *below* `_clearMaterialActions`
+     (a sub call resolves at runtime; the variables would not resolve at all). `||=` for the
+     radio ones, `=` for ours: the `<cmd>-*` namespace isn't ours to reset (0.1.48).
+  2. **The TRACK path's Now Playing fallback had no gate.** 0.1.96 mirrored `knownSource` onto
+     the track path but not the *call-site gate* the album path grew alongside it, and
+     `_nowPlayingTrackFallback` deliberately has no match guard of its own (a streaming Track
+     exposes no title/album to match against). So a `kind:track` add with an empty `$FAVURL` and
+     a non-positive `$TRACKID` — a remote queue row, or an online-track row whose service sent no
+     favurl — adopted whatever was playing. Reproduced: tapping queue row 7 while row 1 played
+     stored a hybrid (row 7's album+artist, row 1's title and PLAY URL — a row that plays the
+     wrong track). **The album path's "no svc" test does not transfer on its own**, and that is
+     the thing to know: `queue-track` and the Now Playing panel are the SAME lmscommand
+     (`$trackCmd`), so a queue row also arrives with no `svc`. Only `online-track` carries one.
+     The discriminator is the **track id**: Material substitutes the tapped item's own values and
+     any real row has an id, while the Now Playing panel item has neither id nor favurl (0.1.64).
+     **Fix:** the gate requires no `svc` AND no `trackid` — testing PRESENCE, not validity.
+     `_nowPlayingTrackFallback`'s header now says the caller's gate is its only protection
+     rather than merely noting it has none.
+     **Amended after a second review pass — the gate was right, its premise wasn't.** The
+     original reasoning was "a *positive* id was already resolved to a url above, so an id
+     still here is a remote row's" — true, and it made every REMOTE QUEUE ROW unaddable,
+     including the playing one, because the id branch only accepted `/^\d+$/`. Those rows are
+     exactly the shape with nothing else to go on: Material builds a queue row id as
+     `"track_id:"+i.id` and substitutes it into `$TRACKID`, and queue rows carry **no
+     `presetParams` at all**, so `$FAVURL` is always empty there. **Resolve rather than
+     relax:** the id branch now accepts `/^-?\d+$/`, because a negative id is LMS's own
+     spelling of a remote track — `Slim::Schema::find` tests `$_[0] < 0` and hands off to
+     `Slim::Schema::RemoteTrack->fetchById` (9.1 source, `Schema.pm:597`). Row 7 stores row 7;
+     an id that resolves to nothing still falls to the unchanged gate and is refused. Two
+     details that fall out of the same edit: the branch no longer hardcodes `source =>
+     'library'` (a remote row's url names its own service — but `sourceFromUrl` answers
+     `'library'` only for a url with NO scheme, so `file://` is mapped explicitly, exactly as
+     the scheme branch above does), and a `RemoteTrack` has no Album ROW — its `->album` is
+     the album NAME — so the metadata pull branches on `ref $alb`.
+  3. **A rejected add logged nothing identifying.** `_rejectAdd`'s `$source // '?'` doesn't catch
+     the EMPTY STRING, and since 0.1.96 that is the common case rather than an edge — every
+     container verb that isn't a service name leaves `$source` empty — so three unrelated
+     rejections all logged the identical `unsupported source ''`. The reject is silent to the user
+     by necessity (0.1.51), so this warn is its entire trace, and triage of "Add did nothing" runs
+     on it. **Fix:** empty renders as `(none identified)` and the line names the CONTAINER VERB,
+     which is what identifies the surface (`unsupported source (none identified) via container
+     'favorites'`). Read off the request with the same unsubstituted-`$VAR` filter
+     `_addCtxCommand` uses, so a literal `$SERVICE` can't leak into the log.
+
+  **`$TRACKID` — now SETTLED, was "not verified live".** Both halves confirmed against the
+  real thing rather than argued: `queue-page.js` builds every queue row as
+  `id: "track_id:"+i.id` and `doReplacements` fills `$TRACKID` from `id.split(':')[1]` for any
+  id containing a colon, so a queue row always carries one; the Now Playing item's id is a
+  bare number with no colon, so it never does. And a live `status` query on the box returned
+  `id: "-94606967852688"` for `qobuz://420282126.flac` — remote ids are negative, which is
+  what finding 2's amendment turns on.
+
+  **One incidental, corrected in the comments:** an unpopulated `$VAR` does NOT generally
+  arrive as the literal token — `doReplacements` ends by stripping every name in its
+  `ACTION_KEYS` list to `''`. **`$IMAGE` is the exception: it is not in that list**, so an
+  item with no image really does send the literal `"$IMAGE"`, which is why `_addCtxCommand`'s
+  `/^\$[A-Z]/` filter is still load-bearing rather than dead code. Every 0.1.98 gate tests
+  length, so both spellings read as absent either way.
+
+  Covered by `t_material_actions.pl` (+8) and `t_addpath.pl` (+15); 520 checks across 11
+  suites, up from 508. Every fix anti-tested against the bug it claims to catch: finding 1 →
+  3 failures on the original hunk plus 1 more on the amendment (the radio empties are not
+  re-created when the file is gone), finding 2 → 2 on the original gate, and on the amendment
+  4 (a remote queue row is refused outright) + 1 (its source files as `library`), finding 3 →
+  3 (and the one case the old line already got right still passes, which is why it is in the
+  suite). `t_stubs.pl`'s `Slim::Schema` gains `find('Track', $id)` over a test-registered
+  `%TRACKS` — **not found by default**, so a track lookup can never pass vacuously — with a
+  `RemoteTrack`-shaped entry for a negative id (`->album` is a string, not a row).
+
+- **0.1.99** — **A second review pass over 0.1.98's own fixes. Two of the three needed
+  amending, and 0.1.98 never shipped, so the amendments are written INTO its findings above
+  rather than restated here — read them there.** In short:
+  1. **Finding 1's re-assert dropped the RADIO suppressors** on the exact path the hunk was
+     written for (registrations live, `actions.json` gone), so TuneIn/BBC Sounds rows would
+     regain a live "Add" until the restart. The list is now `_radioSuppressorCats()`, called
+     by both writers.
+  2. **Finding 2's gate refused every REMOTE QUEUE ROW.** Those rows carry a `$TRACKID` and
+     never a `$FAVURL`, and the id branch only accepted `/^\d+$/` — so the row hit the gate
+     and was rejected on the presence of the very id that identifies it. Now resolved rather
+     than relaxed (`/^-?\d+$/` → `Slim::Schema::find` → `RemoteTrack->fetchById`), with the
+     source read off the resolved url instead of a hardcoded `'library'`.
+     **A trap on that second half, worth its own line:** `Sources::sourceFromUrl` answers
+     `'library'` only for a url with NO scheme, so a plain switch to it files a library
+     track's `file://` url as source `'file'` — which fails `_isReplayableSource` and rejects
+     every LIBRARY queue row, i.e. trades one broken surface for another. `file://` is mapped
+     explicitly, exactly as the scheme branch above it does. The library-row test is what
+     caught this, which is why that test is in the suite alongside the remote one.
+  3. **Finding 3 (the README badge) needed no code** — it is a build artifact, regenerated
+     here from `install.xml` by `tools/make_readme_html.py`.
+
+  Also corrected: three comments claiming an unpopulated `$VAR` arrives as its literal token
+  (see the incidental above — true of `$IMAGE` alone, and that is why the filter stays).
+
+  **A THIRD review pass over the amendment itself. Two findings, both fixed; still unshipped.**
+
+  1. **`//` does not catch what a RemoteTrack actually returns.** The amendment's id branch
+     took the object's metadata with `$track = (eval { $t->title }) // $track` — but a
+     RemoteTrack answers **`''`, not undef**, for anything it doesn't hold (Qobuz/Tidal serve
+     track metadata dynamically; this file already says so twice, and it is exactly why
+     `_nowPlayingFallback` fails open). `''` is defined, so `//` KEPT it and wiped the title
+     and artist Material substituted from the row. An emptied artist stores `artist=''`, which
+     then skips BOTH dedupe guards in `_insertTrackRow` (they test `length $artist`), never
+     matches in `Played::_matchRecord`, and renders with no artist; an emptied title fails the
+     add gate outright — so the common shape of the very rows the amendment exists to support
+     was **rejected**. The `$album` lines four below were already length-guarded; these two
+     weren't. Fixed by taking the object's value only when it has one.
+     **The suite missed it because the STUB was friendlier than the server**: `Slim::Schema::
+     Track` handed back whatever the test registered, so the remote-queue-row test — which
+     supplies a title and an artist — took them off the object and looked free. The stub now
+     answers `''` for any field a NEGATIVE-id (remote) track wasn't given, which is what the
+     server does; a library Track still answers undef. Same hazard as 0.1.94's prefs stub: the
+     vacuous pass was sitting in the stub, not in an assertion.
+  2. **The reject warn only ever printed the source clause.** 0.1.98's finding 3 made that line
+     name the source and the container verb — but the track gate fails three separate ways
+     (unreplayable source, no play url, no title) and reported all of them as "unsupported
+     source 'qobuz'", pointing triage at the service when the real cause was an empty title.
+     Same shape on the podcast path, where a row that resolved to no enclosure was reported as
+     "unsupported source 'favorites'". `_rejectAdd` now takes an optional REASON from the call
+     site and prints `<reason> (source '<src>')`; call sites that fail on the source alone pass
+     none and read exactly as before.
+
+  Covered by `t_addpath.pl` (+6, 526 across 11 suites), anti-tested against both: reverting
+  finding 1 fails 3 (the decisive one being the add REJECTED, which is the live symptom), and
+  reverting finding 2 fails 2 while the unsupported-source case still passes — which is what
+  shows the default wording is untouched.
+
+- **0.1.101** — **A review pass over 0.1.100. Two behaviour fixes, both in the actions.json
+  bookkeeping, and both of the same shape: a REGEX standing in for the list of categories we
+  actually own.** The rule this settles: never test a category by its SHAPE — take the names
+  from the writers (`_materialActionSet`, `_radioSuppressorCats`), which is also what makes
+  the code self-correct the next time the register/file split moves.
+
+  1. **The diagnostic reported our own entries as foreign.** `_dumpMaterialState`'s shadow
+     scan splits `<svc>-album|track` and exempted by PREFIX (`online`/`listenlater`/`LLHome`/
+     `podcasts`) — but three of our populated categories are not `<service>-<type>` shaped at
+     all, so `album-track(2)`, `playlist-track(2)` and `queue-track(2)` were listed as
+     "NON-EMPTY per-service categories that SHADOW online-\*" (`queue-track` on the API path
+     too, since it is file-only). That line exists purely for remote triage on a fault we
+     can't reproduce, so a false positive there points the user — and us — at the plugin's
+     own correct entries. Exemption is now by FULL category name, out of `_materialActionSet`
+     plus `_radioSuppressorCats`. Diagnostic only; nothing it reports on changed.
+  2. **The clear pass could eat a third-party plugin's suppressors.** `_clearMaterialActions`
+     deleted every EMPTY `*-album/-track/-artist` when nothing of ours was registered — but an
+     empty per-command category is not litter, it is a deliberate Add-suppressor (the 0.1.52
+     rule, and the reason we write our own). So it silently disarmed another plugin's hiding.
+     Pre-existing, and nothing in this stack writes those today (Discography and Album Booklet
+     checked) — but 0.1.97 made that branch run on every Settings save rather than at install
+     only, so the reach is real. It now deletes only what `_radioSuppressorCats()` names.
+     (The same `||=`-guarded list is now computed ONCE in that sub and reused by the re-assert
+     below it, instead of enumerating the `radios` menu twice.) Its twin in
+     `_writeMaterialActions` was NOT changed here, on the reasoning that that pass has to
+     delete empty per-command cruft it cannot name — the 0.1.46–0.1.50 scoping experiments —
+     which is the 0.1.51 regression fix. **Superseded: see the unversioned entry below.** The
+     reasoning was wrong in its premise, not its aim: the pass never had to NAME the cruft.
+
+  Also: a duplicate `==== end diagnostics ====` (the snapshot is built from `@lines`, so only
+  the one after the `$prefs->set` belongs), and the comment claiming the six registered
+  categories are resolved "SERVER-side" — they are resolved client-side too, just RE-RESOLVED
+  per browse response, which is the property that actually matters (`track`/`queue-track` are
+  resolved once, off a bus event; that is what they can't survive). Reworded here and in
+  `_materialActionSet`; the conclusion both draw is unchanged.
+
+  Podcast `CACHE_VER` bumped with the build per the dev-build cache rule; nothing here parses
+  a feed, so it is hygiene, not a fix.
+
+  Covered by `t_material_actions.pl` (+6, 532 across 11 suites), anti-tested against both:
+  the old prefix skip-list reports 3 of our categories on the legacy path and 1 on the API
+  path, and the old regex deletes the injected `otherplugin-album/-track`. The shadow scan's
+  positive control — a populated FOREIGN `tidal-album` — is in the suite alongside them, so
+  the exemption can never be widened into silence.
+
+- **0.1.102** — **A third finding of the same class as 0.1.101's two — the clear pass left
+  `podcasts-*` HUSKS, which hides Add on the Podcasts app for good.** 0.1.101's finding 2 replaced
+  a `/-(?:album|track|artist)$/` empty-sweep with a NAMED list, and the list missed the one
+  category that is ours, file-only, AND per-app. The chain: `_materialActionSet` writes
+  `podcasts-album`/`-track` to the file (they can only work from there); the strip pass empties
+  them, because they carry the `listenlater` verb; the delete-empties pass then names neither
+  `%ourCats` (`album album-track playlist playlist-track track queue-track online-album
+  online-track` — no podcasts) nor `_radioSuppressorCats()`, whose podcast entry is TuneIn's
+  **singular** `podcast`, not the Podcast plugin's browse command `podcasts`. So the file keeps
+  `{"podcasts-album":[],"podcasts-track":[]}` — and by this plugin's own 0.1.52 rule an empty
+  per-app `<command>-<type>` category overrides `online-*` and SUPPRESSES Add on every
+  Podcasts-app row. Nothing repairs it later: the pref-ON write pass that would is exactly the
+  one the pref being off stops from running. The old regex caught them, so this is a regression
+  from 0.1.101 rather than a pre-existing hole; its twin in `_writeMaterialActions` still uses
+  the regex, which is why only the CLEAR path is affected. **Neither shipped** — 0.1.95–0.1.101
+  are all unreleased dev work (last tag: v0.1.94), so no install ever ran the husk-leaving build.
+  **Fixed as a suppressor, NOT by adding the pair to `%ourCats`** — the review suggested the
+  latter and it would be wrong in the `$live` direction: `podcasts-album` IS a per-app override,
+  so deleting it while the `online-*` pair is still registered and unwithdrawable puts "Add"
+  BACK on Podcasts rows until the restart, which is the regression class the whole hunk exists
+  to prevent (the bare `album`/`online-album` husks `%ourCats` does delete suppress nothing).
+  So the pair joins `%suppressor`: deleted only when nothing is registered, re-asserted with
+  `||=` beside the radio empties when the file has gone. **Hardcoded rather than read from
+  `_materialActionSet`'s `%fileOnly`** — that only emits `podcasts-*` while
+  `Podcast::hasFeeds()` is true, so a user who unsubscribed everything would keep the husks,
+  which is precisely the state that needs cleaning.
+  Covered by `t_material_actions.pl` (+6, **538 across 11 suites**), anti-tested: emptying the
+  list fails 3 — the two husk cases (subscribed and unsubscribed) reproduce the live symptom,
+  and the file-gone re-assert fails the other way. The `$live` "override STAYS, and stays EMPTY"
+  assertions pass in both states by design; they are the positive control that stops the fix
+  being widened into an unconditional delete.
+
+  **The rule this settles, which 0.1.101 stated and then broke in the same pass:** a category
+  list is only correct if it is checked against every category the writers can emit — and
+  `%fileOnly` is a *conditional* set, so "read it from `_materialActionSet`" is not the safe
+  answer it looks like. Enumerate the per-app overrides explicitly, and put a new one in BOTH
+  the delete list and the re-assert list at the moment it is added.
+
+  Podcast `CACHE_VER` bumped 6 → 7 with the build per the dev-build cache rule; nothing here
+  parses a feed, so it is hygiene, not a fix.
+
+- **0.1.103** — **A review pass over 0.1.102. Two behaviour fixes, and both are the SAME
+  mistake made twice: a gate that worked by side effect, and a fix that landed on one of two
+  twin passes.**
+
+  1. **0.1.96 re-opened the self-add hole: a row in our OWN surfaces could be added again.**
+     Every row in the list view / home shelf is already saved, and re-adding one bounces a
+     Played album back to Listen Later — which is exactly what the empty `listenlater-*` /
+     `LLHome-*` suppressor categories exist to stop. But a written category is not a gate:
+     Material serves `customactions.json` from cache (the documented 0.1.57 post-upgrade
+     window), and a home shelf's `$SERVICE` is the shelf id, which those categories were never
+     certain to match — the 0.1.102 NB in `_writeMaterialActions` says so itself.
+
+     Until 0.1.96 the add COMMAND gated it by accident: the `^[a-z0-9]+$` shape test made
+     `svc='LLHome'` the `$source`, and an unreplayable source was rejected downstream.
+     `knownSource` (rightly) leaves a non-service command EMPTY so the cover-URL sniff can
+     identify a home-shelf row — but **our own cards carry the ORIGINAL streaming cover**, so
+     the sniff answers `qobuz` for a row we saved from Qobuz and the re-add goes through.
+     Reproduced with the repo harness: `add(svc => 'LLHome', image => <a qobuz cover>)` →
+     `STORED source=qobuz`.
+
+     Fixed by naming the surfaces instead of leaning on a side effect of how `svc` is judged:
+     `Sources::ownSurface` (`listenlater`/`LLHome` + both pre-rebrand spellings, EXACT match,
+     same discipline as `knownSource`), checked in `_addCtxCommand` **ahead of every branch** —
+     `kind:podcast` and the track path included, since an episode or a track in our own list is
+     no more re-addable than an album. `_rejectAdd` carries the reason, so the log says "row is
+     already in Listen Later" rather than blaming a source.
+
+  2. **0.1.101's suppressor fix landed on the clear path only; the write path is the one that
+     runs constantly.** `_writeMaterialActions` still deleted every empty
+     `*-album/-track/-artist` not in `%keep`, so another plugin's deliberate empty suppressor
+     was disarmed at every startup, on every Settings save (0.1.97 widened that) and on the
+     +60s deferred write. Verified: seeding `otherplugin-album`/`-track` and running the write
+     deletes both.
+
+     **The 0.1.101 reasoning for leaving it — "that pass has to delete cruft it cannot name" —
+     had the wrong premise.** It never had to NAME the cruft, only to know it is ours, and it
+     already does: the 0.1.46–0.1.50 scoping experiments wrote OUR entries into those
+     categories, which is precisely what makes them ours. So the strip pass now records
+     `%emptied` — the categories it took from non-empty to empty — and delete-empties skips
+     anything not in it. An empty that ARRIVED empty was never ours and no run of this code can
+     leave one behind (the same pass that creates one deletes it), so nothing is lost.
+     The unsuffixed `album`/`playlist` husk sweep below it is left alone: those are not
+     `<cmd>-<type>` overrides, so an empty one suppresses nothing and deleting it is litter
+     collection, not disarmament.
+
+  Covered by `t_addpath.pl` (+7) and `t_material_actions.pl` (+3) — **548 across 11 suites**.
+  Both anti-tested: neutering `ownSurface` fails 6 of the 7, and restoring the old sweep fails
+  the suppressor case. Each carries a positive control that stops the fix being widened into
+  silence — a verb that merely BEGINS with one of ours must still resolve normally
+  (`LLHomeworkHelper` → `qobuz`), and a category holding only our own entry must still be
+  swept. The own-surface cases deliberately use DISTINCT titles: sharing one lets the
+  cross-kind dedupe drop the second add, which reads as "rejected" and let two of them pass
+  with the guard removed.
+
+  Podcast `CACHE_VER` bumped 7 → 8 with the build per the dev-build cache rule; nothing here
+  parses a feed, so it is hygiene, not a fix.
+
+- **0.1.104 — category ownership is RECORDED, not inferred. Closes the 0.1.103 review's two
+  findings, and the class both belong to.**
+
+  Six review rounds have each found a different husk bug in these two passes, and 0.1.101's
+  own note ("the same mistake made twice: a fix that landed on one of two twin passes") named
+  the pattern without escaping it. The sixth round found two more:
+
+  1. **0.1.103's `next unless $emptied{$cat}` disabled the sweep for the categories it exists
+     for.** Its justification — that the 0.1.46-0.1.50 experiments "wrote OUR entries into
+     them (that is what makes them ours)" — is contradicted by this file's own 0.1.47/0.1.48
+     entries, which record those versions writing `$data->{"<svc>-album"} ||= []`, i.e. an
+     EMPTY category with no entries in it. Those arrive empty, so `%emptied` is false and they
+     can never be swept. An install upgrading from 0.1.47-0.1.50 keeps an empty `deezer-album`;
+     Deezer is replayable today, and an empty `<cmd>-album` overrides `online-album`, so "Add"
+     is hidden on Deezer browse rows for good — **the 0.1.51 regression, reintroduced.**
+  2. **`_clearMaterialActions`'s `$live` re-assert creates `podcasts-*` for a user with NO
+     subscriptions** (`@fileOnlySup` is hardcoded, by design — 0.1.102). Toggle the pref off
+     and on under Material 6.4.6+ and the husks are permanent: on the re-enable `hasFeeds()`
+     is false so they miss `%fileOnly`/`%keep`, and they arrived empty so finding 1 skips them.
+     **This one needs no upgrade history — it is reachable on a clean install.**
+
+  **The fix is not another list.** The standing proposal (0.1.101, and the memory note on this
+  area) was one function returning the complete category set, every site consuming it. That
+  cannot work, and knowing why is the point: `podcasts-*` with no subscriptions is a category
+  the CLEAR path *creates* and no write pass can emit, so no derived set can name it. The
+  defect was never duplicated lists — it is that **ownership is INFERRED**, by `%emptied` on
+  one path and a hardcoded list on the other, and a husk is those two guesses disagreeing.
+
+  So it is recorded instead: **`_ownedCats`/`_setOwnedCats`**, a list persisted in
+  `material_owned_cats`, read by both passes. The rule is *whatever LL writes to the file, LL
+  writes down* — including the clear path's `$live` re-assert, which is the half that creates
+  the podcast husks and the half a derived set can never see. A pre-ledger install gets a
+  one-time seed of the only litter that can exist (`<supported-cmd>-album/-track` plus
+  `podcasts-*`, both ours by construction; `listenlater` excluded, its empty pair is the
+  deliberate 0.1.52 suppressor).
+
+  **Finding 3 was probed and DISMISSED** — `//` on `$t->albumname` is safe; the defect was the
+  comment beside it, which had `->album` backwards. See the Review Ledger for the verification,
+  and note the stub carried the same wrong belief, so the suite could not have expressed it.
+
+  Covered by the new `tools/t_material_matrix.pl` — **656 checks across 12 suites**, up from
+  548. Anti-tested per half rather than as a whole: reverting the write-path ledger consult
+  fails 48, reverting the clear-path record fails exactly the 2 cases finding 2 walks through
+  (`boot on → off → on`, with and without a following restart, on 6.4.6+ with no
+  subscriptions). The suite itself was run against the unfixed tree first and failed 60.
+
+  Podcast `CACHE_VER` bumped 8 → 9 with the build per the dev-build cache rule; nothing here
+  parses a feed, so it is hygiene, not a fix.
+
 ## Regression tests — RUN THESE BEFORE ANY BUILD (added 2026-07-29)
 
     sh tools/t_all.sh          # one line per suite, non-zero exit on any failure
@@ -1135,9 +1781,11 @@ session scratchpads and are gone — so nothing carried forward. Anything worth 
 | `t_verify_retry.pl` | 0.1.90's retry: that it retries, retries EXACTLY once (an unbounded retry would be worse than the bug), never gives up silently, and re-reads the row first — plus the three distinct answers `_verifyRelease` must keep apart (real count → store; provisional → neither store nor retry; no count → retry) |
 | `t_learn_count.pl` | 0.1.93's in-flight guard on `Played::_learnTrackCount` and specifically its EXPIRY: that a lost request stops blocking after `COUNT_STALE_SECS`, that it is logged rather than swallowed, that an answered request stays immediately re-askable, that records don't block each other, and that a library release is never asked at all. Uses `TestClock::advance()` |
 | `t_favurl.pl` | the private favurl handshake (`Plugin::_stripPrivateParams`): `?cover=`/`?b=`/`&a=`/`&y=`/`&al=`/`&rt=`/`&tc=` — what each yields, that junk is stripped-but-rejected, that `&a=` can't eat `&al=`, that `&rt=`+`&tc=` really do reach `singleIsWrong`, and that a NATIVE favurl comes back byte-for-byte unchanged with no field set. Calls the real sub — see the `&tc=` lesson below |
-| `t_addpath.pl` | the ADD PATH end to end — a Material action into `_addCtxCommand`, out as a row in SQLite. Also 0.1.92's `ref.svc_title`: that the service label is kept when it differs and not when it doesn't, that a play of the QUALIFIED title finds the row while a different artist's doesn't, and that the dedupe key still ignores the label. What the handshake params become on the stored row, that `&tc=` settles the type but never fills `track_count`, that the cross-kind single dedupe eats a REAL single but not a disproved one, that an UNKNOWN type defers instead of inserting a guess, and that unreplayable/unidentifiable adds are refused. Needs no service: the whole path asks only `client`/`getParam`/`setStatusDone`/`setStatusProcessing`/`addResult`/`addResultLoop`, and `client => undef` makes the background jobs no-op. **The service plugins must be declared** (`_serviceCan`) or the gate rejects everything and every assertion passes against an empty DB |
+| `t_addpath.pl` | the ADD PATH end to end — a Material action into `_addCtxCommand`, out as a row in SQLite. Also 0.1.92's `ref.svc_title`: that the service label is kept when it differs and not when it doesn't, that a play of the QUALIFIED title finds the row while a different artist's doesn't, and that the dedupe key still ignores the label. What the handshake params become on the stored row, that `&tc=` settles the type but never fills `track_count`, that the cross-kind single dedupe eats a REAL single but not a disproved one, that an UNKNOWN type defers instead of inserting a guess, and that unreplayable/unidentifiable adds are refused. Plus the NOW-PLAYING FALLBACK's gate on BOTH paths (0.1.98): on the album path, that a browse row with a non-service container verb does NOT adopt the playing track, while a genuine Now Playing add (no `svc` at all) still recovers its source; on the TRACK path, that a tapped row whose `trackid` resolves to NOTHING (no svc — it shares `$trackCmd` with Now Playing) and an online-track row with a container verb are both refused, while a real Now Playing track add still recovers the playing song and its url. In both cases both directions are needed, or "doesn't adopt" passes with the fallback simply switched off. And the other side of that gate: a REMOTE queue row (negative `trackid`, no favurl) is resolved by its id and stored as the row that was TAPPED — its own title, its own play url, its source read off that url and not hardcoded `library` — while the library row on the same branch still takes its album/year from the Album row — and, since the RemoteTrack that row resolves to is normally BARE, that a `''` title/artist off the object never overwrites what Material sent (the stub answers `''` for a negative id, so this cannot pass by the test having supplied the metadata itself). Also what a REJECTED add logs (0.1.98): that an empty source reads `(none identified)` rather than `''`, that the container verb is named, and that the clause which actually failed is named — a missing play url and an empty title each say so instead of blaming the service, while a genuinely unsupported source still reads exactly as it did. The reject is silent to the user, so that one line is the whole trace. Needs no service: the whole path asks only `client`/`getParam`/`setStatusDone`/`setStatusProcessing`/`addResult`/`addResultLoop`, and `client => undef` makes the background jobs no-op (pass `_client` for the Now Playing cases — it is pulled out of the params, not passed as one). **The service plugins must be declared** (`_serviceCan`) or the gate rejects everything and every assertion passes against an empty DB |
 | `t_resolve_count.pl` | what a resolve writes BACK to the row (`Browse::_albumTracks`): a FAILED resolve records nothing and never clobbers a real `track_count`/`rel_type`, Bandcamp helper-only rows count as a failure too, and 0.1.88's successful-resolve refresh + forced single-correction still work. Plus `Sources::hasDirectAlbumRef` — whether a row's tracklist costs one album call or a whole service SEARCH (the Bandcamp page-url case), which is what gates background work |
 | `t_prefs_migration.pl` | 0.1.94's pref migrations and the rule that makes them one-shot: that a leading-underscore pref cannot be stored at all (pinning the stub against `Slim::Utils::Prefs::Base::set` — if that assertion ever passes with a value, every other one here stops meaning anything), that the rebrand copy runs once and never reverts a later choice, that an install which already ran the broken copy isn't copied over again, and that the threshold bump re-applies exactly once. Runs the two migrations in the real startup order — the ordering IS the bug — for both an install that carries a pre-rebrand namespace and one that doesn't. **A real user's box is the second shape**: the rebrand landed in 0.1.25 and the first release was tagged v0.1.69, so no installed copy ever wrote a `plugin.listentolater` pref and the copy has nothing to import. `reset_prefs` seeds that namespace (Simon's dev box, the only one that ran the pre-rebrand code); `reset_prefs_no_legacy` doesn't — pick the one that matches the install you mean, or an assertion proves the wrong thing |
+| `t_material_actions.pl` | 0.1.95's delivery split: that the six SERVER-resolved positive categories are REGISTERED with Material (6.4.6+) and no longer written to actions.json while `track`/`queue-track` stay in the file (0.1.97), that nothing registered is also left in the file (the merge is additive — a leftover means every "Add" shows twice), that registration happens exactly ONCE across a re-register, a Settings save and the deferred radio write, that the suppressors and `podcasts-*` stay in the file where Material can actually see them, that an older Material still gets the byte-identical file it always did, and that a third party's entries in a category we vacated survive. Plus the FAILURE path: a `registerCustomAction` that dies falls back to the file (all of it, or exactly the refused sections on a partial failure — never both places), and a file write with no registration behind it (the pref switched on mid-run) writes the full set. Plus the SETTINGS save itself, driven through `Settings::handler` with `debug_log` OFF (0.1.97): turning `material_action` off clears the file half on the save and warns about the registered half, turning it back on restores `track`/`queue-track` without re-writing anything Material already took, and turning it on when nothing registered writes everything. And the 0.1.98 rule that the OFF save must obey: while entries are still registered, the empty suppressors (ours and the radio ones) STAY and stay EMPTY — deleting them while the `online-*` pair cannot be withdrawn ADDS "Add" to our own rows instead of removing it — including on the path that rule was written for and originally missed, **the file being GONE**, where all three families have to be RE-CREATED rather than preserved. And the same rule from the other side for the one category that is ours, file-only AND per-app: with nothing registered, `podcasts-*` is DELETED rather than left as an empty husk — including for a user who has since unsubscribed from every feed, the state `_materialActionSet` can no longer name — because an empty per-app override hides Add on the Podcasts app for good; with entries still live it stays, and stays empty, for exactly the reason the radio empties do |
+| `t_material_matrix.pl` | the actions.json STATE MACHINE, as invariants rather than scenarios. Enumerates starting file x Material version x podcast subscriptions x user journey and drives real op SEQUENCES (boot on/off, Settings on/off, restarts), checking after EVERY step: **I1** a pref-OFF terminal leaves none of our entries, and with nothing registered none of our categories either; **I2** a foreign category — entries AND deliberate empty suppressors — is byte-identical before and after every operation; **I3** no EMPTY `<cmd>-album/-track` exists for a command we can replay (the 0.1.51 regression as a property); **I4** any journey ending pref-ON converges on the clean baseline, whatever route it took. Exists because the scenario suite is structurally blind to both halves of these bugs: they are TWO-TRANSITION (the clear pass writing `podcasts-*` empty is correct — it goes wrong at the next WRITE) and they live in the one untested cell of a 2x2, since every `$live` case in `t_material_actions.pl`'s podcast block subscribes a feed first. The invariants deliberately carry almost no vocabulary of "which categories are ours" — that list is the bug generator, so a test restating it would inherit the fault; the reference is a BASELINE from a clean run of the same config. I4 compares the MERGED file+registered view, not the file, or a Settings-save enable (which cannot register, so it delivers through the file by design) reads as drift. **A world must reset `%Slim::Utils::Prefs::VALUES`** — a pref written by one journey turns the next journey's "upgrade from an older build" case into an already-migrated one, silently hiding this exact bug class |
 | `t_load.pl` | every shipped module compiles AND loads, plus a called-vs-defined sweep — `perl -c` passes on a call to a sub that doesn't exist, which nearly shipped a runtime crash in 0.1.83 |
 
 Two rules that follow from how this suite is built:
