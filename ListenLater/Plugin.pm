@@ -514,12 +514,6 @@ sub _unsupportedRadioCommands {
     return keys %cmds;
 }
 
-# The empty "<cmd>-album"/"-track" suppressor categories, for every radio browse command we
-# do not support. Its own sub because BOTH writers need the identical list and they compute
-# it from file-scoped lexicals declared BELOW _clearMaterialActions — a sub call resolves at
-# runtime, the variables would not resolve at all. _writeMaterialActions creates them;
-# _clearMaterialActions re-asserts them when it rebuilds a missing file with registrations
-# still live (see there). Sorted, so both writers produce the same order.
 # The OWNERSHIP LEDGER — what "this category is ours" is allowed to mean.
 #
 # Every husk this file has produced (0.1.51, 0.1.102, 0.1.103) is the same defect: ownership
@@ -548,6 +542,12 @@ sub _ownedCats {
 }
 sub _setOwnedCats { $prefs->set('material_owned_cats', [ sort keys %{ $_[0] } ]) }
 
+# The empty "<cmd>-album"/"-track" suppressor categories, for every radio browse command we
+# do not support. Its own sub because BOTH writers need the identical list and they compute
+# it from file-scoped lexicals declared BELOW _clearMaterialActions — a sub call resolves at
+# runtime, the variables would not resolve at all. _writeMaterialActions creates them;
+# _clearMaterialActions re-asserts them when it rebuilds a missing file with registrations
+# still live (see there). Sorted, so both writers produce the same order.
 sub _radioSuppressorCats {
     my %radioCmd = map { $_ => 1 } _unsupportedRadioCommands(), @KNOWN_RADIO_CMDS;
     delete @radioCmd{ keys %SUPPORTED_CMD };

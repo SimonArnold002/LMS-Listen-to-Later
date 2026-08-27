@@ -1786,6 +1786,43 @@ The "Add to Listen Later"/"Add to Wish List" custom actions appear on streaming 
   Podcast `CACHE_VER` bumped 9 → 10 with the build per the dev-build cache rule; nothing here
   parses a feed, so it is hygiene, not a fix.
 
+- **0.1.106 — a review pass over 0.1.105. One finding, comment-only; no behaviour change.**
+
+  `_radioSuppressorCats`'s doc block was left stranded above the newly-inserted `_ownedCats`,
+  so it read as documentation for the ownership ledger — "BOTH writers need the identical
+  list… Sorted, so both writers produce the same order", none of which is true of `_ownedCats`
+  — while `_radioSuppressorCats` itself was left undocumented. Moved back onto its own sub.
+
+  **The review found no correctness defect, and that is a checked verdict rather than a thin
+  pass** — every load-bearing external claim in the 0.1.104/0.1.105 diff was verified against
+  the real upstream instead of against the comments asserting it. Worth recording, so the next
+  pass doesn't re-derive it: `registerCustomAction` in Material master is a plain
+  `sub ($section, $action)`, so calling it through `->can` as `$register->($cat, $action)` is
+  right (a method call would pass the class as the section); `plugin-actions` is in Material's
+  allowed `_cmd` list and serves `$PLUGIN_CUSTOM_ACTIONS`, so registration is not going into a
+  void; `appCat in customActions` is file-only in `browse-resp.js`, so the `podcasts-*` override
+  and the empty suppressors genuinely cannot move to the API; `track`/`queue-track` are the only
+  two categories snapshotted off the `customActions` bus event, so keeping exactly those two
+  file-only is right; `$IMAGE` is still the one variable absent from `ACTION_KEYS`, so the
+  `^\$[A-Z]` filter is still load-bearing; the Now Playing gate opens as intended (NP passes a
+  bare integer id, so `$TRACKID` is stripped to `''`, while a queue row's `track_id:<n>` carries
+  one and is correctly excluded); and `Slim::Schema::find` still routes a negative id to
+  `RemoteTrack->fetchById`, whose `album`/`albumname` are independent accessors — so `ref $alb`
+  really does separate a library row from a remote one.
+
+  Two things chased and deliberately NOT reported, so they aren't re-chased: `%UNREGISTERED`
+  looks like dead code (Material's `registerCustomAction` is a bare `push` that cannot fail)
+  but the unguarded `Data::Dump::dump` behind `main::DEBUGLOG` gives the per-action `eval` a
+  real if narrow trigger, and it degrades correctly; and `_ownedCats`'s pre-ledger seed claims
+  `<svc>-album/-track` for every supported command, which collides with nothing — Discography
+  writes only `artist`, Album Booklet only `track`, both unsuffixed.
+
+  Per the Review Ledger the `//` on `$t->albumname` was not re-raised (settled 2026-08-27,
+  section B). Suites unchanged and green: **662 checks across 12 suites**.
+
+  Podcast `CACHE_VER` bumped 10 → 11 with the build per the dev-build cache rule; nothing here
+  parses a feed, so it is hygiene, not a fix.
+
 ## Regression tests — RUN THESE BEFORE ANY BUILD (added 2026-07-29)
 
     sh tools/t_all.sh          # one line per suite, non-zero exit on any failure
