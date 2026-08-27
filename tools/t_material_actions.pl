@@ -560,5 +560,69 @@ is('...but a populated FOREIGN per-service category is still reported',
     'reported');
 Slim::Utils::Prefs::set_test_pref('debug_log', 0);
 
+# ---------------------------------------------------------------------------
+section('a FAILED write must not record the ownership ledger (0.1.105)');
+# _ownedCats hands back its generous one-time SEED only while material_owned_cats is unset:
+#
+#     my $l = $prefs->get('material_owned_cats');
+#     return { map { $_ => 1 } @$l } if ref $l eq 'ARRAY';   # <- set: the seed is gone
+#
+# so setting the ledger at all retires the seed permanently. _writeMaterialActionsFile has four
+# die paths (open/print/close/rename) and BOTH callers wrap it in `eval { ...; 1 }`, so a full
+# disk or an unwritable prefs dir is swallowed and the plugin carries on. Recording the ledger
+# BEFORE that write therefore had a permanent failure mode: the ledger claims categories the
+# file never received, the seed is retired, and a pre-ledger husk — an empty '<svc>-album' left
+# by 0.1.47-0.1.50 — is then in NEITHER %emptied (it arrives empty) NOR %owned. The
+# delete-empties pass skips it forever and "Add" stays hidden on that service, unrecoverable
+# without hand-editing the shared file. That is the 0.1.51 regression, so the ordering is
+# load-bearing and pinned here: record only after the write returns.
+reset_all();
+remove_api();
+delete $Slim::Utils::Prefs::VALUES{material_owned_cats};   # pre-ledger install: seed applies
+
+# The husk 0.1.47-0.1.50 left behind. Deezer is in %SUPPORTED_CMD, so it is not a radio
+# suppressor and not in %keep — the seed is the only thing that can ever sweep it.
+File::Path::make_path("$tmp/material-skin");
+{
+    open my $out, '>:raw', actions_file() or die $!;
+    print $out $JSON->encode({ 'deezer-album' => [] });
+    close $out;
+}
+
+my $died = 0;
+{
+    no warnings 'redefine';
+    local *Plugins::ListenLater::Plugin::_writeMaterialActionsFile = sub { die "disk full\n" };
+    $died = 1 unless eval { Plugins::ListenLater::Plugin::_writeMaterialActions(); 1 };
+}
+is('the write really did fail', $died, 1);
+is('...so the ledger was NOT recorded (the seed survives)',
+    (ref $Slim::Utils::Prefs::VALUES{material_owned_cats} eq 'ARRAY') ? 'recorded' : 'unset',
+    'unset');
+is('...and the husk is still in the file, untouched',
+    (ref read_file()->{'deezer-album'} eq 'ARRAY') ? 'present' : 'gone', 'present');
+
+# The next write succeeds, and because the seed is intact it sweeps the husk it was there for.
+Plugins::ListenLater::Plugin::_writeMaterialActions();
+is('the next successful write sweeps the pre-ledger husk',
+    (exists read_file()->{'deezer-album'}) ? 'survived' : 'swept', 'swept');
+is('...and NOW the ledger is recorded',
+    (ref $Slim::Utils::Prefs::VALUES{material_owned_cats} eq 'ARRAY') ? 'recorded' : 'unset',
+    'recorded');
+
+# The same ordering on the CLEAR path (_clearMaterialActions): its ledger write is held behind
+# the file write too, so a failed clear leaves the seed in place for the next attempt.
+reset_all();
+delete $Slim::Utils::Prefs::VALUES{material_owned_cats};
+$Plugins::ListenLater::Plugin::REGISTERED_N = 1;          # $live: the re-assert branch runs
+{
+    no warnings 'redefine';
+    local *Plugins::ListenLater::Plugin::_writeMaterialActionsFile = sub { die "disk full\n" };
+    eval { Plugins::ListenLater::Plugin::_clearMaterialActions(); 1 };
+}
+is('clear path: a failed write leaves the seed intact too',
+    (ref $Slim::Utils::Prefs::VALUES{material_owned_cats} eq 'ARRAY') ? 'recorded' : 'unset',
+    'unset');
+
 printf "\n%d passed, %d failed\n", $pass, $fail;
 exit($fail ? 1 : 0);

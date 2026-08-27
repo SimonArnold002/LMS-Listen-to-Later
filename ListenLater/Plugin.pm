@@ -456,6 +456,7 @@ sub _clearMaterialActions {
     # per-app categories, which are per-command overrides too. `||=` for both of those: the
     # "<cmd>-*" namespace isn't ours to reset, so another plugin's real entries survive (and a
     # present category, ours or theirs, still overrides online-* → Add hidden either way).
+    my $record;
     if ($live) {
         my $dir = File::Spec->catdir(Slim::Utils::Prefs::dir(), 'material-skin');
         File::Path::make_path($dir) unless -d $dir;
@@ -464,11 +465,13 @@ sub _clearMaterialActions {
         # Write down what we just asserted. THIS is the half that produced the 0.1.103 husks:
         # the branch CREATES podcasts-* for a user with no subscriptions, a pair no write pass
         # can emit — so a category written here and not recorded is one the next write cannot
-        # recognise as ours, and therefore can never sweep.
-        _setOwnedCats({ %owned, map { $_ => 1 } @ourSuppressors, @radioSup, @fileOnlySup });
+        # recognise as ours, and therefore can never sweep. Held until the write lands, for the
+        # same reason as the write path — a ledger set against a failed write retires the seed.
+        $record = { %owned, map { $_ => 1 } @ourSuppressors, @radioSup, @fileOnlySup };
     }
 
     _writeMaterialActionsFile($file, $data);
+    _setOwnedCats($record) if $record;
     $log->warn("LL: cleared Material custom actions from $file");
     return;
 }
@@ -933,12 +936,18 @@ sub _writeMaterialActions {
     # 'QobuzExtrasqobuz'), which is what Material then passes as $SERVICE. That is why `svc` is
     # validated against Sources::knownSource and not by shape — see _addCtxCommand (0.1.96).
 
-    # Record the set before writing it — see _ownedCats. Everything this pass asserted: the
-    # entries themselves, the radio empties, the file-only overrides, and our own suppressors.
-    _setOwnedCats({ map { $_ => 1 } keys %write, @radioCats, keys %$fileOnly,
+    # Everything this pass asserted: the entries themselves, the radio empties, the file-only
+    # overrides, and our own suppressors. Recorded only AFTER the write LANDS, and the ordering
+    # is load-bearing — see _ownedCats. Setting the ledger at all retires its one-time seed, so
+    # a ledger recorded against a write that died would leave every pre-ledger husk (an empty
+    # '<svc>-album' from 0.1.47-0.1.50) in neither %emptied nor %owned: the delete-empties pass
+    # can never sweep it, and "Add" stays hidden on that service for good. _writeMaterialActions-
+    # File has four die paths, so this is reachable on a full disk or an unwritable prefs dir.
+    my $record = { map { $_ => 1 } keys %write, @radioCats, keys %$fileOnly,
         qw(listenlater-album listenlater-track listenlater-artist
-           LLHome-album LLHome-track LLHome-artist) });
+           LLHome-album LLHome-track LLHome-artist) };
     _writeMaterialActionsFile($file, $data);
+    _setOwnedCats($record);
     $log->warn("LL: wrote Material custom actions to $file");
 
     # What the API half actually DELIVERED, per category — not what we built. A failed

@@ -1756,6 +1756,36 @@ The "Add to Listen Later"/"Add to Wish List" custom actions appear on streaming 
   Podcast `CACHE_VER` bumped 8 → 9 with the build per the dev-build cache rule; nothing here
   parses a feed, so it is hygiene, not a fix.
 
+- **0.1.105 — the ownership ledger is recorded only AFTER the write lands. One finding from
+  the 0.1.104 review, in 0.1.104's own fix.**
+
+  `_ownedCats` returns its one-time seed only while `material_owned_cats` is unset, so
+  **setting the ledger at all retires the seed permanently.** Both passes recorded it BEFORE
+  calling `_writeMaterialActionsFile` — which has four `die` paths (open/print/close/rename),
+  and whose two callers both wrap it in `eval { ...; 1 }`. So a full disk or an unwritable
+  prefs dir was swallowed, the plugin carried on, and the ledger now claimed categories the
+  file never received. A pre-ledger husk — an empty `<svc>-album` from 0.1.47-0.1.50 — was
+  then in NEITHER `%emptied` (it arrives empty) NOR `%owned` (the seed is gone): the
+  delete-empties pass skips it forever and "Add" stays hidden on that service, unrecoverable
+  without hand-editing the shared `actions.json`. **The 0.1.51 regression again, through the
+  mechanism built to prevent it.**
+
+  One-line fix on each pass — hold the set in `$record`, call `_setOwnedCats` after the write
+  returns. The clear path's is `if $record`, since the set is only built inside `$live`.
+
+  Worth naming because it is the same shape as everything else in this area: the ledger made
+  ownership RECORDED rather than inferred, which was right, but a record written against an
+  action that did not happen is just a different way of guessing. Persist after the effect,
+  never before.
+
+  Six new checks in `t_material_actions.pl` (**662 across 12 suites**, up from 656).
+  Anti-tested: against the previous ordering three fail, and the one that matters is
+  `the next successful write sweeps the pre-ledger husk → got='survived'` — the user-visible
+  bug itself, not a proxy for it.
+
+  Podcast `CACHE_VER` bumped 9 → 10 with the build per the dev-build cache rule; nothing here
+  parses a feed, so it is hygiene, not a fix.
+
 ## Regression tests — RUN THESE BEFORE ANY BUILD (added 2026-07-29)
 
     sh tools/t_all.sh          # one line per suite, non-zero exit on any failure
