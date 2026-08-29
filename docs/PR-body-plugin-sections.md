@@ -3,7 +3,11 @@
 Hi Craig, Thanks for adding `registerCustomAction` in 6.4.6 — it's a much better fit for a plugin than
 writing into the shared `prefs/material-skin/actions.json`, and I have moved most of the actions used in my plugins across to it.
 
-I would like to stop touching that file altogether, but three things I use it for at the moment can only be done from it and are not available in current version, so I still have to write it (and then keep it tidy, and clean it up on uninstall).  My Plugin ListenLater is the one that uses custom actions all the time to operate. It uses them to add releases from Streaming services or lcoal library to lists for a user to then listen at a later time without having to add it to thier streaming Library. Its a useful tool for discovering new music. It has a number of custom actions, add to Listen Later, add to wish List. Remove from List, Move to Played, Move to Wish List, Buy on Bandcamp. In materials current state if I switched to using registerCustomAction only, some of these would not function as they do now. Their is logic to stop items in these views from invoking the Add to options as they are added all ready and only the move or remove options are available. 
+I would like to stop touching that file altogether, but three things I use it for at the moment can only be done from it, so I still have to write it (and then keep it tidy, and clean it up on uninstall).
+
+My plugin ListenLater uses custom actions all the time to operate. It uses them to add releases from streaming services or the local library to lists, so a user can listen to them later without having to add them to their streaming library. It's a useful tool for discovering new music. The custom actions it registers are "Add to Listen Later" and "Add to Wish List" — the rest of its menu (Remove from List, Move to Played, Move to Wish List, Buy on Bandcamp) is served by the plugin itself through `itemActions`, so that part isn't affected by any of this.
+
+In Material's current state, if I switched to `registerCustomAction` only, some of this would stop working as it does now. In particular there is logic to stop the "Add to" options appearing inside my own list views, where the item is already saved and only the move/remove options make sense.
 
 This PR closes those gaps. They're small and independent — happy to split them into separate PRs if you prefer?
 
