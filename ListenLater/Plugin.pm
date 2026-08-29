@@ -1687,6 +1687,77 @@ sub _insertTrackRow {
     return;
 }
 
+# Insert a streaming PLAYLIST row (kind='playlist'). Flat and synchronous, modelled on
+# _insertTrackRow: everything needed is already on the row Material sent — the service and
+# the playlist id came from Sources::playlistFromRow — so there is no service round trip and
+# nothing to classify.
+#
+# It deliberately does NOT go through _finishAlbumAdd. That tail runs the cross-kind single
+# dedupe, _verifyRelease and _backfillStreamingArtist, all three of which are RELEASE
+# semantics: routing a playlist through it is precisely how one would acquire a bogus
+# rel_type or track_count and start reading as an album.
+sub _savePlaylistRecord {
+    my ($request, $list, $p, $source, $playlistId) = @_;
+
+    # Taken VERBATIM — no "(YYYY)"/format-qualifier stripping (see the caller).
+    my $title = $p->{name};
+    unless (defined $title && length $title) {
+        return _rejectAdd($request, $source, undef, 'no playlist title');
+    }
+
+    # The same "don't store what we can't replay" gate every other add path runs, asked of
+    # the PLAYLIST call: a service whose plugin isn't installed (or has no playlist call)
+    # would give a row that only fails at play time.
+    unless (_isReplayableSource($source)
+            && Plugins::ListenLater::Sources::_serviceCanPlaylist($source)) {
+        return _rejectAdd($request, $source, $title, 'service has no playlist call');
+    }
+
+    # The Wish List is for things you might BUY, which a curated playlist never is — the
+    # same rule, and the same reason, as a podcast episode (_savePodcastEpisode).
+    if ($list eq 'wishlist') {
+        $log->warn('LL: playlist sent to the Wish List — saving to Listen Later instead');
+        $list = 'later';
+    }
+
+    # No rel_type and no track_count, ever: a playlist is not a release, and a curated one
+    # changes under you. Leaving both NULL is also what keeps it out of Played (every Played
+    # lookup is filtered to kind='album'/'track'). The artist segment carries the curator
+    # line when the row supplied one — it is display only, never part of the dedupe key.
+    my $rec = {
+        kind        => 'playlist',
+        source      => $source,
+        artist      => $p->{artist},
+        album_title => $title,
+        rel_type    => undef,
+        track_count => undef,
+        year        => undef,
+        artwork     => $p->{image},
+        ref_kind    => 'playlist_id',
+        # NEVER an album_id: findBySourceAlbumId is the one finder with no kind filter and
+        # it keys on ref.album_id, so an album_id here would let a playing track mark a
+        # playlist as Played.
+        ref         => { _svc => $source, playlist_id => $playlistId },
+    };
+
+    my ($id, $already, $existingSource) = eval { Plugins::ListenLater::DB::add($rec, $list) };
+    if ($@) { $log->error("LL: playlist add failed: $@"); }
+    else {
+        $log->warn("LL: playlist add -> $source / $title (id=" . ($id // '?')
+            . ", playlist_id=" . ($playlistId // '?')
+            . ", already=" . ($already // 0) . ", list=$list)");
+    }
+
+    if (my $client = $request->client) {
+        eval { $client->showBriefly({ line => [ cstring($client, 'PLUGIN_LL'),
+            _addedMsg($client, $list, $already, $existingSource, $source) ] }, { duration => 2 }); };
+    }
+
+    $request->addResult('count', $id ? 1 : 0);
+    $request->setStatusDone;
+    return;
+}
+
 # Services whose streaming track-adds we try to classify (single → store as the Single).
 # Qobuz gives an authoritative release_type; Tidal falls back to a resolved track count.
 # Deezer/Bandcamp can't cheaply yield an album id from a playing track, so they degrade to
@@ -1853,6 +1924,10 @@ sub _contextMenuQuery {
 
     for my $target (qw(later wishlist played)) {
         next if $target eq $status;
+        # A playlist is never a Wish List item (you don't buy one) — the add path already
+        # redirects "Add to Wish List" on a playlist to Listen Later, so don't offer the
+        # move that would undo that.
+        next if $target eq 'wishlist' && ($rec && ($rec->{kind} || '') eq 'playlist');
         push @entries, {
             text   => cstring($client, $moveStr{$target}),
             cmd    => [ 'listenlater', 'move' ],
@@ -2141,7 +2216,26 @@ sub _addCtxCommand {
     }
 
     my $explicitTrack = ($request->getParam('kind') || '') eq 'track';
-    if ($explicitTrack || Plugins::ListenLater::Sources::favurlIsTrack($p{favurl})) {
+    my $favTrack      = Plugins::ListenLater::Sources::favurlIsTrack($p{favurl});
+
+    # A streaming-service PLAYLIST (Tidal/Deezer 'playlist:' favurl, or a Qobuz editorial
+    # playlist identified by its cover URL — Sources::playlistFromRow). Stored as a
+    # first-class kind='playlist' row that replays through the service's own playlist call.
+    #
+    # Position is load-bearing at BOTH ends:
+    #  • AFTER the two track tests, never before them. The Qobuz half of the detector reads
+    #    the IMAGE, and a track row browsed inside a playlist can carry that playlist's
+    #    cover — so testing the image first would turn a perfectly good track add into a
+    #    playlist. A track-shaped favurl always wins.
+    #  • BEFORE the album path below, which strips a trailing "(YYYY)" and format qualifiers
+    #    off the title. A playlist called "Best of (2016)" is called exactly that; its title
+    #    is stored verbatim.
+    if (!$explicitTrack && !$favTrack) {
+        my ($plSource, $plId) = Plugins::ListenLater::Sources::playlistFromRow($p{favurl}, $p{image});
+        return _savePlaylistRecord($request, $list, \%p, $plSource, $plId) if $plSource;
+    }
+
+    if ($explicitTrack || $favTrack) {
         my $trackTitle = $p{trackname} // $p{name};
         # Only a real track-context command ($TRACKNAME present) means $ALBUMNAME is the
         # parent album; for a favurl-redirected online row `name` is the TRACK title, so the

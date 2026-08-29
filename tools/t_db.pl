@@ -85,6 +85,56 @@ is('a different track is not matched',     (Plugins::ListenLater::DB::findTrackB
 is('another artist is not matched',        (Plugins::ListenLater::DB::findTrackByArtistTitle('qobuz','Someone','Shared Song') ? 'yes':'no'), 'no');
 
 # ---------------------------------------------------------------------------
+section('playlist rows are stored as a third kind, with a source-qualified key');
+my ($pId) = Plugins::ListenLater::DB::add({
+    source      => 'qobuz',
+    kind        => 'playlist',
+    artist      => '',
+    album_title => 'Hi-Res Masters: 2016 / Qobuz UK',
+    year        => 2026,
+    artwork     => 'https://static.qobuz.com/images/playlists/69183531_x_rectangle.jpg',
+    ref_kind    => 'playlist_id',
+    ref         => { _svc => 'qobuz', playlist_id => '69183531' },
+}, 'later');
+is('playlist row saves as kind=playlist', Plugins::ListenLater::DB::get($pId)->{kind}, 'playlist');
+is('playlist row keeps playlist_id ref', Plugins::ListenLater::DB::get($pId)->{ref}{playlist_id}, '69183531');
+is('playlist key includes source + playlist id', Plugins::ListenLater::DB::get($pId)->{dedupe_key}, '|hi res masters 2016 qobuz uk||p:qobuz:69183531');
+# list() is kind-agnostic — the playlist row is a first-class member of the list.
+is('playlist row is visible in list()',
+   (scalar grep { $_->{id} == $pId } @{ Plugins::ListenLater::DB::list('later','added') }), 1);
+
+# ...but INVISIBLE to every release/track finder, which is what keeps Played and the
+# cross-kind dedupe from ever touching it. findByAlbum matters most: its LIKE is
+# '%|<album>|%', which the playlist key's own title segment would otherwise match — the
+# kind='album' filter is the only thing stopping it.
+is('...not returned by findByAlbum',
+   (scalar Plugins::ListenLater::DB::findByAlbum('qobuz', 'Hi-Res Masters: 2016 / Qobuz UK')), 0);
+is('...not returned by findByArtistAlbum',
+   (Plugins::ListenLater::DB::findByArtistAlbum('qobuz', '', 'Hi-Res Masters: 2016 / Qobuz UK') ? 'yes' : 'no'), 'no');
+is('...not returned by findBySourceRefTitle',
+   (scalar Plugins::ListenLater::DB::findBySourceRefTitle('qobuz', 'Hi-Res Masters: 2016 / Qobuz UK')), 0);
+is('...not returned by findSavedTrack',
+   (Plugins::ListenLater::DB::findSavedTrack('qobuz', '', 'Hi-Res Masters: 2016 / Qobuz UK', '') ? 'yes' : 'no'), 'no');
+is('...not returned by findTrackByArtistTitle',
+   (Plugins::ListenLater::DB::findTrackByArtistTitle('qobuz', '', 'Hi-Res Masters: 2016 / Qobuz UK') ? 'yes' : 'no'), 'no');
+# The one finder with NO kind filter: it keys on ref.album_id, which a playlist ref must
+# never carry (see Plugin::_savePlaylistRecord).
+is('...not returned by findBySourceAlbumId on its playlist id',
+   (Plugins::ListenLater::DB::findBySourceAlbumId('qobuz', '69183531') ? 'yes' : 'no'), 'no');
+
+# Same playlist id on two DIFFERENT services = two rows. findAnyByKey is cross-source, so
+# this is the case the key's embedded source segment exists for.
+my ($dId) = Plugins::ListenLater::DB::add({
+    source => 'deezer', kind => 'playlist', artist => '',
+    album_title => 'Hi-Res Masters: 2016 / Qobuz UK',
+    ref_kind => 'playlist_id', ref => { _svc => 'deezer', playlist_id => '69183531' },
+}, 'later');
+is('the same playlist id on another service is a separate row',
+   (($dId && $dId != $pId) ? 'separate' : 'collided'), 'separate');
+is('...keyed under its own source',
+   Plugins::ListenLater::DB::get($dId)->{dedupe_key}, '|hi res masters 2016 qobuz uk||p:deezer:69183531');
+
+# ---------------------------------------------------------------------------
 section('0.1.43 — Played looks up year-agnostically');
 # A playing streaming track can't be trusted to report the year, so Played matches on
 # the artist|album prefix. It must still find a row saved WITH a year.

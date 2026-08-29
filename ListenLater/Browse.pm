@@ -130,6 +130,8 @@ sub _renderSection {
 use constant GLYPH_MULTI   => "\x{266b}";
 use constant GLYPH_SINGLE  => "\x{266a}";
 use constant GLYPH_PODCAST => "\x{275d}";
+#   ≡ (identical to) = a streaming-service PLAYLIST — a list of tracks, not a release
+use constant GLYPH_PLAYLIST => "\x{2261}";
 use constant SEP           => " \x{00b7} ";   # " · " subtitle separator
 
 # The glyph for a row: ❝ for a podcast episode, ♪ for one track, ♫ for more than one.
@@ -147,8 +149,9 @@ use constant SEP           => " \x{00b7} ";   # " · " subtitle separator
 # their type was classified from the real library count at add time, so it is already sound.
 sub _glyphFor {
     my ($rec) = @_;
-    return GLYPH_PODCAST if ($rec->{source} || '') eq 'podcast';
-    return GLYPH_SINGLE  if ($rec->{kind}   || '') eq 'track';
+    return GLYPH_PODCAST  if ($rec->{source} || '') eq 'podcast';
+    return GLYPH_PLAYLIST if ($rec->{kind}   || '') eq 'playlist';
+    return GLYPH_SINGLE   if ($rec->{kind}   || '') eq 'track';
 
     my $n = $rec->{track_count};
     if (defined $n && $n =~ /^\d+$/ && $n > 0) {
@@ -162,9 +165,10 @@ sub _glyphFor {
 # Dispatch a stored row to the right renderer.
 sub _row {
     my ($client, $rec) = @_;
-    return (($rec->{kind} || '') eq 'track')
-        ? _trackRow($client, $rec)
-        : _albumRow($client, $rec);
+    my $kind = $rec->{kind} || '';
+    return _trackRow($client, $rec)    if $kind eq 'track';
+    return _playlistRow($client, $rec) if $kind eq 'playlist';
+    return _albumRow($client, $rec);
 }
 
 # The type word shown as the first segment of a row's subtitle. A podcast episode says
@@ -174,6 +178,7 @@ sub _row {
 sub _typeLabel {
     my ($client, $rec) = @_;
     return cstring($client, 'PLUGIN_LL_TYPE_PODCAST') if ($rec->{source} || '') eq 'podcast';
+    return cstring($client, 'PLUGIN_LL_TYPE_PLAYLIST') if ($rec->{kind} || '') eq 'playlist';
     return cstring($client, 'PLUGIN_LL_TYPE_TRACK') if ($rec->{kind} || '') eq 'track';
     my $rt = $rec->{rel_type} || 'album';
     my %str = (album => 'PLUGIN_LL_TYPE_ALBUM', ep => 'PLUGIN_LL_TYPE_EP', single => 'PLUGIN_LL_TYPE_SINGLE');
@@ -205,6 +210,40 @@ sub _albumRow {
         name        => $name,
         line2       => _glyphFor($rec) . ' ' . _typeLabel($client, $rec)
                        . SEP . ucfirst($rec->{source} || ''),
+        image       => $rec->{artwork} || _iconFor($rec->{status}),
+        type        => 'playlist',
+        url         => \&_albumTracks,
+        passthrough => [ { id => $rec->{id} } ],
+        itemActions => {
+            info => {
+                command     => [ 'listenlater', 'contextmenu' ],
+                fixedParams => { id => $rec->{id} },
+            },
+        },
+    };
+}
+
+# A saved streaming PLAYLIST row. Structurally an album row — type => 'playlist' + the
+# same _albumTracks coderef, so it plays and drills into the service's LIVE tracklist, and
+# carries the same "…" → More menu — but its NAME line is the playlist title ALONE.
+#
+# A release row reads "Artist – Album (Year)"; a playlist has neither an artist nor a
+# release year, so both are omitted rather than rendered empty. Written as its own renderer
+# (the precedent _trackRow set) instead of branching inside _albumRow, because that name
+# line is the whole difference and burying it in conditionals would obscure both.
+#
+# The curator, when the row supplied one, goes in the SUBTITLE — "≡ Playlist · Qobuz ·
+# Qobuz UK" — which is where a name that isn't the artist belongs.
+sub _playlistRow {
+    my ($client, $rec) = @_;
+
+    my $sub = _glyphFor($rec) . ' ' . _typeLabel($client, $rec)
+            . SEP . ucfirst($rec->{source} || '');
+    $sub .= SEP . $rec->{artist} if defined $rec->{artist} && length $rec->{artist};
+
+    return {
+        name        => $rec->{album_title} // cstring($client, 'PLUGIN_LL_UNKNOWN_ALBUM'),
+        line2       => $sub,
         image       => $rec->{artwork} || _iconFor($rec->{status}),
         type        => 'playlist',
         url         => \&_albumTracks,
@@ -309,7 +348,11 @@ sub _albumTracks {
         #  • a stored 'single' that resolves to MORE than one track — never a single in LL's
         #    sense whatever its source called it — corrected in place (the one forced
         #    update). This is what repairs rows saved before the add-time check existed.
-        if (($rec->{kind} || '') ne 'track' && $resolved) {
+        # kind='album' EXACTLY — not "anything that isn't a track". A playlist resolves to a
+        # tracklist like a release does, but it is not one: writing a track_count and a
+        # rel_type onto it from the playlist's length is how it would start displaying as an
+        # "Album" with a track count and become eligible for the Played machinery.
+        if (($rec->{kind} || '') eq 'album' && $resolved) {
             my $count  = $resolved;
             my $stored = $rec->{rel_type} || '';
             my $wrong  = Plugins::ListenLater::Sources::singleIsWrong($stored, $count);

@@ -55,6 +55,22 @@ does not cover. Say which ledger entry you are challenging and what changed.
   keep the Material footprint to the single deferred-bundle patch.
 - **Individual-Track saves are SCOPED BUT NOT BUILT** (~1 day). Known risks are
   recorded. "Tracks aren't supported" is not a finding.
+- **Playlist support is CURATED/SERVICE playlists only (0.1.107).** A Qobuz
+  PERSONAL playlist with no artwork of its own has NO recoverable identity — its
+  cover falls back to a constituent track's album art (`…/images/covers/…`), which
+  is indistinguishable from an album row, so it cannot even be detected in order to
+  be refused. It keeps its pre-0.1.107 behaviour. This is a decision, not a defect.
+  The fix is upstream: `Qobuz::Plugin::_playlistItem` emits no `favorites_url` at
+  all, unlike Tidal's and Deezer's shared playlist renderer.
+- **A saved playlist never auto-moves to Played, and there is deliberately no code
+  for that.** A playlist is not a release and a curated one changes under you, so a
+  "% of it heard" threshold is meaningless. Every Played lookup is already filtered
+  to `kind='album'`/`'track'`; the absence of a playlist branch in `Played.pm` is
+  the mechanism, not an oversight.
+- **A playlist is stored with NULL `rel_type` and NULL `track_count`, and
+  `_savePlaylistRecord` deliberately does not call `_finishAlbumAdd`.** Both are
+  release semantics. `Browse::_albumTracks`'s write-back guard is therefore
+  `kind eq 'album'` and NOT `ne 'track'` — that is the fix, not a typo.
 
 ### B. KNOWN-OPEN AND ACCEPTED — do not re-report as new
 
@@ -1821,6 +1837,61 @@ The "Add to Listen Later"/"Add to Wish List" custom actions appear on streaming 
   section B). Suites unchanged and green: **662 checks across 12 suites**.
 
   Podcast `CACHE_VER` bumped 10 → 11 with the build per the dev-build cache rule; nothing here
+  parses a feed, so it is hygiene, not a fix.
+
+- **0.1.107 — a streaming-service PLAYLIST is a first-class saved row (`kind='playlist'`).**
+
+  Adding a curated playlist used to fail SILENTLY rather than be refused. A Tidal/Deezer
+  playlist row carries `favorites_url: tidal://playlist:<uuid>`; `favurlIsTrack` correctly
+  answers 0 for a container ref, so the row fell straight through to the ALBUM path, matched
+  no `album:`, and was stored as a `ref_kind='search'` row that replayed by searching the
+  service for an *album* called "Dance Pop". A Qobuz editorial playlist carries no favurl at
+  all, so it reached the no-favurl branch, `qobuzAlbumIdFromImage` was asked for an album id
+  the playlist cover doesn't hold, and produced the same junk row.
+
+  Now: `Sources::playlistFromRow` is the single detector — a `playlist:` container favurl
+  (Tidal/Deezer, both from one shared upstream renderer, so curated AND personal lists work),
+  or a Qobuz cover URL, whose `/images/playlists/<ID>_` filename IS the playlist id (verified
+  live: `69183531` = "Hi-Res Masters: 2016 / Qobuz UK"). The path is deliberately DISJOINT
+  from `qobuzAlbumIdFromImage`'s `/images/covers/`, so the two can never both fire.
+  `_savePlaylistRecord` stores it flat and synchronously — no `_finishAlbumAdd`, whose
+  cross-kind single dedupe, `_verifyRelease` and `_backfillStreamingArtist` are all release
+  semantics that would give a playlist a bogus `rel_type`/`track_count`. Replay goes through
+  the service's own playlist call (`QobuzPlaylistGetTracks` / `getPlaylist`), gated by
+  `_serviceCanPlaylist` on the same "don't store what we can't replay" rule, with **no search
+  fallback** — a playlist cannot be found by an artist+album search, and falling through to
+  `_searchService` is exactly how the junk rows arose.
+
+  **Two things the written plan got wrong, both caught by the suite rather than by review.**
+  (1) The planned single-regex detector, `^(\w+)://.*?[:/]playlist:`, cannot match
+  `tidal://playlist:<uuid>` — `^(\w+)://` consumes both slashes, leaving nothing for `[:/]`,
+  so the PRIMARY case was the one that would have failed silently. Scheme and container ref
+  are now matched separately, as `_addCtxCommand` already does for `album:`. (2) The plan put
+  the playlist branch BEFORE the track branch; it now runs after, because the Qobuz half reads
+  the IMAGE and a track browsed inside a playlist can carry that playlist's cover — a
+  track-shaped favurl must win. Both are covered by named cases.
+
+  The single most load-bearing edit is in `Browse::_albumTracks`: its write-back guard
+  `ne 'track'` became `eq 'album'`. Left alone, opening a playlist would write a `track_count`
+  and a `rel_type` onto it from the playlist's length, and it would start reading as an Album.
+
+  Settled scope, recorded so it isn't re-raised: curated/service playlists only — a Qobuz
+  PERSONAL playlist with no artwork of its own has no recoverable id (its cover falls back to
+  a constituent track's album art) and is deliberately NOT supported; playlists live in Listen
+  Later only ("Add to Wish List" redirects, and the "Move to Wish List" entry is suppressed),
+  same rule and reason as a podcast episode; and a playlist never auto-moves to Played, which
+  needs no new code because every Played lookup is already filtered to `kind='album'`/`'track'`.
+  The long-term fix for the Qobuz hole is upstream — `Qobuz::Plugin::_playlistItem` emits no
+  `favorites_url`, unlike Tidal and Deezer; a one-line `qobuz://playlist:<id>` would close it
+  for everyone.
+
+  **723 checks across 12 suites**, up from 662. Anti-tested per half: neutering
+  `playlistFromRow` fails 15 add cases and NONE of the six positive controls (an album favurl,
+  a cover-URL album row, a track favurl carrying a playlist cover — the rows that would break
+  if detection widened); reverting the `_albumTracks` guard to `ne 'track'` fails exactly the
+  2 cases it exists for and nothing else.
+
+  Podcast `CACHE_VER` bumped 11 → 12 with the build per the dev-build cache rule; nothing here
   parses a feed, so it is hygiene, not a fix.
 
 ## Regression tests — RUN THESE BEFORE ANY BUILD (added 2026-07-29)

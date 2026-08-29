@@ -161,6 +161,51 @@ sub qobuzAlbumIdFromImage {
     return undef;
 }
 
+# Is this browse row a streaming-service PLAYLIST, and which one? Returns
+# ($source, $playlist_id) or the empty list. The ONE detector — every caller asks here.
+#
+# Two shapes, in order, because only two exist:
+#   1. a container favurl — Tidal and Deezer both emit one from a single shared playlist
+#      renderer, so it covers curated AND personal lists on both services:
+#         tidal://playlist:<uuid>   deezer://playlist:<id>
+#      (the id charset allows '-' for a Tidal uuid; '.' and '_' cost nothing.)
+#   2. Qobuz's cover URL — Qobuz's _playlistItem emits NO favorites_url at all, but an
+#      editorial playlist's cover filename IS the playlist id:
+#         static.qobuz.com/images/playlists/<ID>_<hash>_rectangle.jpg
+#      Verified live: 69183531 = "Hi-Res Masters: 2016 / Qobuz UK". Deliberately mirrors
+#      qobuzAlbumIdFromImage above, whose path (/images/covers/) is DISJOINT from this one
+#      — the two can never both fire, which is what keeps an album row an album row.
+#
+# NOT supported, deliberately: a Qobuz PERSONAL playlist with no artwork of its own, whose
+# cover falls back to a constituent track's album art (…/images/covers/…). It carries no
+# recoverable id and is indistinguishable from an album row, so it keeps today's behaviour
+# rather than being detectable enough to refuse. The real fix is upstream (a one-line
+# qobuz://playlist:<id> favurl in Qobuz::Plugin::_playlistItem).
+sub playlistFromRow {
+    my ($favurl, $image) = @_;
+
+    # Scheme and container ref matched SEPARATELY, deliberately: a single anchored
+    # expression cannot do it. '^(\w+)://' consumes both slashes, leaving nothing for a
+    # following '[:/]' to match against 'playlist:' — which is the shape Tidal and Deezer
+    # actually send ('tidal://playlist:<uuid>'), i.e. the common case would be the one that
+    # failed. The container half is therefore unanchored, exactly like the 'album:' match in
+    # Plugin::_addCtxCommand.
+    if (defined $favurl && $favurl =~ m{^(\w+)://}) {
+        my $scheme = lc $1;
+        return ($SCHEME{$scheme} || $scheme, $1)
+            if $favurl =~ m{(?:^|[:/])playlist:([A-Za-z0-9._-]+)};
+    }
+
+    if (defined $image && length $image) {
+        require URI::Escape;
+        my $u = URI::Escape::uri_unescape($image);
+        return ('qobuz', $1)
+            if $u =~ m{static\.qobuz\.com/images/playlists/(\d+)_}i;
+    }
+
+    return ();
+}
+
 # ---------------------------------------------------------------------------
 # Capture from a TrackInfo context (works for local AND remote tracks)
 #   args mirror a TrackInfo provider: ($client, $url, $track, $remoteMeta)
@@ -269,6 +314,10 @@ sub hasDirectAlbumRef {
     my ($rec) = @_;
     my $source = $rec->{source} || 'library';
     my $ref    = $rec->{ref} || {};
+    # A PLAYLIST has no album ref by construction (never write an album_id onto one — see
+    # DB::add) and no search fallback to be spared, so the answer is a flat no. Stated
+    # rather than inherited from "it has no album_id".
+    return 0 if ($rec->{kind} || '') eq 'playlist';
     return 1 if $source eq 'library';
     return ($ref->{album_url} ? 1 : 0) if $source eq 'bandcamp';
     my $albumId = $ref->{album_id} || ($ref->{passthrough} && $ref->{passthrough}{album_id});
@@ -285,6 +334,17 @@ sub buildPlayableItems {
     # qobuz://…/tidal://…/deezer://…/bandcamp track url).
     if (($rec->{kind} || '') eq 'track') {
         return $cb->(_trackPlayableItems($rec));
+    }
+
+    # A saved PLAYLIST replays through the service's own playlist call, by id. There is
+    # deliberately NO search fallback: a playlist cannot be found by an artist+album search,
+    # and falling through to _searchService is exactly how the junk "album named 'Dance Pop'"
+    # rows arose before playlists were a kind of their own.
+    if (($rec->{kind} || '') eq 'playlist') {
+        my $ref  = $rec->{ref} || {};
+        my $item = _streamingPlaylistNode($client, $source, $ref->{playlist_id}, $rec);
+        return $cb->([$item]) if $item;
+        return $cb->(_noMatch($client));
     }
 
     if ($source eq 'library') {
@@ -778,6 +838,47 @@ sub _streamingAlbumNode {
     return \%item;
 }
 
+# Rebuild a streaming PLAYLIST node from a captured playlist id — the playlist mirror of
+# _streamingAlbumNode, and the same shape (type => 'playlist' + the service's own coderef),
+# so resolveTracks/_albumTracks need no special case: they find the node and invoke it.
+#
+# The service's LIVE tracklist is what comes back, which is the point — a curated playlist
+# changes under you, and we store only its identity, never its contents.
+#
+# `creatorId => ''` is passed rather than omitted: Tidal's and Deezer's getPlaylist both do
+# `$api->userId eq $params->{creatorId}` to decide whether it's the user's own list, which
+# warns on an undef under `use warnings`. Empty string answers "not yours" without noise.
+sub _streamingPlaylistNode {
+    my ($client, $source, $playlistId, $rec) = @_;
+    return undef unless defined $playlistId && length $playlistId;
+
+    my %item = (
+        name  => $rec->{album_title},
+        type  => 'playlist',
+        image => $rec->{artwork},
+    );
+
+    if ($source eq 'qobuz' && Plugins::Qobuz::Plugin->can('QobuzPlaylistGetTracks')) {
+        $item{url}         = \&Plugins::Qobuz::Plugin::QobuzPlaylistGetTracks;
+        $item{passthrough} = [ { playlist_id => $playlistId } ];
+    }
+    elsif ($source eq 'tidal' && Plugins::TIDAL::Plugin->can('getPlaylist')) {
+        # Tidal's getPlaylist reads $params->{uuid}.
+        $item{url}         = \&Plugins::TIDAL::Plugin::getPlaylist;
+        $item{passthrough} = [ { uuid => $playlistId, creatorId => '' } ];
+    }
+    elsif ($source eq 'deezer' && Plugins::Deezer::Plugin->can('getPlaylist')) {
+        # Deezer's getPlaylist reads $params->{id}.
+        $item{url}         = \&Plugins::Deezer::Plugin::getPlaylist;
+        $item{passthrough} = [ { id => $playlistId, creatorId => '' } ];
+    }
+    else {
+        return undef;
+    }
+
+    return \%item;
+}
+
 # ---------------------------------------------------------------------------
 # Search fallback: ask the originating service for "artist album", keep the
 # title+artist match, return its native (playable) album node.
@@ -959,6 +1060,20 @@ sub _serviceCan {
     # Podcast plugin's own protocol handler (which also keeps its resume-position
     # tracking). So the only question is whether that handler exists on this server.
     return 1 if $source eq 'podcast'  && _hasPodcastHandler();
+    return 0;
+}
+
+# The same "don't store what we can't replay" gate as _serviceCan, asked of the PLAYLIST
+# call rather than the album one. Kept separate rather than folded into _serviceCan: a
+# service can perfectly well expose one and not the other (Bandcamp has no playlists at
+# all), and the album path must not start believing in a service because its playlist
+# call exists, or vice versa.
+sub _serviceCanPlaylist {
+    my ($source) = @_;
+    return 0 unless defined $source && length $source;
+    return 1 if $source eq 'qobuz'  && Plugins::Qobuz::Plugin->can('QobuzPlaylistGetTracks');
+    return 1 if $source eq 'tidal'  && Plugins::TIDAL::Plugin->can('getPlaylist');
+    return 1 if $source eq 'deezer' && Plugins::Deezer::Plugin->can('getPlaylist');
     return 0;
 }
 

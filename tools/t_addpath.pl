@@ -36,8 +36,11 @@ ll_require('DB', 'Sources', 'Podcast', 'Browse', 'Played', 'Plugin');
 {
     no strict 'refs';
     *{'Plugins::Qobuz::Plugin::QobuzGetTracks'} = sub { };
+    *{'Plugins::Qobuz::Plugin::QobuzPlaylistGetTracks'} = sub { };
     *{'Plugins::TIDAL::Plugin::getAlbum'}       = sub { };
+    *{'Plugins::TIDAL::Plugin::getPlaylist'}    = sub { };
     *{'Plugins::Deezer::Plugin::getAlbum'}      = sub { };
+    *{'Plugins::Deezer::Plugin::getPlaylist'}   = sub { };
     *{'Plugins::Bandcamp::Plugin::get_album'}   = sub { };
 }
 
@@ -151,6 +154,64 @@ is('source read from the favurl scheme',       $r->{source},      'qobuz');
 # The dedupe key is built from artist|album|year — the cleaned values, not the raw label.
 is('...so the dedupe key is clean',
    (($r->{dedupe_key} // '') =~ /^will sheff\|extra mile\|2026$/ ? 'clean' : $r->{dedupe_key}), 'clean');
+
+section('playlist rows are detected and stored as playlists');
+$r = add(name => 'Hi-Res Masters: 2016 / Qobuz UK', svc => 'qobuz', image => 'https://static.qobuz.com/images/playlists/69183531_x_rectangle.jpg', favurl => 'qobuz://album:whatever');
+is('qobuz playlist stores kind=playlist', $r->{kind}, 'playlist');
+is('...with qobuz source', $r->{source}, 'qobuz');
+is('...and playlist_id ref', $r->{ref}{playlist_id}, '69183531');
+is('...and no album_id ref', (defined $r->{ref}{album_id} ? 'present' : 'undef'), 'undef');
+
+is('...and no rel_type', $r->{rel_type}, undef);
+is('...and no track_count', $r->{track_count}, undef);
+
+$r = add(name => 'Tidal favourites', svc => 'tidal', favurl => 'tidal://playlist:abcd-1234');
+is('tidal playlist saves as kind=playlist', $r->{kind}, 'playlist');
+is('...with tidal source', $r->{source}, 'tidal');
+is('...and playlist id in ref', $r->{ref}{playlist_id}, 'abcd-1234');
+
+$r = add(name => 'Dance Pop', svc => 'deezer', favurl => 'deezer://playlist:908622995');
+is('deezer playlist saves as kind=playlist', $r->{kind}, 'playlist');
+is('...with deezer source', $r->{source}, 'deezer');
+is('...and playlist id in ref', $r->{ref}{playlist_id}, '908622995');
+
+# The title is stored VERBATIM. The album path below strips a trailing "(YYYY)" (Material
+# appends one to release labels), which would rename a playlist that is genuinely called
+# this — so the playlist branch has to run ahead of that cleaning.
+$r = add(name => 'Best of (2016)', svc => 'tidal', favurl => 'tidal://playlist:verbatim-1');
+is('a playlist title keeps its (YYYY)', $r->{album_title}, 'Best of (2016)');
+is('...and gains no year from it',      $r->{year},        undef);
+
+# "Add to Wish List" on a playlist: you don't buy a playlist, so it lands in Listen Later
+# instead of being dropped — the same rule a podcast episode follows.
+$r = add(name => 'Wished Playlist', svc => 'tidal', favurl => 'tidal://playlist:wish-1', list => 'wishlist');
+is('a playlist sent to the Wish List lands in Listen Later', $r->{status}, 'later');
+
+# Re-adding the same playlist is a no-op, not a second row.
+my $again = add(name => 'Dance Pop', svc => 'deezer', favurl => 'deezer://playlist:908622995');
+is('re-adding the same playlist stores nothing', (defined $again ? 'stored' : 'already'), 'already');
+
+# Same playlist id, different service = two rows. A playlist id is only unique WITHIN a
+# service, and DB::findAnyByKey is cross-source — the key's source segment is what separates them.
+$r = add(name => 'Dance Pop', svc => 'tidal', favurl => 'tidal://playlist:908622995');
+is('the same id on another service IS a separate row', ($r ? $r->{source} : 'DROPPED'), 'tidal');
+
+section('a playlist we cannot replay is refused, not stored broken');
+# Bandcamp has no playlist call at all (and no playlists) — the Sources::_serviceCanPlaylist
+# gate must refuse rather than store a row that could only fail at play time.
+$r = add(name => 'Bandcamp Mix', svc => 'bandcamp', favurl => 'bandcamp://playlist:xyz');
+is('a service with no playlist call stores nothing', (defined $r ? 'stored' : 'rejected'), 'rejected');
+like('...and says which clause failed',
+     reject_line(name => 'Bandcamp Mix 2', svc => 'bandcamp', favurl => 'bandcamp://playlist:xy2'),
+     qr/service has no playlist call \(source 'bandcamp'\)/);
+
+# The title is the row's whole identity, so an empty one is refused outright.
+$r = add(name => '', svc => 'tidal', favurl => 'tidal://playlist:no-title');
+is('a playlist with no title stores nothing', (defined $r ? 'stored' : 'rejected'), 'rejected');
+like('...named as a title problem, not a source one',
+     reject_line(name => '', svc => 'tidal', favurl => 'tidal://playlist:no-title-2'),
+     qr/no playlist title/);
+
 
 section('a native favurl still adds normally');
 $r = add(name => 'Revolver', artist => 'The Beatles', svc => 'deezer', year => '1966',
@@ -639,6 +700,54 @@ like('an unreplayable source still reads exactly as it did',
      reject_line(kind => 'track', trackname => 'A Track', svc => 'spotify',
                  favurl => 'spotify://track:x'),
      qr/rejected add — unsupported source 'spotify'/);
+
+# ---------------------------------------------------------------------------
+# (Placed here, not beside the playlist section, because two of these need what the block
+# above set up: an album add inserts synchronously only when the type is already known
+# ('&rt='), and the favurl-less Qobuz cover row resolves through the FakeQobuzAPI stub.)
+section('positive controls — playlist detection must not widen');
+# These are the rows that would break if the detector over-matched. Each must still store
+# exactly what it stored before playlists existed.
+$r = add(name => 'Tidal Album', svc => 'tidal', favurl => 'tidal://album:529626253?rt=album');
+is('an album favurl still stores kind=album', $r->{kind},          'album');
+is('...with its album id',                    $r->{ref}{album_id}, '529626253');
+
+$r = add(name => 'Qobuz Browse Album', artist => 'Someone', svc => 'qobuz',
+         image => 'https://static.qobuz.com/images/covers/tb/ta/o8cmpfxeqtatb_600.jpg');
+is('a cover-URL album row still stores kind=album', $r->{kind},          'album');
+is('...with the id recovered from the cover',       $r->{ref}{album_id}, 'o8cmpfxeqtatb');
+
+# A TRACK row browsed INSIDE a playlist can carry that playlist's cover — so a track-shaped
+# favurl has to beat the image half of the detector, or every such add would become a playlist.
+$r = add(name => 'A Track In A Playlist', svc => 'qobuz', favurl => 'qobuz://312500115.flac',
+         image => 'https://static.qobuz.com/images/playlists/69183531_x_rectangle.jpg');
+is('a track favurl beats a playlist cover', $r->{kind},     'track');
+is('...and keeps its play url',             $r->{ref}{url}, 'qobuz://312500115.flac');
+
+# ---------------------------------------------------------------------------
+section('a saved playlist never auto-moves to Played');
+# Playlists are deliberately outside the Played machinery: a playlist is not a release, and
+# a curated one changes under you, so "% of it heard" means nothing. This needs no playlist
+# code in Played — every lookup _matchRecord makes is filtered to kind='album'/'track' — so
+# what is asserted here is that the filtering actually holds end to end.
+#
+# The sharp case is a play whose album metadata EQUALS the playlist title (a real release
+# called "Dance Pop", or a service reporting the playlist as the container): the title-only
+# fallback lookup, findByAlbum, LIKEs '%|dance pop|%' — which the playlist key's own title
+# segment matches — so only the kind filter stands between it and a wrong mark.
+my $plRow = add(name => 'Dance Pop', svc => 'tidal', favurl => 'tidal://playlist:played-guard');
+is('the guard row is a playlist', $plRow->{kind}, 'playlist');
+
+my $plPlay = Plugins::ListenLater::Played::_matchRecord(
+    undef, FakeTrack->new(artist => 'Some Artist', album => 'Dance Pop'), 'tidal://12345.flac');
+is('a play matching a playlist title marks nothing',
+   (defined $plPlay ? 'WRONGLY MATCHED' : 'no match'), 'no match');
+
+# ...and with no artist at all, which is what a streaming track usually reports.
+$plPlay = Plugins::ListenLater::Played::_matchRecord(
+    undef, FakeTrack->new(artist => '', album => 'Dance Pop'), 'tidal://12345.flac');
+is('...nor does an artist-less play',
+   (defined $plPlay ? 'WRONGLY MATCHED' : 'no match'), 'no match');
 
 printf "\n%d passed, %d failed\n", $pass, $fail;
 exit($fail ? 1 : 0);

@@ -61,6 +61,47 @@ sub strip {
 }
 
 # ---------------------------------------------------------------------------
+section('playlist detection from favurl/image');
+my @playlist = (
+    ['tidal://playlist:abc-def-123', 'https://example.com/cover.jpg', 'tidal', 'abc-def-123'],
+    ['deezer://playlist:456789', 'https://example.com/cover.jpg', 'deezer', '456789'],
+    ['qobuz://album:zzz', 'https://static.qobuz.com/images/playlists/69183531_x_rectangle.jpg', 'qobuz', '69183531'],
+    ['qobuz://album:zzz', 'https://static.qobuz.com/images/covers/xx/yy/1234_600.jpg', undef, undef],
+    ['tidal://album:529626253', 'https://example.com/cover.jpg', undef, undef],
+);
+# playlistFromRow returns a LIST — ($source, $id), or the empty list for "not a playlist".
+for my $case (@playlist) {
+    my ($fav, $img, $src, $id) = @$case;
+    my @got  = Plugins::ListenLater::Sources::playlistFromRow($fav, $img);
+    my $want = defined $src ? "$src|$id" : 'undef';
+    is("playlistFromRow: $fav", (@got ? join('|', @got) : 'undef'), $want);
+}
+
+# The scheme and the container ref must be matched SEPARATELY: '^(\w+)://' eats both
+# slashes, so a single anchored '^(\w+)://.*?[:/]playlist:' can never match the shape Tidal
+# and Deezer actually send — i.e. the common case would be the silent failure.
+is('a bare service://playlist: url matches (the anchoring trap)',
+   join('|', Plugins::ListenLater::Sources::playlistFromRow('tidal://playlist:uuid-1', undef)),
+   'tidal|uuid-1');
+is('...and so does one with a path in front of it',
+   join('|', Plugins::ListenLater::Sources::playlistFromRow('deezer://user/me/playlist:99', undef)),
+   'deezer|99');
+is('neither argument present: not a playlist',
+   (Plugins::ListenLater::Sources::playlistFromRow(undef, undef) ? 'playlist' : 'no'), 'no');
+is('a proxied Qobuz playlist cover is unescaped first',
+   join('|', Plugins::ListenLater::Sources::playlistFromRow(undef,
+       '/imageproxy/https%3A%2F%2Fstatic.qobuz.com%2Fimages%2Fplaylists%2F69183531_x_rectangle.jpg/image.jpg')),
+   'qobuz|69183531');
+
+# The other half of the invariant: a 'playlist:' url is a CONTAINER, so favurlIsTrack must
+# keep answering 0 for it. If it ever said 1, the track branch would claim the row before the
+# playlist branch is ever consulted — and it is checked first, deliberately (see
+# Plugin::_addCtxCommand).
+for my $u ('tidal://playlist:abc-def-123', 'deezer://playlist:456789', 'qobuz://playlist:69183531') {
+    is("favurlIsTrack says 0 for $u", Plugins::ListenLater::Sources::favurlIsTrack($u), 0);
+}
+
+# ---------------------------------------------------------------------------
 section("'&tc=' track count — the 0.1.89 regression");
 
 my ($f, $u) = strip('qobuz://album:dmuizydvpcxsy?a=Temples&tc=3&y=2026');

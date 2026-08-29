@@ -69,12 +69,13 @@ sub resolve_row {
     my (%o) = @_;
     my ($id) = Plugins::ListenLater::DB::add({
         source      => $o{source} // 'qobuz',
+        kind        => $o{kind},
         artist      => 'Wet Leg',
         album_title => $o{album} // ('Album ' . ++our $N),
         rel_type    => $o{rel},
         track_count => $o{count},
         ref_kind    => 'search',
-        ref         => {},
+        ref         => ($o{ref} // {}),
     }, 'later');
     @RESOLVED = @{ $o{resolved} };
     my $shown;
@@ -279,6 +280,32 @@ is('bandcamp with only an id: NO',  $direct->({ source => 'bandcamp', ref => { a
 is('bandcamp with neither',         $direct->({ source => 'bandcamp', ref => {} }), 0);
 is('library is always direct',      $direct->({ source => 'library',  ref => {} }), 1);
 is('a ref-less row cannot crash it',$direct->({ source => 'qobuz' }), 0);
+# A PLAYLIST is never "direct": it has no album ref by construction, and no search fallback
+# to be spared either — buildPlayableItems replays it through the service's playlist call or
+# not at all. Stated explicitly rather than left to fall out of "it has no album_id", so a
+# future ref shape can't quietly make it true.
+is('a playlist is not a direct album ref',
+   $direct->({ source => 'qobuz', kind => 'playlist', ref => { playlist_id => '69183531' } }), 0);
+is('...even if one somehow carried an album id',
+   $direct->({ source => 'qobuz', kind => 'playlist', ref => { album_id => 'abc' } }), 0);
+
+# ---------------------------------------------------------------------------
+section('opening a PLAYLIST writes nothing back to the row');
+# A playlist drills into a real tracklist exactly like a release does, so this write-back is
+# the one place it could silently acquire release semantics. The guard is kind eq 'album' —
+# NOT "anything that isn't a track", which is what it said while playlists didn't exist.
+# With that guard reverted, a 12-track curated playlist would be stored as a 12-track
+# "Album", start displaying a track count, and become a candidate for the Played threshold.
+my ($pl) = resolve_row(kind => 'playlist', album => 'Hi-Res Masters',
+                       ref => { playlist_id => '69183531' }, resolved => [ playable(12) ]);
+is('a playlist gains no track_count', $pl->{track_count}, undef);
+is('a playlist gains no rel_type',    $pl->{rel_type},    undef);
+is('...and is still a playlist',      $pl->{kind},        'playlist');
+
+# The same drill on a real album still records both — the write-back itself is untouched.
+my ($al) = resolve_row(album => 'A Real Album', resolved => [ playable(12) ]);
+is('an album still records its count', $al->{track_count}, 12);
+is('an album still records its type',  $al->{rel_type},    'album');
 
 printf "\n%d passed, %d failed\n", $pass, $fail;
 exit($fail ? 1 : 0);

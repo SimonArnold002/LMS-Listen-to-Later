@@ -76,7 +76,7 @@ sub _migrate {
 CREATE TABLE IF NOT EXISTS albums (
     id          INTEGER PRIMARY KEY AUTOINCREMENT,
     status      TEXT    NOT NULL DEFAULT 'later',   -- 'later' | 'played' | 'wishlist'
-    kind        TEXT    NOT NULL DEFAULT 'album',    -- 'album' | 'track'
+    kind        TEXT    NOT NULL DEFAULT 'album',    -- 'album' | 'track' | 'playlist'
     source      TEXT    NOT NULL,                    -- 'library' | 'qobuz' | 'bandcamp' | ...
     artist      TEXT,
     album_title TEXT,                                -- the (parent) album title; also set for a track
@@ -87,7 +87,7 @@ CREATE TABLE IF NOT EXISTS albums (
     artwork     TEXT,
     ref_kind    TEXT,                                -- 'album_id' | 'url' | 'passthrough'
     ref_json    TEXT,                                -- JSON: { album_id, url, passthrough, _svc }
-    dedupe_key  TEXT    NOT NULL,                     -- normalised artist|album|year (+ '|t:<track>' for a track)
+    dedupe_key  TEXT    NOT NULL,                     -- normalised artist|album|year (+ '|t:<track>' for a track, '|p:<svc>:<id>' for a playlist)
     added_at    INTEGER,
     played_at   INTEGER,
     play_count  INTEGER NOT NULL DEFAULT 0,
@@ -246,6 +246,25 @@ sub dedupeKey {
     return $key;
 }
 
+# The dedupe key for a saved streaming PLAYLIST. A playlist has no artist and no release
+# year, and its TITLE is not an identity (two services both offer a "Dance Pop"), so the key
+# is built round the one thing that IS one: the service's own playlist id.
+#
+#   '' | <normalised title> | '' | 'p:<source>:<id>'      e.g. |hi res masters 2016||p:qobuz:69183531
+#
+# Three load-bearing properties, none of them incidental:
+#   • the SOURCE sits inside the id segment. findAnyByKey (which add() dedupes with) is
+#     deliberately cross-source, so without it Qobuz playlist 123 and Deezer playlist 123
+#     would collapse into one row — for playlists the id is only unique WITHIN a service.
+#   • it carries >= 2 pipes, so the 0.1.43 year migration (WHERE dedupe_key NOT LIKE
+#     '%|%|%') leaves it alone.
+#   • the artist segment is EMPTY, so a curator line can be stored and displayed without
+#     ever touching dedupe — the title+id pair is the whole identity.
+sub playlistKey {
+    my ($source, $id, $title) = @_;
+    return '' . '|' . _norm($title) . '|' . '' . '|p:' . lc($source // '') . ':' . ($id // '');
+}
+
 sub _rowToHash {
     my ($row) = @_;
     return undef unless $row;
@@ -266,9 +285,13 @@ sub add {
     $status = 'later' unless defined $status && $status =~ /^(?:later|wishlist)$/;
 
     my $source = $rec->{source} or return (undef, 0, undef);
-    my $kind   = ($rec->{kind} && $rec->{kind} eq 'track') ? 'track' : 'album';
+    # A three-way whitelist, not a binary: anything unrecognised still falls back to 'album',
+    # which is what every legacy row and every caller that passes no kind at all relies on.
+    my $kind   = ($rec->{kind} && $rec->{kind} =~ /^(?:track|playlist)$/) ? $rec->{kind} : 'album';
     my $key    = ($kind eq 'track')
         ? dedupeKey($rec->{artist}, $rec->{album_title}, $rec->{year}, $rec->{track_title})
+      : ($kind eq 'playlist')
+        ? playlistKey($source, ($rec->{ref} || {})->{playlist_id}, $rec->{album_title})
         : dedupeKey($rec->{artist}, $rec->{album_title}, $rec->{year});
 
     # Block duplicates across EVERY source, not just the same one: the same album
