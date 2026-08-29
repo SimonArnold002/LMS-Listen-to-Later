@@ -609,10 +609,17 @@ sub _materialActionSet {
     # A PODCAST episode row in the built-in Podcasts app. Verified in the served bundle:
     # those rows have no stdItem and no metadata, so Material's is-track flag is false and
     # the category it resolves is "<command>-album" = 'podcasts-album' — and it prefers a
-    # PRESENT per-command category over the generic online-*. So writing a POPULATED
-    # podcasts-album is what replaces the generic "Add album …" with "Add podcast …" there,
-    # and nowhere else. (The same per-app override we already use EMPTY for suppression;
-    # populated it can only ever add, never hide.)
+    # PRESENT per-command category over the generic online-*. Writing a POPULATED
+    # podcasts-album is therefore what REPLACES the generic pair on those rows, and nowhere
+    # else. (The same per-app override we already use EMPTY for suppression; populated it
+    # swaps the list wholesale, so it can hide an entry by not carrying it.)
+    #
+    # NB the win is NOT the wording — every row-level title went type-neutral ("Add to Listen
+    # Later") in 0.1.85, so the generic entries read correctly here too. What the override
+    # actually buys is (a) 'kind:podcast', which routes straight to _savePodcastEpisode
+    # instead of leaning on the last-resort resolve at the bottom of _addCtxCommand, and
+    # (b) NO "Add to Wish List" entry, because you don't buy a podcast episode (the same rule
+    # _savePodcastEpisode enforces on the command side).
     # The row carries no favurl and no id — only $TITLE and $IMAGE — so the episode is
     # resolved at add time against the user's subscribed feeds (Podcast.pm).
     my $podcastCmd = [ 'listenlater', 'addctx', 'kind:podcast',
@@ -660,11 +667,18 @@ sub _materialActionSet {
     # and the ONLY $emit("customActions") is inside the `.then` of the axios GET of
     # customactions.json. initCustomActions fires that GET and the ["material-skin",
     # "plugin-actions"] CLI call side by side, and only the GET emits — so the snapshot is
-    # taken when the GET lands, whoever won. A static file beats a JSON-RPC POST through
-    # the Perl dispatcher essentially every time, which leaves `pluginCustomActions` still
-    # undefined at snapshot time and NO "Add" in either panel for the whole page session.
-    # Nothing re-emits, so it never recovers. Every other category above is re-resolved per
-    # browse response, and is immune to load order.
+    # taken when the GET lands, whoever won. Whenever the CLI call lands SECOND,
+    # `pluginCustomActions` is still undefined at snapshot time and there is NO "Add" in either
+    # panel for the whole page session; nothing re-emits, so it never recovers.
+    #
+    # It is a genuine race rather than a guaranteed loss: MEASURED 2026-08-29 over http, the two
+    # are neck and neck (~19ms for the file GET vs ~20ms for the CLI POST) — an earlier version
+    # of this comment claimed the static file wins "essentially every time", which the numbers
+    # do not support. What does settle it is CACHING: the GET carries `?r=<revision>`, so on any
+    # load served from the browser cache it returns at once and wins outright. Either way the
+    # plugin cannot depend on the order, and an action that appears on some page loads and not
+    # others is worse to diagnose than one that is reliably absent — hence file-only.
+    # Every other category above is re-resolved per browse response, and is immune to load order.
     # (Neither is a per-app override, so the file costs us nothing here. The one price is the
     # 0.1.57 stale-tab caching of customactions.json — a hard refresh after install.)
     my %fileCats = (
@@ -675,7 +689,7 @@ sub _materialActionSet {
     # 2. The built-in Podcasts app, keyed on ITS browse command. '-album' is the category
     # Material actually resolves for those rows (see $podcastCmd); '-track' is written with
     # the same pair purely as insurance, in case a future Material starts classifying them
-    # as tracks — a populated category can only add an entry, never suppress one.
+    # as tracks.
     # Only written when the Podcast plugin holds subscriptions, because an episode can only
     # be resolved against a subscribed feed; with none, the generic "Add album" stays and
     # keeps rejecting exactly as it does today, rather than promising a podcast add we
