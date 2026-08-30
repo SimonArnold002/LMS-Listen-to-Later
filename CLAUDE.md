@@ -66,7 +66,9 @@ does not cover. Say which ledger entry you are challenging and what changed.
   for that.** A playlist is not a release and a curated one changes under you, so a
   "% of it heard" threshold is meaningless. Every Played lookup is already filtered
   to `kind='album'`/`'track'`; the absence of a playlist branch in `Played.pm` is
-  the mechanism, not an oversight.
+  the mechanism, not an oversight. Pinned by the `_matchRecord` cases at the foot of
+  `t_played.pl` — do not delete them as redundant with `t_db.pl`, they are what stops
+  the absence being refactored away.
 - **A playlist is stored with NULL `rel_type` and NULL `track_count`, and
   `_savePlaylistRecord` deliberately does not call `_finishAlbumAdd`.** Both are
   release semantics. `Browse::_albumTracks`'s write-back guard is therefore
@@ -1885,11 +1887,27 @@ The "Add to Listen Later"/"Add to Wish List" custom actions appear on streaming 
   `favorites_url`, unlike Tidal and Deezer; a one-line `qobuz://playlist:<id>` would close it
   for everyone.
 
-  **723 checks across 12 suites**, up from 662. Anti-tested per half: neutering
+  **728 checks across 12 suites**, up from 662. Anti-tested per half: neutering
   `playlistFromRow` fails 15 add cases and NONE of the six positive controls (an album favurl,
   a cover-URL album row, a track favurl carrying a playlist cover — the rows that would break
   if detection widened); reverting the `_albumTracks` guard to `ne 'track'` fails exactly the
   2 cases it exists for and nothing else.
+
+  The last 5 of those checks were added AFTER the build, and are worth their own note because
+  of what they pin: `t_played.pl` now asserts that a saved playlist is invisible to
+  `Played::_matchRecord`. The ledger entry above says the exclusion "needs no new code" — every
+  Played lookup already filters `kind='album'`/`'track'` — and that is exactly why it needed a
+  test. **The mechanism is an ABSENCE**, so a refactor can delete it and nothing else notices.
+  The cases assert the behaviour at `_matchRecord` rather than the filters (`t_db.pl` pins
+  those individually), so the promise survives however the lookups are rewritten. The risk is
+  real, not hypothetical: a playlist is routinely NAMED after a release it draws from, and
+  Played matches streaming plays on artist+title alone with no id anchor. Anti-tested against
+  all THREE finders `_matchRecord` walks — stripping the `kind='album'` filter from
+  `findByArtistAlbum`/`findByAlbum`, or from `findBySourceRefTitle` alone, each fails the 2
+  negative cases while both positive controls still pass. Reaching the third one is why the
+  test's playlist row carries a `ref.svc_title` that `_savePlaylistRecord` never writes: with
+  the field empty that finder would pass for the wrong reason. Tests only — no plugin code
+  changed, so no version bump and no rebuild.
 
   Podcast `CACHE_VER` bumped 11 → 12 with the build per the dev-build cache rule; nothing here
   parses a feed, so it is hygiene, not a fix.
