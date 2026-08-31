@@ -46,7 +46,6 @@ $prefs->init({
     debug_log            => 0,         # verbose diagnostics for the Material custom-action wiring
     material_debug_snapshot => '',     # latest debug dump (set by _dumpMaterialState; shown in Settings)
     threshold_90_migrated => 0,        # VERSION of the 60% -> 90% bump that has run (see below)
-    rebrand_migrated      => 0,        # the pre-rebrand pref copy has run (see _migrateRebrandPrefs)
 });
 
 # A PREF-MIGRATION FLAG MUST NOT START WITH AN UNDERSCORE.
@@ -54,16 +53,9 @@ $prefs->init({
 # `Slim::Utils::Prefs::Base::set` stores a value only `if ($valid && $pref !~ /^_/)` — a pref
 # whose name begins with `_` is DISCARDED, with no error, no warning and no return value to
 # check, and `get` then returns undef for ever. (The namespace reserves that prefix for its own
-# `_ts_<pref>` write stamps.) `_rebrand_migrated`, the one-shot flag added with the 0.1.25
-# rebrand, was exactly that shape — so it never persisted and `_migrateRebrandPrefs` ran on
-# EVERY server start, copying the pre-rebrand `plugin.listentolater` namespace over the user's
-# current settings each time.
-#
-# That is what made 0.1.93 look like it hadn't shipped: the bump below set 90 at module load and
-# `initPlugin` overwrote it with the old namespace's 60 seconds later, on every restart. Diagnosed
-# live 2026-07-31 — `played_threshold`=60 alongside `threshold_90_migrated`=1, `_rebrand_migrated`
-# undef, and both `_ts_` stamps sitting on the last restart. It silently reverted every Settings
-# change to `sort` / `streaming_min_tracks` / `played_retention_days` too.
+# `_ts_<pref>` write stamps.) The 0.1.25 rebrand's one-shot flag was exactly that shape, so it
+# never persisted and its migration re-ran on EVERY server start, silently reverting every
+# Settings change. That migration is gone (0.1.108) — the rule it cost us is not.
 #
 # The Played threshold moved from 60% to 90% once a release's length stopped being GUESSED
 # from its type and started being MEASURED from its real tracklist (2026-07-30): 60% of a
@@ -76,8 +68,8 @@ $prefs->init({
 # 60" — this is a change of default for everyone, not a repair of one setting.
 #
 # The flag is a VERSION, not a boolean (0.1.94). Every install that ran it as version 1 had the
-# bump undone within the same startup by the broken rebrand copy above, so the setting they are
-# actually running is still 60 while the flag says the migration is done. Version 2 re-applies it
+# bump undone within the same startup by the broken rebrand copy (since removed), so the setting
+# they are actually running is still 60 while the flag says the migration is done. Version 2 re-applies it
 # once, now that the copy can no longer overwrite it. A user who deliberately chose 60 in the
 # meantime never kept it either — it was being rewritten from the old namespace at every restart —
 # so there is no considered choice here to overrule.
@@ -85,18 +77,10 @@ use constant THRESHOLD_MIGRATION => 2;
 
 _migratePrefs();
 
-# Both one-shot pref migrations, in a sub purely so a test can drive them over a prepared
-# store — the bug they exist to fix is a migration that ran when it shouldn't have, and
+# The one-shot pref migration, in a sub purely so a test can drive it over a prepared
+# store — the bug it exists to fix is a migration that ran when it shouldn't have, and
 # top-level code that runs once per process can't be asked to do that twice.
 sub _migratePrefs {
-    # Mark the rebrand copy done for anyone who has been here before, so the properly-gated
-    # version in _migrateRebrandPrefs cannot run one final time and re-import the very values
-    # this release exists to stop. `threshold_90_migrated` is the proxy for "this install is
-    # not new": only a fresh install lacks it, and a fresh install has nothing to migrate.
-    if (!$prefs->get('rebrand_migrated') && $prefs->get('threshold_90_migrated')) {
-        $prefs->set('rebrand_migrated', 1);
-    }
-
     if (($prefs->get('threshold_90_migrated') || 0) < THRESHOLD_MIGRATION) {
         $prefs->set('played_threshold', 90);
         $prefs->set('threshold_90_migrated', THRESHOLD_MIGRATION);
@@ -130,18 +114,55 @@ sub _materialVersion {
 # categories surviving an uninstall, and no browser cache of it (the file is fetched with a
 # `?r=<material version>` cache-buster, the CLI query is not — see 0.1.57).
 #
-# Capability test, not a version parse: a dev/test Material reports a non-numeric version, and
-# what actually matters is whether the sub is there. Package presence is guaranteed by the
-# isEnabled() guard at every call site.
+# THE DELIVERY TIER. The API arrived in two steps, and the middle step is actively dangerous
+# to call the way the final one wants to be called — so "does the sub exist" is no longer a
+# sufficient test, and this replaces the plain `->can` gate 0.1.95 used.
 #
-# Returns the CODE REF, and the caller calls through it. Not cosmetic: a compiled
+#   0  no registerCustomAction (Material < 6.4.6, or no Material at all) — everything goes in
+#      the shared actions.json, byte for byte as it did before 0.1.95.
+#   1  registerCustomAction exists, Material 6.4.6 / 6.4.7 — the POSITIVE entries register; the
+#      two client-resolved surfaces, the podcasts override and every empty suppressor still have
+#      to be written to the file (see _materialActionSet). This is 0.1.95-0.1.109 behaviour.
+#   2  Material >= 6.4.8 (upstream PR #1257) — ALL of it registers, empty suppressors included,
+#      and the file is PRUNED instead of written (see _pruneMaterialActions).
+#
+# **Tier 2 requires BOTH tests, and the version half is not belt-and-braces.** #1257 is what
+# made `registerCustomAction($section)` — one argument, no action — mean "declare an EMPTY
+# category". On 6.4.6/6.4.7 that identical call pushes **undef** into the section; Material
+# serves it as `{"<cat>":[null]}`; customactions.js then reads `sect[i].locked` off the null and
+# throws — taking out every custom action in that section, other plugins' included, not just
+# ours. So the empty-section call is tier-2-only and must never be reached by capability alone.
+#
+# There is no side-effect-free capability probe to prefer over the version parse:
+# `$PLUGIN_CUSTOM_ACTIONS` is a file-scoped `my` in Material's Plugin.pm, so it cannot be read
+# back, and probing by registering a section cannot be undone (there is no unregister).
+#
+# A dev/test Material (non-numeric version) is treated as newest, same as `Browse::_headerType`.
+# The window that makes that wrong — a dev build cut between 6.4.6 and the #1257 merge
+# (2026-08-30) — is closed and shrinking; anything built from master since carries the fix.
+#
+# Returns ($tier, $coderef), and the caller calls THROUGH the code ref. Not cosmetic: a compiled
 # `Plugins::MaterialSkin::Plugin::registerCustomAction(...)` binds to that glob at OUR compile
 # time, which on a server is fine but ties the call to whatever the symbol table held when this
 # module loaded. Looking it up through ->can each run is what the capability test already does,
 # so use its answer rather than a second, staler route to the same sub.
-sub _useActionApi {
-    return Plugins::MaterialSkin::Plugin->can('registerCustomAction');
+sub _materialActionTier {
+    my $register = Plugins::MaterialSkin::Plugin->can('registerCustomAction')
+        or return (0, undef);
+    my $ver = _materialVersion();
+    my $tier;
+    if (!defined $ver) {
+        $tier = 1;                                          # can't tell -> the safe API tier
+    } elsif ($ver =~ /^(\d+)\.(\d+)\.(\d+)/) {
+        $tier = ( $1 <=> 6 || $2 <=> 4 || $3 <=> 8 ) >= 0 ? 2 : 1;
+    } else {
+        $tier = 2;                                          # dev/test build -> newest
+    }
+    return ($tier, $register);
 }
+
+# Just the tier, for the callers that don't need the code ref.
+sub _actionTier { my ($t) = _materialActionTier(); return $t }
 
 # registerCustomAction PUSHES — there is no unregister and no de-dupe, so registering twice
 # puts every entry in the menu twice. Register exactly once per server run (postinitPlugin);
@@ -159,6 +180,20 @@ sub _useActionApi {
 our $REGISTERED   = 0;
 our $REGISTERED_N = 0;   # how many entries Material actually took (0 = the API gave us nothing)
 our %UNREGISTERED;       # cat => [ actions registerCustomAction refused ] — file fallback
+
+# The EMPTY suppressor sections registered this run (tier 2 only), cat => 1.
+#
+# `$REGISTERED` above is a single latch because the positive entries are built once and never
+# grow. The suppressors do grow: the radio browse commands are DISCOVERED ASYNC — TuneIn's
+# directory is fetched from mysqueezebox.com and is not ready at postinit — so the +60s deferred
+# pass finds commands the first pass could not (0.1.56). On tier 2 that pass has to REGISTER
+# those, not write them, and a single latch would either block it entirely or re-push everything.
+#
+# Registering a brand-new empty section late is safe (nothing to double). Re-registering an
+# existing one is a no-op in Material too — its one-arg branch only creates the section when it
+# does not `exist` — but that is Material's internal, not a contract, so track ours here and
+# only ever ask for sections we have not asked for.
+our %REGISTERED_EMPTY;
 
 # Can we actually save AND replay an album from this source? Only the local library and
 # the streaming services with an adapter in Sources.pm (Qobuz/Bandcamp/Tidal, when their
@@ -183,10 +218,6 @@ sub _isReplayableSource {
 
 sub initPlugin {
     my $class = shift;
-
-    # One-time rebrand migration: copy settings from the old plugin.listentolater
-    # prefs namespace (the plugin was "Listen to Later" before this release).
-    _migrateRebrandPrefs();
 
     if (main::WEBUI) {
         require Plugins::ListenLater::Settings;
@@ -224,33 +255,26 @@ sub initPlugin {
     return;
 }
 
-# Copy prefs from the pre-rebrand namespace (plugin.listentolater) into ours once.
-# Runs after $prefs->init (top of module), so it overrides defaults with the user's
-# previous values where they were set.
+# Re-run 60s after startup: the internet-radio directory loads asynchronously, so the radio
+# suppressors created at postinit miss TuneIn's categories (0.1.56).
 #
-# ONCE is the whole contract, and until 0.1.94 it was not honoured: the flag was
-# `_rebrand_migrated`, which a leading underscore made unstorable, so this ran at every
-# start and reverted the user's settings to their 0.1.25-era values. See the note beside
-# $prefs->init. The flag must stay underscore-free.
-sub _migrateRebrandPrefs {
-    return if $prefs->get('rebrand_migrated');
-    my $old = preferences('plugin.listentolater');
-    for my $k (qw(sort played_threshold streaming_min_tracks watch_outside material_action played_retention_days)) {
-        my $ov = $old->get($k);
-        $prefs->set($k, $ov) if defined $ov;
-    }
-    $prefs->set('rebrand_migrated', 1);
-    $log->info('Listen Later: migrated prefs from plugin.listentolater');
-    return;
-}
-
-# Re-run of the FILE write only, 60s after startup: the internet-radio directory loads
-# asynchronously, so the radio suppressors written at postinit miss TuneIn's categories
-# (0.1.56). Deliberately does NOT re-register — registerCustomAction has no de-dupe, and
-# nothing it registers depends on that directory anyway.
+# On tier 0/1 that is a FILE re-write and nothing more — the positives are already registered,
+# `registerCustomAction` has no de-dupe, and nothing registered depends on that directory.
+#
+# On tier 2 the suppressors ARE registered, so this pass has real registration work: the radio
+# commands the first pass could not see. `_registerMaterialActions` skips the positives (the
+# `$REGISTERED` latch) and registers only empty sections it has not already asked for
+# (`%REGISTERED_EMPTY`), so re-running it here cannot double anything.
+#
+# NB the late-discovery race is unchanged by the move to the API, and is not fixable from here:
+# a Material tab already loaded took its `pluginCustomActions` snapshot at app start, so a
+# section registered at +60s is invisible to it either way — exactly as a late FILE write is
+# invisible to the browser-cached customactions.json (0.1.57). Both recover on the next app load.
 sub _writeMaterialActionsDeferred {
     return unless $prefs->get('material_action')
         && Slim::Utils::PluginManager->isEnabled('Plugins::MaterialSkin::Plugin');
+    eval { _registerMaterialActions(); 1 }
+        or $log->error("LL: deferred Material custom-action registration failed: $@");
     eval { _writeMaterialActions(); 1 }
         or $log->error("LL: deferred Material custom-action write failed: $@");
 }
@@ -321,7 +345,7 @@ sub _purgeTick {
 }
 
 # ---------------------------------------------------------------------------
-# Material custom actions — registered with Material on 6.4.6+ (see _useActionApi),
+# Material custom actions — registered with Material on 6.4.6+ (see _materialActionTier),
 # written to the shared prefs/material-skin/actions.json on older Material and, either
 # way, for the categories the registration API cannot express (see _materialActionSet).
 # ---------------------------------------------------------------------------
@@ -378,14 +402,41 @@ sub _writeMaterialActionsFile {
 # ADDS it where it was suppressed: every Listen Later/Played row would offer "Add to Listen
 # Later" until the restart, and using it on a Played row bounces that row back to Listen Later.
 # So the empties are kept — and re-asserted — until the run that registered them ends.
+# $departing — the plugin is being uninstalled or disabled (shutdownPlugin). It forces the
+# full clean: the whole $live dance below exists to protect the empty suppressors while our
+# registered positives are still live IN THIS RUN, and on the way out there is no next run to
+# protect. Nothing re-registers, so leaving the empties behind would strand them for ever,
+# suppressing another plugin's online-* actions on podcasts and every radio command with
+# nothing of ours left to clean them up.
 sub _clearMaterialActions {
+    my ($departing) = @_;
     my $file = _materialActionsFile();
+
+    # TIER 2 — the whole $live dance below is moot, and this is the one place where the tier
+    # makes turning the pref off SIMPLER rather than harder.
+    #
+    # That dance exists because the registered positives cannot be withdrawn while the file
+    # empties protecting our own rows are being deleted. On >= 6.4.8 the suppressors are
+    # REGISTERED too, so they are exactly as live as the positives they hold back: there is
+    # nothing in the file left to protect, and re-asserting file copies of sections Material
+    # already holds would just put litter back into a file we are here to clean. So prune, and
+    # say what the user will actually see.
+    #
+    # $departing (uninstall/disable) takes the same path: the prune removes everything of ours
+    # from the file, and the registrations die with the server that holds them.
+    if (_actionTier() >= 2) {
+        $log->warn('LL: material_action is off — the registered "Add" entries go at the next '
+            . 'server restart (Material has no unregister API). The suppressors are registered '
+            . 'too, so until then "Add" still does not appear inside our own list or on radio '
+            . 'rows') if !$departing && ($REGISTERED_N || %REGISTERED_EMPTY);
+        return _pruneMaterialActions($departing);
+    }
 
     # Only when something was actually registered — if the API refused every entry they are
     # in the FILE, which this sub clears here and now, so promising a restart would be wrong.
     # Reachable from the SETTINGS save only: postinit calls this from the branch where the
     # pref was already off at startup, so nothing can have registered on that path.
-    my $live = $REGISTERED_N ? 1 : 0;
+    my $live = (!$departing && $REGISTERED_N) ? 1 : 0;
     $log->warn('LL: material_action is off — the registered "Add" entries go at the next '
         . 'server restart (Material has no unregister API); the empty suppressor categories '
         . 'stay in actions.json until then, so "Add" does not appear inside our own list')
@@ -402,10 +453,7 @@ sub _clearMaterialActions {
         $data->{$cat} = [ grep { !_isOurAction($_) } @{ $data->{$cat} } ];
     }
 
-    my @ourSuppressors = qw(
-        listenlater-album listenlater-track listenlater-artist
-        LLHome-album LLHome-track LLHome-artist
-    );
+    my @ourSuppressors = _ownSurfaceSuppressorCats();
     delete $data->{$_} for (
         ($live ? () : @ourSuppressors),
         qw(listentolater-album listentolater-track listentolater-artist
@@ -534,6 +582,19 @@ sub _unsupportedRadioCommands {
 # plugin suppresses a service WE replay (an empty <cmd>-* there hides only our own Add), and
 # the Podcasts app override is one we wrote. 'listenlater' is excluded from the seed: our own
 # empty listenlater-* pair is the deliberate 0.1.52 suppressor and must never be swept.
+#
+# **GATING THE SEED ON "has LL ever touched this file" WAS TRIED IN 0.1.110 AND REVERTED — do
+# not re-propose it.** The concern is real: every category the seed claims is `<cmd>-album`/
+# `-track`, an EMPTY one of those is a deliberate Add-suppressor by this plugin's own 0.1.52
+# rule, and a hand-written `qobuz-album` is indistinguishable from ours by content. But the
+# husks the seed exists to sweep have EXACTLY that shape — 0.1.47-0.1.50 wrote `||= []`, i.e.
+# an empty category with no entries and no other mark — so any test for "a trace of LL" also
+# withholds the seed from the file that needs it, and the 0.1.51 regression comes straight back
+# (`t_material_matrix.pl`'s I3/I4 fail on `legacy_husks`, which is how this was caught).
+# There is nothing in the file to tell the two apart. The seed stays, on its original
+# reasoning, and the protection for a third party's file lives where it can actually be exact:
+# `_isOurAction` (no title guessing) and the prune's only-empty / only-ours / never-unlink-a-
+# non-empty-file rules.
 sub _ownedCats {
     my $l = $prefs->get('material_owned_cats');
     return { map { $_ => 1 } @$l } if ref $l eq 'ARRAY';
@@ -554,21 +615,48 @@ sub _radioSuppressorCats {
     return map { ("$_-album", "$_-track") } sort keys %radioCmd;
 }
 
-# Build every custom action we offer, ONCE, for both delivery paths — the 6.4.6 registration
-# API and the legacy actions.json write. Returns two hashrefs of category => [ action, … ]:
+# Our OWN surfaces: the plugin's list view (browse command 'listenlater') and its Material home
+# shelf ('LLHome'). Their categories are declared EMPTY, which by the 0.1.52 rule suppresses the
+# generic online-* pair there — an album already in the list must not be offered "Add" again
+# (re-adding bounces a Played album back to Listen Later).
 #
-#   %positive  the "Add to Listen Later" / "Add to Wish List" entries. These move to the
-#              registration API on Material 6.4.6+ (see _useActionApi).
-#   %fileOnly  entries that only work from actions.json, because Material decides whether an
-#              app's own "<browse-command>-<type>" category overrides the generic "online-*"
-#              with `appCat in customActions` — the FILE, never the plugin-registered list
-#              (verified in the served 6.4.7 bundle). Today that is the podcasts wording; the
-#              EMPTY suppressor categories (written below in _writeMaterialActions) are the
-#              same limitation from the other side — the API takes an action and pushes it,
-#              so "this category exists and is empty" cannot be expressed at all.
+# Its own sub because four passes need the identical list, and on tier 2 it is also the set
+# REGISTERED as empty sections rather than written. The radio suppressors are the other half and
+# come from _radioSuppressorCats(), kept separate because that one enumerates the server's
+# 'radios' menu and must not be called from the pure action-set builder.
+sub _ownSurfaceSuppressorCats {
+    return qw(
+        listenlater-album listenlater-track listenlater-artist
+        LLHome-album LLHome-track LLHome-artist
+    );
+}
+
+# Build every custom action we offer, ONCE, for every delivery path — so there is only one
+# spelling of the commands however they reach Material. Takes the tier (see
+# _materialActionTier) and returns three things:
 #
-# Both paths get the SAME hashes, so there is only one spelling of the commands.
+#   %positive   the "Add to Listen Later" / "Add to Wish List" entries that are REGISTERED.
+#   %fileOnly   entries that must be written to actions.json on this tier.
+#   @emptyCats  our own-surface categories to declare EMPTY *by registration*. Non-empty on
+#               tier 2 only; on tier 0/1 the file write creates them instead.
+#
+# What sits in which set is entirely a function of the tier:
+#
+#   tier 0/1 — %fileOnly holds `track` + `queue-track` (Material resolves those two in the
+#              BROWSER and snapshots them ONCE, off a bus event only the customactions.json
+#              fetch fires — so a registered entry is typically not there yet and never
+#              recovers; 0.1.97) and the `podcasts-*` per-app override (Material tests
+#              `appCat in customActions`, the FILE object alone). @emptyCats is empty because
+#              `registerCustomAction` on those Materials takes an action and pushes it, so
+#              "this category exists and is empty" has no spelling at all.
+#   tier 2   — upstream PR #1257 closed all three of those gaps (customactions.js re-emits
+#              `customActions` when the plugin list lands; browse-resp.js checks
+#              `pluginCustomActions` for the per-app category; and a one-argument
+#              registerCustomAction declares an empty section). So %fileOnly is EMPTY, its
+#              contents fold into %positive, and the suppressors register.
 sub _materialActionSet {
+    my ($tier) = @_;
+    $tier = 1 unless defined $tier;
     # `lmscommand` must be a FLAT array (verb + tag params); Material substitutes the
     # $VARS from the item and runs it fire-and-forget. $FAVURL carries the item's play
     # URL (qobuz://… etc.), which tells addctx the source.
@@ -753,39 +841,83 @@ sub _materialActionSet {
         return \%out;
     };
 
-    return ($build->(\%cats), $build->(\%fileCats));
+    # Tier 2: every gap that forced the file half is closed upstream, so the whole set
+    # registers. Folded here rather than at the call sites so "which delivery path" is decided
+    # in exactly one place and the two writers cannot disagree about it.
+    if ($tier >= 2) {
+        %cats = (%cats, %fileCats);
+        %fileCats = ();
+        return ($build->(\%cats), $build->(\%fileCats), [ _ownSurfaceSuppressorCats() ]);
+    }
+
+    return ($build->(\%cats), $build->(\%fileCats), []);
 }
 
 # Hand %positive to Material (6.4.6+). No-op on an older Material, and no-op on every call
 # after the first — see $REGISTERED. Returns the number of entries registered.
 sub _registerMaterialActions {
-    return 0 if $REGISTERED;
-    my $register = _useActionApi() or return 0;
+    my ($tier, $register) = _materialActionTier();
+    return 0 unless $tier;
 
-    my ($positive) = _materialActionSet();
+    my ($positive, undef, $emptyCats) = _materialActionSet($tier);
+
+    # --- the POSITIVE entries: once per server run, latched on the ATTEMPT ---
     my ($n, %failed) = (0);
-    for my $cat (sort keys %$positive) {
-        for my $action (@{ $positive->{$cat} }) {
-            # NB a plain sub, not a method — Material's own signature is ($section, $action),
-            # so calling it with `->` would pass the class name as the section.
-            if ( eval { $register->($cat, $action); 1 } ) {
-                $n++;
-            }
-            else {
-                # Hand it back to the file write rather than losing it — see %UNREGISTERED.
-                push @{ $failed{$cat} ||= [] }, $action;
-                $log->error("LL: registerCustomAction('$cat') failed: $@");
+    unless ($REGISTERED) {
+        for my $cat (sort keys %$positive) {
+            for my $action (@{ $positive->{$cat} }) {
+                # NB a plain sub, not a method — Material's own signature is ($section,
+                # $action), so calling it with `->` would pass the class name as the section.
+                if ( eval { $register->($cat, $action); 1 } ) {
+                    $n++;
+                }
+                else {
+                    # Hand it back to the file write rather than losing it — see %UNREGISTERED.
+                    push @{ $failed{$cat} ||= [] }, $action;
+                    $log->error("LL: registerCustomAction('$cat') failed: $@");
+                }
             }
         }
+        %UNREGISTERED  = %failed;
+        $REGISTERED    = 1;
+        $REGISTERED_N  = $n;
+        $log->warn("LL: registered $n Material custom action(s) in "
+            . scalar(keys %$positive) . " section(s) via the plugin API (tier $tier)");
+        $log->error('LL: Material refused ' . scalar(map { @$_ } values %failed)
+            . ' custom action(s) — writing those to actions.json instead') if %failed;
     }
-    %UNREGISTERED  = %failed;
-    $REGISTERED    = 1;
-    $REGISTERED_N  = $n;
-    $log->warn("LL: registered $n Material custom action(s) in "
-        . scalar(keys %$positive) . ' section(s) via the plugin API');
-    $log->error('LL: Material refused ' . scalar(map { @$_ } values %failed)
-        . ' custom action(s) — writing those to actions.json instead') if %failed;
-    return $n;
+
+    # --- the EMPTY suppressor sections: tier 2 only, per category, re-runnable ---
+    #
+    # @$emptyCats is our own surfaces (list view + home shelf); the radio browse commands are
+    # unioned in here rather than inside _materialActionSet because that list is enumerated
+    # from the server's 'radios' menu and GROWS — TuneIn's directory arrives asynchronously, so
+    # the +60s deferred pass calls this again and picks up what postinit could not see (0.1.56).
+    #
+    # Guarded per category, never by a single latch: re-registering an existing empty section
+    # would be a no-op inside Material anyway (its one-arg branch only creates a section that
+    # does not `exist`), but that is an internal, not a promised contract.
+    #
+    # A refused empty section is NOT put in %UNREGISTERED. That structure exists so a refused
+    # POSITIVE can fall back to the file without doubling, and it is keyed to actions. A
+    # suppressor is a category NAME; the file fallback for it is written by _writeMaterialActions
+    # from %REGISTERED_EMPTY, which only ever records what Material actually took.
+    my $e = 0;
+    if ($tier >= 2) {
+        for my $cat (@$emptyCats, _radioSuppressorCats()) {
+            next if $REGISTERED_EMPTY{$cat};
+            if ( eval { $register->($cat); 1 } ) {
+                $REGISTERED_EMPTY{$cat} = 1;
+                $e++;
+            }
+            else {
+                $log->error("LL: registerCustomAction('$cat') as an empty section failed: $@");
+            }
+        }
+        $log->warn("LL: registered $e empty suppressor section(s) via the plugin API") if $e;
+    }
+
+    return $n + $e;
 }
 
 # Write the parts of the action set that live in Material's SHARED actions.json. On Material
@@ -796,13 +928,19 @@ sub _registerMaterialActions {
 # previous version wrote to the file, which is what stops every "Add" appearing twice (the
 # two lists are MERGED client-side, file first, then plugin-registered).
 sub _writeMaterialActions {
+    my $tier = _actionTier();
+
+    # Tier 2 writes NOTHING. Everything we offer is registered, so the only work left in the
+    # shared file is taking our old entries back out — see _pruneMaterialActions.
+    return _pruneMaterialActions() if $tier >= 2;
+
     my $file = _materialActionsFile();
     my $dir  = File::Spec->catdir(Slim::Utils::Prefs::dir(), 'material-skin');
     File::Path::make_path($dir) unless -d $dir;
 
     my $data = _readMaterialActions($file);
 
-    my ($positive, $fileOnly) = _materialActionSet();
+    my ($positive, $fileOnly) = _materialActionSet($tier);
 
     # The API path is "registration has RUN", not "the API exists". Two cases the capability
     # test alone gets wrong, both ending with the entry in neither place:
@@ -813,7 +951,7 @@ sub _writeMaterialActions {
     #     no unregister, so registering outside postinit is not safe). Writing the full set
     #     to the file is then correct AND is what makes the toggle work before a restart;
     #     the next startup registers and this same write strips the file entries again.
-    my $api      = ($REGISTERED && _useActionApi()) ? 1 : 0;
+    my $api      = ($REGISTERED && $tier) ? 1 : 0;
     my %fallback = $api ? %UNREGISTERED : ();
 
     # First strip OUR entries from EVERY existing category (clears legacy 0.1.7 hash
@@ -875,8 +1013,7 @@ sub _writeMaterialActions {
     # preserved (the 0.1.52 rule: an empty category is not neutral, it suppresses).
     my %owned = %{ _ownedCats() };
     my %keep = ( map { $_ => 1 } keys %$fileOnly, @radioCats,
-        qw(listenlater-album listenlater-track listenlater-artist
-           LLHome-album LLHome-track LLHome-artist) );
+        _ownSurfaceSuppressorCats() );
     $keep{$_} = 1 for $api ? keys %fallback : keys %$positive;
     for my $cat (keys %$data) {
         next unless $cat =~ /-(?:album|track|artist)$/;
@@ -920,10 +1057,7 @@ sub _writeMaterialActions {
     # Listen Later). Remove/Move live in each row's "…" → More menu (which refreshes
     # the list in place), since putting them at the top of the "…" would need a further
     # Material change.
-    $data->{$_} = [] for qw(
-        listenlater-album listenlater-track listenlater-artist
-        LLHome-album LLHome-track LLHome-artist
-    );
+    $data->{$_} = [] for _ownSurfaceSuppressorCats();
 
     # Hide "Add" on radio BROWSE rows. Radio stations are live streams, never a valid
     # "Listen Later" item. An empty "<cmd>-album"/"-track" wins over "online-*" so the
@@ -958,8 +1092,7 @@ sub _writeMaterialActions {
     # can never sweep it, and "Add" stays hidden on that service for good. _writeMaterialActions-
     # File has four die paths, so this is reachable on a full disk or an unwritable prefs dir.
     my $record = { map { $_ => 1 } keys %write, @radioCats, keys %$fileOnly,
-        qw(listenlater-album listenlater-track listenlater-artist
-           LLHome-album LLHome-track LLHome-artist) };
+        _ownSurfaceSuppressorCats() };
     _writeMaterialActionsFile($file, $data);
     _setOwnedCats($record);
     $log->warn("LL: wrote Material custom actions to $file");
@@ -979,6 +1112,161 @@ sub _writeMaterialActions {
     return;
 }
 
+# ---------------------------------------------------------------------------
+# TIER 2 — take our entries back OUT of the shared actions.json (0.1.110)
+# ---------------------------------------------------------------------------
+#
+# On Material >= 6.4.8 every category we offer is registered, so nothing of ours belongs in the
+# file any more. This is what removes what earlier builds put there. It is not a migration with
+# an end date: the file is SHARED and persists across plugin updates and reinstalls, so this has
+# to keep running — which is why the very first thing it does is return when the file is absent.
+# After one successful prune on a box with no other custom actions, that is every subsequent
+# call, at every startup, for nothing.
+#
+# **This never writes and never clobbers.** The write path hard-sets our own suppressor
+# categories and creates radio ones with `||=`; the prune does neither. It strips, it deletes
+# what is ours and now empty, and it puts back only what Material REFUSED. A hand-written
+# actions.json is a real thing — LL has always MERGED into this file rather than overwriting it,
+# so a user's own entries have coexisted with ours the whole time and cannot be assumed absent.
+#
+# **The file is deleted when the prune empties it**, which is the normal outcome on a box whose
+# actions.json only ever held LL's entries. Verified safe against the served 6.4.9 bundle: the
+# `axios.get` of customactions.json has a `.catch`, so a 404 leaves `customActions` undefined;
+# `getCustomActions` tests `if (customActions || pluginCustomActions)` and `getSectionActions`
+# tests `if (list && list[section])`. A missing file and an empty one are the same thing to
+# Material. Anything foreign in the file keeps it alive, so "remove ours" and "leave theirs
+# alone" never come into conflict.
+#
+# **The ordering that must hold: registration comes FIRST, in the same run.** The empty
+# suppressors in the file are load-bearing until the equivalent sections are registered — they
+# are all that holds the `online-*` pair off our own list rows, the home shelf and radio browse
+# rows (the 0.1.52 rule). postinitPlugin and the deferred pass both call
+# _registerMaterialActions before this, and both happen long before a client fetches either
+# list, so there is no window. What this sub must NOT assume is that registration SUCCEEDED —
+# hence the two fallback sets below, which are the whole reason it is not a plain delete.
+sub _pruneMaterialActions {
+    my ($departing) = @_;
+    my $file = _materialActionsFile();
+
+    # What is still ours to WRITE, because registration could not deliver it:
+    #
+    #   %fallback      positive entries registerCustomAction refused. Per ACTION, as ever — the
+    #                  two lists are merged client-side, so writing one Material DID take would
+    #                  show it twice.
+    #   %emptyFallback suppressor categories whose empty-section registration failed. Deleting
+    #                  one of those from the file would not remove "Add", it would ADD it where
+    #                  it was suppressed — the exact regression 0.1.98 was written about.
+    #
+    # **%emptyFallback is gated on $REGISTERED_N, and that gate is load-bearing.** A suppressor
+    # exists to hold OUR registered online-* pair off our own rows; if nothing of ours is live
+    # there is nothing to hold back, and writing empty `<cmd>-*` categories anyway would
+    # suppress ANOTHER plugin's online-* actions on every radio and podcast row with nothing of
+    # ours left to clean them up. The pref-off-at-startup path reaches this sub with nothing
+    # registered, and that is exactly the path that must leave no trace.
+    #
+    # $departing (uninstall/disable, from shutdownPlugin) forces the full clean for the same
+    # reason 0.1.108 gave: the whole fallback apparatus protects entries that are live IN THIS
+    # RUN, and on the way out there is no next run to protect. Leaving either kind behind
+    # strands it for ever.
+    my %fallback      = $departing ? () : %UNREGISTERED;
+    my @radioCats     = _radioSuppressorCats();
+    my @suppressors   = ( _ownSurfaceSuppressorCats(), @radioCats );
+    my %emptyFallback = (!$departing && $REGISTERED_N)
+        ? ( map { $_ => 1 } grep { !$REGISTERED_EMPTY{$_} } @suppressors )
+        : ();
+
+    # The steady state on a box whose actions.json only ever held ours: the file is gone, so
+    # there is nothing to prune and this costs one stat() per startup. It is NOT an
+    # unconditional early return — a registration that failed has to reach the user through the
+    # file even when the file has to be created to do it, which is the same reasoning
+    # _clearMaterialActions uses for re-creating a file that has gone missing.
+    # The diagnostics still run: this is the state a "where did Add go" report is most likely
+    # to be made from, so it must not be the one state the dump cannot describe.
+    if (!-e $file && !%fallback && !%emptyFallback) {
+        my ($positive) = _materialActionSet(2);
+        my %regCount = map { $_ => scalar @{ $positive->{$_} } } keys %$positive;
+        _dumpMaterialState($file, {}, \@radioCats, \%regCount, 1, 2)
+            if $prefs->get('debug_log');
+        return;
+    }
+
+    my $data = _readMaterialActions($file);
+
+    # Strip our entries from every category. %emptied records the ones this took from non-empty
+    # to empty — provenance, exactly as on the write path: an empty that ARRIVED empty was never
+    # ours to judge.
+    my %emptied;
+    for my $cat (keys %$data) {
+        next unless ref $data->{$cat} eq 'ARRAY';
+        my $had = scalar @{ $data->{$cat} };
+        $data->{$cat} = [ grep { !_isOurAction($_) } @{ $data->{$cat} } ];
+        $emptied{$cat} = 1 if $had && !@{ $data->{$cat} };
+    }
+
+    # Every category name this plugin has ever asserted, at any tier: the positive set, the
+    # file-only set, both suppressor families, the pre-rebrand spellings, and whatever the
+    # ownership ledger recorded. Taken from _materialActionSet at tier 0, which is the tier that
+    # returns the WIDEST set — the tier we are actually on folds them together, and a prune that
+    # only knew about the folded set could not remove what an older build wrote.
+    my ($legacyPositive, $legacyFileOnly) = _materialActionSet(0);
+    my %owned = %{ _ownedCats() };
+    my %ours = map { $_ => 1 }
+        keys %$legacyPositive, keys %$legacyFileOnly, @suppressors, keys %owned,
+        qw(podcasts-album podcasts-track favorites-album favorites-track
+           listentolater-album listentolater-track listentolater-artist
+           LtLHome-album LtLHome-track LtLHome-artist);
+
+    # Delete what is ours and now empty. Only-empty, so a category we vacated that someone else
+    # also writes into keeps their entries; and never a suppressor Material did not take.
+    for my $cat (keys %$data) {
+        next unless ref $data->{$cat} eq 'ARRAY' && !@{ $data->{$cat} };
+        next if $emptyFallback{$cat} || $fallback{$cat};
+        delete $data->{$cat} if $ours{$cat} || $emptied{$cat};
+    }
+
+    # Put back exactly what could not be delivered by registration. `||=` on the empties, for
+    # the standing reason: the "<cmd>-*" namespace is not ours to reset, and any present
+    # category — ours or theirs — overrides online-* and hides "Add" either way.
+    for my $cat (keys %fallback) {
+        push @{ $data->{$cat} ||= [] }, @{ $fallback{$cat} };
+    }
+    $data->{$_} ||= [] for keys %emptyFallback;
+
+    my $record = { map { $_ => 1 } keys %fallback, keys %emptyFallback };
+
+    # What the API half actually delivered, per category — built the same way the write path
+    # builds it, so the diagnostics read identically on both.
+    my ($positive) = _materialActionSet(2);
+    my %regCount;
+    for my $cat (keys %$positive) {
+        my $n = scalar(@{ $positive->{$cat} }) - scalar(@{ $fallback{$cat} || [] });
+        $regCount{$cat} = $n if $n > 0;
+    }
+
+    if (!keys %$data) {
+        # Nothing of ours left and nothing of anyone else's. Remove the file rather than leave
+        # an inert husk in a directory we do not own.
+        unlink($file) or do {
+            $log->error("LL: could not remove the now-empty $file: $!");
+            return;
+        };
+        _setOwnedCats($record);
+        $log->warn("LL: Material custom actions are fully registered — removed the now-empty $file");
+        _dumpMaterialState($file, {}, \@radioCats, \%regCount, 1, 2) if $prefs->get('debug_log');
+        return;
+    }
+
+    my $dir = File::Spec->catdir(Slim::Utils::Prefs::dir(), 'material-skin');
+    File::Path::make_path($dir) unless -d $dir;
+    _writeMaterialActionsFile($file, $data);
+    # After the write lands, never before — see _ownedCats (0.1.105).
+    _setOwnedCats($record);
+    $log->warn('LL: Material custom actions are registered — pruned ours from ' . $file
+        . (%$record ? ' (' . scalar(keys %$record) . ' section(s) kept as a file fallback)' : ''));
+    _dumpMaterialState($file, $data, \@radioCats, \%regCount, 1, 2) if $prefs->get('debug_log');
+    return;
+}
+
 # Diagnostic dump of everything that decides whether "Add to Listen Later" renders on a
 # streaming/online row (Tidal, ListenBrainz Fresh Releases, home shelves). Gated on
 # `debug_log`. Written for the "works for local library only" report we can't reproduce
@@ -995,7 +1283,8 @@ sub _writeMaterialActions {
 # is not browser-cached — so a stale tab only affects the suppressors and the podcasts
 # wording. Which half of the wiring a category is on is the first line of the dump.)
 sub _dumpMaterialState {
-    my ($file, $data, $radioCats, $regCount, $api) = @_;
+    my ($file, $data, $radioCats, $regCount, $api, $tier) = @_;
+    $tier = _actionTier() unless defined $tier;
 
     # Accumulate every line so we can BOTH log it (server.log, tagged LL[dbg]) AND stash the
     # whole snapshot in a pref, which the Settings page renders in a copy-paste textarea — so
@@ -1026,7 +1315,16 @@ sub _dumpMaterialState {
         . " -> online 'Add' supported (>=6.4.4): "
         . (defined $ver ? ($online_ok ? 'YES' : 'NO — streaming rows get NO Add on this Material; only local works')
                         : 'UNKNOWN'));
-    $emit->("actions.json = $file");
+    $emit->("actions.json = $file" . (-e $file ? '' : ' (ABSENT — nothing of ours is left in it)'));
+    $emit->("delivery tier = $tier — "
+        . ( $tier == 0 ? 'no registerCustomAction (Material < 6.4.6): the file carries everything'
+          : $tier == 1 ? 'Material 6.4.6/6.4.7: the "Add" entries register, but the Now Playing '
+                       . 'and queue surfaces, the podcasts override and every empty suppressor '
+                       . 'still have to live in the file'
+          :              'Material >= 6.4.8 (PR #1257): EVERYTHING registers, suppressors '
+                       . 'included, and the file is pruned rather than written'));
+    $emit->('registered empty suppressor sections = '
+        . (%REGISTERED_EMPTY ? scalar(keys %REGISTERED_EMPTY) : 'none')) if $tier >= 2;
     $emit->('custom-action delivery = '
         . (!$api        ? 'actions.json (this Material has no registerCustomAction, or '
                         . 'registration has not run yet — either way the file carries everything)'
@@ -1082,7 +1380,11 @@ sub _dumpMaterialState {
     # reports our own entries as the fault (0.1.101). Taking the names from
     # _materialActionSet/_radioSuppressorCats also self-corrects the next time the
     # register/file split moves.
-    my ($posCats, $fileCats) = _materialActionSet();
+    # Tier 0 deliberately, not the running tier: it returns the WIDEST split (nothing folded),
+    # so every category name this plugin can assert on ANY tier is exempted — on tier 2 the
+    # folded set would still cover them, but taking the wide one means the exemption can never
+    # narrow as the register/file split moves again.
+    my ($posCats, $fileCats) = _materialActionSet(0);
     my %ours = map { $_ => 1 } keys %$posCats, keys %$fileCats, @$radioCats;
     my @shadow;
     for my $cat (sort keys %$data) {
@@ -1141,13 +1443,14 @@ sub _isOurAction {
     return 1 if ref $lc eq 'ARRAY' && $isOurs->($lc->[0]);
     # legacy 0.1.7 format: { command => [...] }
     return 1 if ref $lc eq 'HASH' && ref $lc->{command} eq 'ARRAY' && $isOurs->($lc->{command}[0]);
-    # fallback: our titles (current + pre-rebrand). ONLY when the entry carries no
-    # lmscommand at all — an entry with its own command whose title happens to match
-    # ours belongs to someone else in this shared file, so never strip that.
-    return 0 if defined $lc;
-    my %ours = map { $_ => 1 }
-        ('Add to Listen Later', 'Add to Wish List', 'Add to Listen to Later', 'Add to To Buy');
-    return 1 if $ours{ $entry->{title} // '' };
+    # NO TITLE FALLBACK. There used to be one — match our four titles when the entry carried no
+    # `lmscommand` at all — on the theory that it caught entries an old build wrote in some other
+    # shape. It cannot have: EVERY version of `_materialActionSet` back to the 0.1.25 rebrand
+    # builds every action with an `lmscommand`, checked across the twelve commits that touched
+    # it. So the branch was unreachable for anything LL wrote and could only ever match a THIRD
+    # PARTY's entry — a `script`/`command`/`weblink` action someone titled "Add to Listen Later"
+    # would be silently deleted from a shared file on every startup. Removed in 0.1.110, when the
+    # tier-2 prune made this the sub that decides what LL takes OUT of a file it does not own.
     return 0;
 }
 
@@ -3004,6 +3307,32 @@ sub _moveCommand {
 sub shutdownPlugin {
     eval { Plugins::ListenLater::Played->shutdown; 1 }
         or $log->error("LL: Played shutdown failed: $@");
+
+    # THE UNINSTALL HOOK. Our "Add" entries live in Material's SHARED
+    # prefs/material-skin/actions.json — a file we write but do not own — so removing the
+    # plugin does not remove them. Before this, an uninstall stranded them in every Material
+    # menu for ever, with nothing of ours left running to take them out, and the only remedy
+    # was hand-editing JSON.
+    #
+    # Slim::Utils::PluginManager sets plugin.state to 'needs-uninstall'/'needs-disable' the
+    # moment the user clicks Apply, and performs the removal at the NEXT start (its init
+    # dispatches the needs-* states; _needsUninstall then rmtree's our directory). It calls
+    # shutdownPlugin on every loaded module on the way down — so this is the last moment we
+    # are loaded, our state pref already says we are going, and the file is still ours to
+    # tidy. Keyed on __PACKAGE__ because that is exactly what plugin.state is keyed on.
+    #
+    # Deliberately NOT gated on the material_action pref: the user may have turned it off
+    # long ago, and the entries written while it was on still need removing. $departing
+    # forces the full clean (see _clearMaterialActions).
+    my $state = eval { preferences('plugin.state')->get(__PACKAGE__) } || '';
+    if ($state eq 'needs-uninstall' || $state eq 'needs-disable') {
+        $log->warn("LL: $state — clearing our Material custom actions before we go");
+        eval { _clearMaterialActions(1); 1 }
+            or $log->error("LL: uninstall cleanup of Material actions failed: $@");
+        # Forget the category ledger too, so a later reinstall starts from a clean sheet
+        # rather than inheriting a record of categories that are no longer in the file.
+        eval { $prefs->set('material_owned_cats', []); 1 };
+    }
     return;
 }
 

@@ -167,7 +167,23 @@ BEGIN { *CORE::GLOBAL::time = sub () { CORE::time() + ($TestClock::OFFSET || 0) 
 # Base class for Settings.pm.
 {
     package Slim::Web::Settings;
-    sub new {} sub name {} sub page {} sub prefs {} sub handler {} sub saveSettings {}
+    sub new {} sub name {} sub page {} sub prefs {} sub saveSettings {}
+    # MIRRORS THE REAL BASE CLASS on the one point that produces a whole bug class: on a save
+    # it walks prefs() and does an UNCONDITIONAL set from $paramRef->{'pref_<name>'}
+    # (Slim/Web/Settings.pm:162). For an unticked CHECKBOX that param is ABSENT, so the real
+    # server writes undef over whatever the subclass just set — and Prefs::Base::init re-seeds
+    # an undef pref to its default at the next load, so the setting silently reverts on every
+    # restart. An empty stub here models a base class that saves nothing, which is exactly why
+    # that went unnoticed: t_material_actions.pl passed an explicit 0 and never posted a real
+    # unticked form. Keep this faithful.
+    sub handler {
+        my ($class, $client, $paramRef) = @_;
+        return unless $paramRef && $paramRef->{saveSettings};
+        my ($prefsClass, @prefs) = $class->prefs;
+        return unless $prefsClass;
+        $prefsClass->set($_, $paramRef->{'pref_' . $_}) for @prefs;
+        return;
+    }
     sub AUTOLOAD {} sub DESTROY {}
     $INC{'Slim/Web/Settings.pm'} = __FILE__;
 }

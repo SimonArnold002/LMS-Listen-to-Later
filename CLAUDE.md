@@ -172,76 +172,128 @@ Three section icons, set in `Browse.pm` (`_iconFor($status)` → `_header`/`_alb
 - **Why Wish List uses the font but Played can't**: Material's bundled icon font (Release 6.4.3, matching the box) **has** `shopping_cart` but **not** `music_history` (verified via the font's GSUB ligatures with fontTools) — an `_MTL_icon_music_history` would render blank. So Played's `music_history` had to be shipped as a recoloured `.svg` instead. (Confirm new font icons exist in `test-artifacts/lms-material/.../font/MaterialIcons.ttf` before using `_MTL_icon_`.)
 - **No SVG rasteriser on this Mac** (no cairo/rsvg/inkscape; svglib's renderPM needs cairo). The PNGs are generated **qlmanage → Pillow** (the documented sibling-plugin path): `qlmanage -t -s 512` renders the `.svg` onto white, then Pillow does luminance→alpha (black art, transparent bg), trims to content bbox, and centres on a 256² canvas with 8% pad. Black-on-transparent so both the recolour and classic fallbacks look right.
 
-## How the "Add" entries REACH Material (0.1.95) — registered, not written
+## How the "Add" entries REACH Material (0.1.95, retiered 0.1.110) — registered, not written
 
-**Material 6.4.6 added a registration API and that is now the primary path.**
-`Plugins::MaterialSkin::Plugin::registerCustomAction($section, $action)` stores the entry in
-Material's own `$PLUGIN_CUSTOM_ACTIONS`, which it serves over the CLI query
+**Material's registration API arrived in TWO steps, and which one the user is running decides
+everything below.** `Plugins::MaterialSkin::Plugin::registerCustomAction($section, $action)`
+stores the entry in Material's own `$PLUGIN_CUSTOM_ACTIONS`, served over the CLI query
 `["material-skin","plugin-actions"]`; `customactions.js` fetches that at app start into
 `pluginCustomActions` and `getSectionActions` walks **both** lists — `customactions.json` first,
-plugin-registered second. Upstream commit `4f16fc9f`, ChangeLog 6.4.6 item 7.
+plugin-registered second.
 
-**What LL sends which way** (`Plugin::_materialActionSet` builds both sets from ONE definition,
-so there is never a second spelling of a command):
+### The DELIVERY TIER (`Plugin::_materialActionTier`) — capability AND version
 
-| | delivery | why |
+| tier | Material | what happens |
 |---|---|---|
-| `album`, `album-track`, `playlist`, `playlist-track`, `online-album`, `online-track` | **registered** (6.4.6+), file on older Material | the actual "Add" entries, and Material RE-RESOLVES all six per browse response (immune to load-order) |
-| `track` (Now Playing), `queue-track` | **file, always** | the only two Material resolves in the BROWSER, and it snapshots them once — on an event our half never fires (0.1.97) |
-| `podcasts-album`/`-track` | **file, always** | a per-app override, and Material only consults those from the file |
-| `listenlater-*`, `LLHome-*`, the radio empties | **file, always** | an EMPTY category cannot be registered at all |
+| **0** | no `registerCustomAction` (< 6.4.6, or no Material) | the shared `actions.json` carries everything, byte for byte as before 0.1.95 |
+| **1** | 6.4.6 / 6.4.7 | the "Add" entries register; `track`, `queue-track`, `podcasts-*` and every empty suppressor still have to be written to the file |
+| **2** | **>= 6.4.8** (upstream PR #1257) | **everything** registers, suppressors included, and the file is **pruned**, not written |
+
+**Tier 2 needs BOTH tests, and the version half is not belt-and-braces.** PR #1257 is what made
+`registerCustomAction($section)` — one argument, no action — mean *declare an EMPTY category*.
+On 6.4.6/6.4.7 that identical call pushes **undef** into the section, Material serves it as
+`{"<cat>":[null]}`, and `customactions.js` then reads `sect[i].locked` off the null and throws —
+taking out every custom action in that section, **other plugins' included**. So the
+empty-section call is tier-2-only and must never be reached by capability alone.
+
+There is **no side-effect-free capability probe** to prefer over the version parse:
+`$PLUGIN_CUSTOM_ACTIONS` is a file-scoped `my` in Material's `Plugin.pm` so it cannot be read
+back, and probing by registering a section cannot be undone (there is no unregister). A
+dev/test build (non-numeric version) is treated as newest, like `Browse::_headerType`.
+
+### What goes which way
+
+`Plugin::_materialActionSet($tier)` builds every set from ONE definition, so there is never a
+second spelling of a command; the tier decides only which bucket each lands in.
+
+| | tier 0 | tier 1 | tier 2 |
+|---|---|---|---|
+| `album`, `album-track`, `playlist`, `playlist-track`, `online-album`, `online-track` | file | **registered** | **registered** |
+| `track` (Now Playing), `queue-track` | file | file | **registered** |
+| `podcasts-album`/`-track` | file | file | **registered** |
+| `listenlater-*`, `LLHome-*`, the radio empties | file (empty) | file (empty) | **registered** (empty sections) |
 
 **THE FAILURE MODE TO KNOW: the two lists are MERGED, so registering while our old entries are
-still in the file shows every "Add" TWICE.** `_writeMaterialActions` runs on both paths and its
-existing strip pass is what removes them — that is why the file write still happens on 6.4.6+,
-and why it must never be skipped just because the API is available. Pinned by
-`tools/t_material_actions.pl`.
+still in the file shows every "Add" TWICE.** That is why the file pass still runs on every tier —
+on tier 1 its strip pass is the upgrade, and on tier 2 `_pruneMaterialActions` is.
 
-**`registerCustomAction` PUSHES — no de-dupe, and no unregister.** Registering twice duplicates
-every entry, so it happens exactly once per server run (`$REGISTERED`, set in `postinitPlugin`);
-the Settings save and the +60s deferred radio write both re-run the FILE write only. And with no
-unregister, turning the `material_action` pref OFF removes the registered entries **at the next
-restart** — the file half clears immediately, on the Settings save itself (0.1.97). Said in the
-pref description and in the log.
+### Tier 2 — removing what earlier builds left behind (`_pruneMaterialActions`, 0.1.110)
 
-**And while those registered entries are still live, the EMPTY SUPPRESSORS MUST NOT BE DELETED
-(0.1.98).** They are the only thing holding the registered `online-*` pair off our own list, the
-home shelf and radio browse rows — so clearing them "to turn the feature off" does the opposite of
-what it says: "Add" appears on every Listen Later/Played row until the restart, and using it on a
-Played row bounces that row back. `_clearMaterialActions` therefore keeps and re-asserts them
-whenever `$REGISTERED_N` is non-zero — **all three families, the radio ones
-(`_radioSuppressorCats`) included, because with the file missing there is nothing on disk to
-keep and they have to be re-created** — and clears them only on the path where nothing
-registered. This is the 0.1.52 rule (an empty category is not neutral, it suppresses) meeting the no-unregister
-one, and it is why the two halves cannot be torn down in the same order.
+On >= 6.4.8 nothing of ours belongs in `actions.json`, so the only work left there is taking it
+back out. **This is not a migration with an end date** — the file is SHARED and survives plugin
+updates and reinstalls — which is why the first thing the prune does is return when the file is
+absent. After one successful prune that is every subsequent call, for one `stat()`.
 
-**Three things the API cannot express, and why** (all verified against the SERVED 6.4.7 bundle,
-not inferred): Material decides whether an app's own `<command>-<type>` category overrides the
-generic `online-*` with `appCat in customActions` — the **file object only**, never
-`pluginCustomActions`; `registerCustomAction` takes an action and pushes it, so "this
-category exists and is empty" has no spelling; and `track`/`queue-track` are snapshotted in the
-browser on `bus.$on("customActions", …)`, whose only `$emit` is inside the `.then` of the
-`customactions.json` GET — the plugin-actions CLI response does not emit, so anything registered
-in those two sections is typically not there yet when the snapshot is taken, and never recovers
-(0.1.97). A ~5-line upstream fix for both is drafted in
-`docs/material-plugin-action-sections.patch` + `docs/PR-body-plugin-sections.md` (check either
-list for the category; make `$action` optional). **When that ships, the whole actions.json
-apparatus — `_writeMaterialActions`, `_clearMaterialActions`, `_readMaterialActions`,
-`_materialActionsFile`, the radio empties — can be deleted outright.**
+**It never writes and never clobbers.** The tier-0/1 write hard-sets our own suppressor
+categories and creates radio ones with `||=`; the prune does neither. It strips, deletes what is
+ours *and now empty*, and puts back only what Material REFUSED.
 
-**The 0.1.57 app-start cache lesson now applies to the FILE HALF ONLY.** `customactions.json` is
-fetched with a `?r=<material version>` cache-buster, so a late write is invisible to an open tab
-until a hard refresh; the plugin-actions CLI query is not browser-cached, so a registered entry
-is current on every app start. The `debug_log` snapshot's first line says which half a category
-is on.
+> **A hand-written `actions.json` is a real possibility and must be assumed.** LL has always
+> MERGED into this file rather than overwriting it — the strip pass only removes entries
+> `_isOurAction` matches, entries are `push`ed, radio categories use `||=` — so a user's own
+> custom actions have coexisted with ours the whole time and nothing would have told them
+> otherwise. "Nobody has one, it would have broken" is **false**.
 
-**Custom actions on SEARCH results came free in 6.4.6** — `buildSearchResp` now emits
-`itemCustomActions` as a map keyed by type, `browse-page.itemCustomActs(item)` picks the right
-list from the item's own id (`album_id:` → `album`), and `browseActions` falls back to
-`getCustomActions(<category for the stdItem>)` when the view property is empty. LL's existing
-`album`/`album-track`/`playlist` categories therefore appear on library search results with **no
-plugin change**. (Same upstream fix closes the "no entry on search results" limit recorded in
-the Discography repo.)
+**The file is DELETED when the prune empties it.** Verified against the served 6.4.9 bundle: the
+`axios.get` of `customactions.json` has a `.catch`, so a 404 leaves `customActions` undefined;
+`getCustomActions` tests `if (customActions || pluginCustomActions)` and `getSectionActions`
+tests `if (list && list[section])`. A missing file and an empty one are identical to Material.
+Anything foreign keeps the file alive, so "remove ours" and "leave theirs alone" never conflict.
+
+**Two fallbacks keep it honest, and both are gated:**
+- `%UNREGISTERED` — positives Material refused. Written to the file even if the file has to be
+  created to do it (the early return is `!-e $file && !%fallback && !%emptyFallback`, *not* a
+  bare `-e` test — that bug was caught by the new tests, not by review).
+- suppressors whose empty-section registration failed. **Gated on `$REGISTERED_N`:** a
+  suppressor exists to hold OUR live `online-*` pair off our own rows, so with nothing of ours
+  registered there is nothing to hold back, and writing empty `<cmd>-*` categories anyway would
+  suppress **another plugin's** `online-*` on every radio and podcast row. The pref-off-at-startup
+  path reaches the prune with nothing registered and must leave no trace.
+- `$departing` (uninstall/disable) forces both to empty — 0.1.108's rule, unchanged: on the way
+  out there is no next run to protect, so nothing may be stranded.
+
+**Ordering: registration comes FIRST, in the same run.** The file empties are load-bearing until
+the equivalent sections are registered. `postinitPlugin` and the deferred pass both call
+`_registerMaterialActions` before the write/prune, long before any client fetches either list, so
+there is no window.
+
+**`_isOurAction` no longer guesses from titles (0.1.110).** It used to match our four titles when
+an entry carried no `lmscommand`. It cannot ever have caught anything of ours — **every** version
+of `_materialActionSet` back to the 0.1.25 rebrand builds every action with an `lmscommand`
+(checked across the twelve commits that touched it) — so that branch could only ever delete a
+THIRD PARTY's `script`/`command`/`weblink` action that happened to share a title.
+
+**`registerCustomAction` PUSHES — no de-dupe, no unregister.** Positives register exactly once per
+server run (`$REGISTERED`). **Empty sections are tracked per category (`%REGISTERED_EMPTY`)**,
+because that set GROWS: TuneIn's radio directory arrives asynchronously, so the +60s deferred pass
+finds commands postinit could not (0.1.56) and must register those without re-pushing the rest.
+With no unregister, turning `material_action` OFF removes the registered entries **at the next
+restart** — and on tier 2 the suppressors are registered too, so until then "Add" still correctly
+does *not* appear inside our own list.
+
+**Downgrades self-heal.** Every file-writing path is kept. Material downgraded, rolled back or
+disabled drops the tier and the tier-0/1 write rebuilds the file the prune removed.
+
+**Historical — the three gaps, all now CLOSED upstream.** Through 6.4.7 Material resolved an app's
+own `<command>-<type>` override with `appCat in customActions` (the file object only); `registerCustomAction`
+took an action and pushed it, so "this category exists and is empty" had no spelling; and
+`track`/`queue-track` were snapshotted in the browser on `bus.$on("customActions", …)` whose only
+`$emit` was inside the `customactions.json` `.then`. LL's fix for all three was submitted as
+[PR #1257](https://github.com/CDrummond/lms-material/pull/1257), **merged verbatim in one commit
+(`8f3e777be`, merge `f4cfb95`) and released in Material 6.4.8** — though it is in neither the 6.4.8
+nor the 6.4.9 ChangeLog, so "did it ship" can only be answered from the tree, not the release notes.
+Drafts kept at `docs/material-plugin-action-sections.patch` + `docs/PR-body-plugin-sections.md`.
+
+**The 0.1.57 app-start cache lesson applies to the FILE HALF ONLY.** `customactions.json` is fetched
+with a `?r=<material version>` cache-buster, so a late write is invisible to an open tab until a hard
+refresh; the plugin-actions CLI query is not browser-cached. On tier 2 there is no file half left, so
+the only residue of that lesson is that a section registered LATE (the +60s pass) is still invisible
+to an already-open tab — the snapshot is taken at app start either way. The `debug_log` snapshot's
+first lines now name the tier and count the registered empty sections.
+
+**Custom actions on SEARCH results came free in 6.4.6** — `buildSearchResp` emits `itemCustomActions`
+keyed by type and `browseActions` falls back to `getCustomActions(<category for the stdItem>)`, so
+LL's existing categories appear on library search results with **no plugin change**.
 
 ## Material custom actions on streaming "…" menus (the hard problem — solved, released in Material 6.4.4)
 Goal: an **"Add to Listen Later"** entry on a streaming **album row while browsing** (Qobuz New Releases, etc.), where the service plugin owns the "…" menu so TrackInfo/AlbumInfo providers can't reach it. Material's **custom actions** (`prefs/material-skin/actions.json`, served at `/material/customactions.json`) are the only hook — but out of the box they appear on **library** items only.
@@ -269,7 +321,7 @@ Goal: an **"Add to Listen Later"** entry on a streaming **album row while browsi
 5. Remove / Move between sections; persists across `systemctl restart`.
 
 ## Prefs Namespace
-`plugin.listenlater` — sort, played_threshold, streaming_min_tracks, watch_outside, material_action, played_retention_days, debug_log, threshold_90_migrated, rebrand_migrated.
+`plugin.listenlater` — sort, played_threshold, streaming_min_tracks, watch_outside, material_action, played_retention_days, debug_log, threshold_90_migrated.
 
 ### A PREF NAME MUST NOT START WITH `_` (0.1.94 — this cost six weeks)
 
@@ -284,6 +336,10 @@ pre-rebrand `plugin.listentolater` namespace over the user's live settings on ev
 0.1.94: `sort`, `streaming_min_tracks` and `played_retention_days` all silently reverted, and
 **0.1.93's 90% threshold was overwritten with the old 60 seconds after the bump set it, in the same
 startup** — which is why that release looked like it had never shipped.
+
+That copy was **deleted outright in 0.1.108** (see the entry), so nothing reads
+`plugin.listentolater` any more. The rule above is not retired with it: it still governs
+`threshold_90_migrated` and every migration flag added from here on.
 
 **Why it hid for six weeks, which is the more useful lesson:**
 - The flag was write-only. Nothing read it back, so the failure had no symptom of its own.
@@ -1912,6 +1968,190 @@ The "Add to Listen Later"/"Add to Wish List" custom actions appear on streaming 
   Podcast `CACHE_VER` bumped 11 → 12 with the build per the dev-build cache rule; nothing here
   parses a feed, so it is hygiene, not a fix.
 
+- **0.1.108 — the rebrand pref copy is DELETED, not guarded.** **NB the reverting tickbox was
+  NOT this** — that was diagnosed wrong twice and the real cause is 0.1.109 below. This entry
+  stands on its own merits (the copy was guarding nobody), but do not read it as the fix for
+  the reported bug.
+  **Cause:** `_migrateRebrandPrefs` copied six prefs — `material_action` among them — from
+  `plugin.listentolater`. 0.1.94 fixed the flag so the copy runs once, but *once* is still one
+  clobber: on the first start after upgrading, an install lacking `threshold_90_migrated` runs
+  the copy, which re-imports `material_action` and undoes the 90 that `_migratePrefs` set two
+  lines earlier.
+  **Decision: the copy protected nobody.** The plugin was never distributed under the old name —
+  the pre-0.1.25 `repo.xml` bumps in git are a published manifest, not an install; only Simon's
+  own box ever wrote a `plugin.listentolater` pref. So it was guarding a population of one while
+  costing two settings-reverting bugs. Deleted: `_migrateRebrandPrefs`, its `initPlugin` call,
+  the `rebrand_migrated` pref, and the seeding branch in `_migratePrefs`. **`DB::_migrateDbFile`
+  STAYS** — that one renames `listentolater.db` if present, is file-based and idempotent, has no
+  flag and none of this failure class, and dropping it would lose saved albums.
+  **The underscore rule is kept** under "Prefs Namespace" — it still governs
+  `threshold_90_migrated` and anything added later; only the migration it was written about is
+  gone.
+  `t_prefs_migration.pl` rewritten around the deletion: the old suite drove
+  `_migrateRebrandPrefs` directly, so it had to be replaced rather than trimmed. The new
+  fifth section seeds a populated legacy namespace *and* asserts a full startup leaves
+  `material_action=0`, `sort`, `played_threshold` and `played_retention_days` untouched — twice,
+  because "reverts at every restart" was the symptom — plus a `->can` check that the sub is
+  actually gone rather than merely uncalled, since an orphan is one call site from bringing it
+  back. 14 checks where the old suite had 17.
+
+  **Second half — `shutdownPlugin` is now the UNINSTALL HOOK, and this is the part that fixes
+  the reported bug.** Our "Add" entries live in Material's SHARED `actions.json`, a file we
+  write but do not own, so removing the plugin never removed them: LMS rmtree's our directory
+  and nothing of ours runs again, stranding the entries in every Material menu with hand-editing
+  JSON as the only remedy. **Verified in `Slim::Utils::PluginManager` (9.1):** `disablePlugin` /
+  the uninstall action set `preferences('plugin.state')->get(<module>)` to `needs-disable` /
+  `needs-uninstall` **the moment Apply is clicked**, and the removal happens at the NEXT start
+  (`init` dispatches the `needs-*` states; `_needsUninstall` rmtree's the dir). `shutdownPlugins`
+  calls `shutdownPlugin` on every loaded module on the way down — so shutdown is the last moment
+  we are loaded, our state pref already says we are going, and the file is still ours to tidy.
+  Keyed on `__PACKAGE__`, which is exactly what `plugin.state` is keyed on.
+  **Deliberately NOT gated on `material_action`** — the user may have turned it off long ago and
+  the entries written while it was on still need removing.
+  **New `$departing` argument to `_clearMaterialActions`.** The `$live` branch keeps and
+  re-asserts the empty suppressors on purpose: they are all that stops the still-live registered
+  `online-*` pair showing "Add" inside our own list until the restart. On the way out that
+  reasoning inverts — there is no next run to protect, so keeping them strands them for ever,
+  suppressing another plugin's `online-*` on podcasts and every radio command. `$departing`
+  forces `$live = 0`. The ownership ledger is cleared too, so a reinstall starts from a clean
+  sheet instead of inheriting a record of categories no longer in the file.
+  14 checks in `t_material_actions.pl`, anti-tested per half: reverting `$live` to
+  `$REGISTERED_N ? 1 : 0` fails exactly the suppressor assertion, and removing the state guard
+  fails exactly the two normal-shutdown controls. Third-party entries — populated *and* an empty
+  suppressor of their own — are asserted to survive the uninstall, which is the least recoverable
+  place to get it wrong since that pass runs with no user present to notice.
+  Suite total 728 → **739 across 12 suites**, all green.
+
+- **0.1.109 — AN UNTICKED CHECKBOX POSTS NOTHING, and the base settings handler writes that
+  absence as `undef`.** The real cause of "I untick 'Add to Material context menus', restart,
+  it comes back on" — reported repeatedly while 0.1.94 and 0.1.108 chased the rebrand pref copy.
+  It is **version-independent**: 0.1.93, 0.1.107 and 0.1.108 all behave identically, which is
+  exactly the evidence that should have ruled the migration out early.
+  **The chain, all verified in LMS 9.1 source, not inferred:**
+  1. An unticked checkbox sends no field at all, so `pref_material_action` is ABSENT from
+     `$params` — not 0.
+  2. `Slim::Web::Settings::handler` does an **unconditional**
+     `$prefsClass->set($pref, $paramRef->{'pref_'.$pref})` for every pref in `prefs()`
+     (`Slim/Web/Settings.pm:162`), and it runs AFTER the subclass handler — so it writes
+     **undef** straight over the 0 the plugin just set.
+  3. `Prefs::Base::init` re-seeds any pref that "doesn't exist, **or exists as an undef value**"
+     (`Slim/Utils/Prefs/Base.pm:200`) — so the default `material_action => 1` came back at the
+     next module load.
+  Net: the toggle could not be turned off at all. And because it was stuck ON, `postinitPlugin`
+  always took the write branch, so `_clearMaterialActions` — the only thing that removes our
+  entries from `actions.json` — was **unreachable**. That is why the residue never cleared, and
+  why 0.1.108's uninstall hook was necessary but not sufficient.
+  **Fix:** materialise the value into `$params->{pref_*}` and let the base class store it, which
+  is exactly what the numeric prefs on that page already do. The direct `$prefs->set` stays,
+  because the write/clear below needs the chosen value live in the same request. Both
+  checkboxes on the page were affected — `material_action` and `debug_log`.
+  **`debug_log` hid it**: its default is 0, so init re-seeding undef→0 still reads as "off". Only
+  a checkbox whose default is **1** shows the symptom. Any future pref of that shape has the same
+  trap.
+  **Why the suite missed it, and the stub fix that matters more than the one-liner:**
+  `t_stubs.pl`'s `Slim::Web::Settings::handler` was an empty sub — a base class that saves
+  nothing — and `t_material_actions.pl`'s `save_settings` passed an explicit
+  `pref_material_action => 0`, which is not what a browser posts. **The stub now mirrors the real
+  base handler's unconditional set**, the same way the prefs stub was already made to mirror
+  `Base::set`'s underscore discard. Treat that stub as a model of the server, not a placeholder:
+  both of this plugin's silent-settings bugs lived in the gap between them.
+  7 checks in `t_material_actions.pl` posting a genuinely unticked form (key omitted) and
+  re-running `$prefs->init` to simulate the restart. Anti-tested: reverting just the two
+  materialise lines fails 4 of them with `got='1'` after restart — the reported symptom exactly.
+  Suite 739 → **746 across 12 suites**, all green.
+
+- **0.1.110 — Material 6.4.8 shipped our PR #1257, so EVERYTHING registers and the shared
+  `actions.json` is now PRUNED rather than written.**
+
+  Upstream merged [PR #1257](https://github.com/CDrummond/lms-material/pull/1257) verbatim in one
+  commit (`8f3e777be`, merge `f4cfb95`) and **released it in Material 6.4.8**; 6.4.9 still carries
+  it. It is in **neither release's ChangeLog**, so "did it ship" is only answerable from the tree —
+  `git merge-base --is-ancestor f4cfb95 6.4.8`. That closed all three gaps that forced the file
+  half, so `track`, `queue-track`, `podcasts-*` and every empty suppressor can now be registered.
+
+  **A DELIVERY TIER replaces the bare `->can` gate** (`_materialActionTier`, and `_useActionApi` is
+  gone). Tier 2 requires the capability AND `>= 6.4.8`, and the version half is not belt-and-braces:
+  on 6.4.6/6.4.7 the one-argument `registerCustomAction($section)` pushes **undef**, Material serves
+  `{"<cat>":[null]}`, and `customactions.js` reads `sect[i].locked` off the null and throws — taking
+  out every custom action in that section, **other plugins' included**. No side-effect-free probe
+  exists (`$PLUGIN_CUSTOM_ACTIONS` is a file-scoped `my`; registering cannot be undone), so it is a
+  version parse, with a dev build treated as newest like `Browse::_headerType`.
+
+  **`_pruneMaterialActions` is the removal mechanism**, and the design constraint that shaped it is
+  that **a hand-written `actions.json` must be assumed to exist**. LL has always MERGED into that
+  file rather than overwriting it — the strip pass only removes what `_isOurAction` matches, entries
+  are `push`ed, radio categories use `||=` — so a user's own actions have coexisted with ours the
+  whole time and nothing would have told them otherwise. "Nobody has one, it would have broken" is
+  false, and was the premise this release started from. So the prune never writes and never
+  clobbers: it strips, deletes what is ours *and now empty*, and **unlinks the file only when that
+  leaves it empty**. Anything foreign keeps the file alive, so "remove ours" and "leave theirs
+  alone" never conflict. Deleting it is safe — verified in the served 6.4.9 bundle: the axios GET
+  has a `.catch`, `getCustomActions` tests `if (customActions || pluginCustomActions)` and
+  `getSectionActions` tests `if (list && list[section])`, so a missing file and an empty one are
+  identical to Material.
+
+  **`_isOurAction`'s title fallback is deleted.** It matched our four titles on an entry with no
+  `lmscommand` — and **every** version of `_materialActionSet` back to the 0.1.25 rebrand builds
+  every action with one (checked across the twelve commits that touched it), so the branch could
+  never have caught anything of ours. It could only ever delete a THIRD PARTY's
+  `script`/`command`/`weblink` action that happened to share a title, on every startup.
+
+  **`%REGISTERED_EMPTY` makes the register guard per-category.** `$REGISTERED` is a single latch
+  because the positives never grow; the suppressors do — TuneIn's radio directory is fetched
+  asynchronously, so the +60s deferred pass finds commands postinit could not (0.1.56) and must
+  register those without re-pushing the rest. That pass now registers as well as writes.
+
+  **Two things the tests found that review had not:**
+  1. **The prune's early return on a missing file skipped the fallbacks.** A `registerCustomAction`
+     that failed put its entries in `%UNREGISTERED` for the file to carry — but with the file
+     already gone the prune returned before writing them, so a refused registration landed in
+     NEITHER place. The guard is now `!-e $file && !%fallback && !%emptyFallback`.
+  2. **The suppressor fallback needed gating on `$REGISTERED_N`.** A suppressor exists to hold OUR
+     live `online-*` pair off our own rows; with nothing of ours registered there is nothing to hold
+     back, and writing the empty `<cmd>-*` categories anyway would suppress **another plugin's**
+     `online-*` on every radio and podcast row, with nothing of ours left to clean up. The
+     pref-off-at-startup path reaches the prune in exactly that state. `$departing` forces both
+     fallbacks empty, which is 0.1.108's rule unchanged.
+
+  **Tried and REVERTED — do not re-propose: gating `_ownedCats`' pre-ledger seed on "has LL ever
+  touched this file".** The concern was sound (a hand-written empty `qobuz-album` is
+  indistinguishable from our 0.1.47-0.1.50 husks, and the seed sweeps it), but the husks have
+  EXACTLY that shape — those versions wrote `||= []`, an empty category with no other mark — so any
+  test for a trace of LL also withholds the seed from the file that needs it and the 0.1.51
+  regression returns. `t_material_matrix.pl`'s I3/I4 caught it on `legacy_husks`. There is nothing
+  in the file to tell the two apart; the protection lives where it can be exact instead.
+
+  **Downgrades self-heal:** every file-writing path is kept, so a Material rollback or uninstall
+  drops the tier and the tier-0/1 write rebuilds the file the prune removed.
+
+  **The whole tier-2 path was untested when the code was first green** — the suite has no
+  `getPluginVersion` stub, so all 746 existing checks ran at tier 1 and passed against code they
+  never executed. `t_material_actions.pl` gains `set_material_version()` and 55 checks: the tier
+  table, the folded action set, the upgrade-then-unlink path, a third party's file surviving
+  verbatim, both refusal fallbacks, the deferred radio discovery, the pref off at startup vs
+  mid-run, the uninstall, and both downgrade steps. **806 checks across 12 suites**, up from 746.
+  Anti-tested per fix: reverting the tier gate to a bare capability test fails 23, restoring the
+  title fallback fails 2, an unconditional early return fails 4, dropping the per-category empty
+  guard fails 1, and each of the two gates above fails exactly the case written for it.
+
+  **The one path this release changes for an install NOT yet on 6.4.8** is
+  `_writeMaterialActionsDeferred`, which now registers as well as writes (tier 2 needs it for the
+  radio commands TuneIn reveals late). On tier 0/1 it must be completely INERT — the positives are
+  latched and the empty-section loop is gated on tier 2, because on 6.4.6/6.4.7 that loop would
+  push a NULL into every suppressor section and break every custom action in it. Pinned by its own
+  tier-1 case: no further entries, NO empty section, the late radio suppressor still reaching the
+  FILE exactly as before, and the rest of the file byte-identical. Anti-tested — ungating the loop
+  fails 5. So on a 6.4.7 box 0.1.110 is behaviourally identical to 0.1.109 apart from
+  `_isOurAction` no longer guessing from titles, which only ever affected a third party's entries.
+
+  **Not yet verified in a browser.** Both halves of #1257 were proven with `osascript -l JavaScript`
+  against upstream JS, never in Material itself. Now that 6.4.9 is a real tag, install stock
+  Material 6.4.9 on the box and check Now Playing, the queue, the Podcasts app, our own list rows
+  and a radio browse row before trusting tier 2 in the field.
+
+  Podcast `CACHE_VER` bumped 14 -> 15 with the build per the dev-build cache rule; nothing here
+  parses a feed, so it is hygiene, not a fix.
+
 ## Regression tests — RUN THESE BEFORE ANY BUILD (added 2026-07-29)
 
     sh tools/t_all.sh          # one line per suite, non-zero exit on any failure
@@ -1940,7 +2180,7 @@ session scratchpads and are gone — so nothing carried forward. Anything worth 
 | `t_addpath.pl` | the ADD PATH end to end — a Material action into `_addCtxCommand`, out as a row in SQLite. Also 0.1.92's `ref.svc_title`: that the service label is kept when it differs and not when it doesn't, that a play of the QUALIFIED title finds the row while a different artist's doesn't, and that the dedupe key still ignores the label. What the handshake params become on the stored row, that `&tc=` settles the type but never fills `track_count`, that the cross-kind single dedupe eats a REAL single but not a disproved one, that an UNKNOWN type defers instead of inserting a guess, and that unreplayable/unidentifiable adds are refused. Plus the NOW-PLAYING FALLBACK's gate on BOTH paths (0.1.98): on the album path, that a browse row with a non-service container verb does NOT adopt the playing track, while a genuine Now Playing add (no `svc` at all) still recovers its source; on the TRACK path, that a tapped row whose `trackid` resolves to NOTHING (no svc — it shares `$trackCmd` with Now Playing) and an online-track row with a container verb are both refused, while a real Now Playing track add still recovers the playing song and its url. In both cases both directions are needed, or "doesn't adopt" passes with the fallback simply switched off. And the other side of that gate: a REMOTE queue row (negative `trackid`, no favurl) is resolved by its id and stored as the row that was TAPPED — its own title, its own play url, its source read off that url and not hardcoded `library` — while the library row on the same branch still takes its album/year from the Album row — and, since the RemoteTrack that row resolves to is normally BARE, that a `''` title/artist off the object never overwrites what Material sent (the stub answers `''` for a negative id, so this cannot pass by the test having supplied the metadata itself). Also what a REJECTED add logs (0.1.98): that an empty source reads `(none identified)` rather than `''`, that the container verb is named, and that the clause which actually failed is named — a missing play url and an empty title each say so instead of blaming the service, while a genuinely unsupported source still reads exactly as it did. The reject is silent to the user, so that one line is the whole trace. Needs no service: the whole path asks only `client`/`getParam`/`setStatusDone`/`setStatusProcessing`/`addResult`/`addResultLoop`, and `client => undef` makes the background jobs no-op (pass `_client` for the Now Playing cases — it is pulled out of the params, not passed as one). **The service plugins must be declared** (`_serviceCan`) or the gate rejects everything and every assertion passes against an empty DB |
 | `t_resolve_count.pl` | what a resolve writes BACK to the row (`Browse::_albumTracks`): a FAILED resolve records nothing and never clobbers a real `track_count`/`rel_type`, Bandcamp helper-only rows count as a failure too, and 0.1.88's successful-resolve refresh + forced single-correction still work. Plus `Sources::hasDirectAlbumRef` — whether a row's tracklist costs one album call or a whole service SEARCH (the Bandcamp page-url case), which is what gates background work |
 | `t_prefs_migration.pl` | 0.1.94's pref migrations and the rule that makes them one-shot: that a leading-underscore pref cannot be stored at all (pinning the stub against `Slim::Utils::Prefs::Base::set` — if that assertion ever passes with a value, every other one here stops meaning anything), that the rebrand copy runs once and never reverts a later choice, that an install which already ran the broken copy isn't copied over again, and that the threshold bump re-applies exactly once. Runs the two migrations in the real startup order — the ordering IS the bug — for both an install that carries a pre-rebrand namespace and one that doesn't. **A real user's box is the second shape**: the rebrand landed in 0.1.25 and the first release was tagged v0.1.69, so no installed copy ever wrote a `plugin.listentolater` pref and the copy has nothing to import. `reset_prefs` seeds that namespace (Simon's dev box, the only one that ran the pre-rebrand code); `reset_prefs_no_legacy` doesn't — pick the one that matches the install you mean, or an assertion proves the wrong thing |
-| `t_material_actions.pl` | 0.1.95's delivery split: that the six SERVER-resolved positive categories are REGISTERED with Material (6.4.6+) and no longer written to actions.json while `track`/`queue-track` stay in the file (0.1.97), that nothing registered is also left in the file (the merge is additive — a leftover means every "Add" shows twice), that registration happens exactly ONCE across a re-register, a Settings save and the deferred radio write, that the suppressors and `podcasts-*` stay in the file where Material can actually see them, that an older Material still gets the byte-identical file it always did, and that a third party's entries in a category we vacated survive. Plus the FAILURE path: a `registerCustomAction` that dies falls back to the file (all of it, or exactly the refused sections on a partial failure — never both places), and a file write with no registration behind it (the pref switched on mid-run) writes the full set. Plus the SETTINGS save itself, driven through `Settings::handler` with `debug_log` OFF (0.1.97): turning `material_action` off clears the file half on the save and warns about the registered half, turning it back on restores `track`/`queue-track` without re-writing anything Material already took, and turning it on when nothing registered writes everything. And the 0.1.98 rule that the OFF save must obey: while entries are still registered, the empty suppressors (ours and the radio ones) STAY and stay EMPTY — deleting them while the `online-*` pair cannot be withdrawn ADDS "Add" to our own rows instead of removing it — including on the path that rule was written for and originally missed, **the file being GONE**, where all three families have to be RE-CREATED rather than preserved. And the same rule from the other side for the one category that is ours, file-only AND per-app: with nothing registered, `podcasts-*` is DELETED rather than left as an empty husk — including for a user who has since unsubscribed from every feed, the state `_materialActionSet` can no longer name — because an empty per-app override hides Add on the Podcasts app for good; with entries still live it stays, and stays empty, for exactly the reason the radio empties do |
+| `t_material_actions.pl` | 0.1.95's delivery split: that the six SERVER-resolved positive categories are REGISTERED with Material (6.4.6+) and no longer written to actions.json while `track`/`queue-track` stay in the file (0.1.97), that nothing registered is also left in the file (the merge is additive — a leftover means every "Add" shows twice), that registration happens exactly ONCE across a re-register, a Settings save and the deferred radio write, that the suppressors and `podcasts-*` stay in the file where Material can actually see them, that an older Material still gets the byte-identical file it always did, and that a third party's entries in a category we vacated survive. Plus the FAILURE path: a `registerCustomAction` that dies falls back to the file (all of it, or exactly the refused sections on a partial failure — never both places), and a file write with no registration behind it (the pref switched on mid-run) writes the full set. Plus the SETTINGS save itself, driven through `Settings::handler` with `debug_log` OFF (0.1.97): turning `material_action` off clears the file half on the save and warns about the registered half, turning it back on restores `track`/`queue-track` without re-writing anything Material already took, and turning it on when nothing registered writes everything. And the 0.1.98 rule that the OFF save must obey: while entries are still registered, the empty suppressors (ours and the radio ones) STAY and stay EMPTY — deleting them while the `online-*` pair cannot be withdrawn ADDS "Add" to our own rows instead of removing it — including on the path that rule was written for and originally missed, **the file being GONE**, where all three families have to be RE-CREATED rather than preserved. And the same rule from the other side for the one category that is ours, file-only AND per-app: with nothing registered, `podcasts-*` is DELETED rather than left as an empty husk — including for a user who has since unsubscribed from every feed, the state `_materialActionSet` can no longer name — because an empty per-app override hides Add on the Podcasts app for good; with entries still live it stays, and stays empty, for exactly the reason the radio empties do. Plus the 0.1.110 DELIVERY TIER, which needed `set_material_version()` because without a `getPluginVersion` stub every one of the previous 746 checks ran at tier 1 and could not reach the new code at all: the tier table (capability alone is never enough — the one-argument empty-section call pushes a null on 6.4.6/6.4.7), the folded action set, an upgrade from a file install ending with the file UNLINKED, a hand-written actions.json surviving verbatim — populated category, their own empty suppressor, and an entry titled like ours that is not ours — both refusal fallbacks (a refused positive and a refused empty section each reach the user through the file, and the file is created for them if it has gone), the deferred pass registering a late-discovered radio command without re-pushing anything, the pref off at STARTUP vs mid-run (only the latter has anything registered to suppress), the uninstall stranding nothing, and both downgrade steps rebuilding the file |
 | `t_material_matrix.pl` | the actions.json STATE MACHINE, as invariants rather than scenarios. Enumerates starting file x Material version x podcast subscriptions x user journey and drives real op SEQUENCES (boot on/off, Settings on/off, restarts), checking after EVERY step: **I1** a pref-OFF terminal leaves none of our entries, and with nothing registered none of our categories either; **I2** a foreign category — entries AND deliberate empty suppressors — is byte-identical before and after every operation; **I3** no EMPTY `<cmd>-album/-track` exists for a command we can replay (the 0.1.51 regression as a property); **I4** any journey ending pref-ON converges on the clean baseline, whatever route it took. Exists because the scenario suite is structurally blind to both halves of these bugs: they are TWO-TRANSITION (the clear pass writing `podcasts-*` empty is correct — it goes wrong at the next WRITE) and they live in the one untested cell of a 2x2, since every `$live` case in `t_material_actions.pl`'s podcast block subscribes a feed first. The invariants deliberately carry almost no vocabulary of "which categories are ours" — that list is the bug generator, so a test restating it would inherit the fault; the reference is a BASELINE from a clean run of the same config. I4 compares the MERGED file+registered view, not the file, or a Settings-save enable (which cannot register, so it delivers through the file by design) reads as drift. **A world must reset `%Slim::Utils::Prefs::VALUES`** — a pref written by one journey turns the next journey's "upgrade from an older build" case into an already-migrated one, silently hiding this exact bug class |
 | `t_load.pl` | every shipped module compiles AND loads, plus a called-vs-defined sweep — `perl -c` passes on a call to a sub that doesn't exist, which nearly shipped a runtime crash in 0.1.83 |
 

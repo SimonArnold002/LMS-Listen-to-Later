@@ -49,12 +49,23 @@ sub handler {
         $ret = 3650 if $ret > 3650;
         $params->{pref_played_retention_days} = $ret + 0;
 
-        # Persist the two Material toggles straight from the form NOW (SUPER::handler saves
-        # them too, but only after it has rendered the page). We need them live so the
-        # regenerate below reflects the just-chosen values, and the fresh snapshot is in the
-        # pref before the template is rendered in this same request.
-        $prefs->set('material_action', $params->{pref_material_action} ? 1 : 0);
-        $prefs->set('debug_log',       $params->{pref_debug_log}       ? 1 : 0);
+        # AN UNTICKED CHECKBOX POSTS NOTHING AT ALL, so `pref_material_action` is ABSENT from
+        # $params rather than 0 — and Slim::Web::Settings::handler does an UNCONDITIONAL
+        # `$prefsClass->set($pref, $paramRef->{'pref_'.$pref})` for every pref in prefs()
+        # (Settings.pm:162). Setting the pref directly here is therefore not enough: SUPER
+        # runs afterwards and writes **undef** straight over our 0. `Prefs::Base::init` then
+        # re-seeds any pref that "exists as an undef value" (Base.pm:200) at the next module
+        # load, so the default 1 came back and the box reappeared TICKED on every restart —
+        # the toggle could not be turned off at all, and with it stuck on, postinitPlugin
+        # never reached the branch that clears actions.json.
+        #
+        # So MATERIALISE the value into $params, exactly as the numeric prefs above do, and
+        # let the base class store it. The direct set stays because the write/clear below has
+        # to see the chosen value live, in this same request.
+        $params->{pref_material_action} = $params->{pref_material_action} ? 1 : 0;
+        $params->{pref_debug_log}       = $params->{pref_debug_log}       ? 1 : 0;
+        $prefs->set('material_action', $params->{pref_material_action});
+        $prefs->set('debug_log',       $params->{pref_debug_log});
 
         # Re-run Material's actions.json write now, mirroring postinitPlugin's two branches
         # exactly, so the toggle takes effect on THIS save rather than at the next restart:

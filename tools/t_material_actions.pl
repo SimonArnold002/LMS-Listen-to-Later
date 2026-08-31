@@ -8,17 +8,26 @@
 # side: if we register AND leave our old entries in the file, EVERY "Add" appears TWICE. That is
 # what most of this suite is about.
 #
-# Four things cannot move to the API, and the suite pins them where they are:
-#   * the EMPTY suppressor categories (listenlater-*, LLHome-*, the radio ones) — the API takes
-#     an action and pushes it, so "this category exists and is empty" is inexpressible;
-#   * the podcasts-* override — Material decides whether an app's own "<command>-<type>" category
-#     wins over "online-*" with `appCat in customActions`, i.e. the FILE, never the registered
-#     list (verified in the served 6.4.7 bundle);
-#   * 'track' (Now Playing) and 'queue-track' — the only two categories Material resolves in the
-#     BROWSER, and it snapshots them once, on a bus event only the customactions.json fetch
-#     fires. The plugin list usually arrives after that, so a registered entry is invisible for
-#     the whole page session (0.1.97; see _materialActionSet);
-#   * everything, on a Material older than 6.4.6, which has no API at all.
+# THE DELIVERY TIER (0.1.110) decides which of those two lists an entry goes to, and the suite
+# is organised around it. Material grew the API in two steps:
+#   * tier 0 — no registerCustomAction at all (< 6.4.6): the file carries everything.
+#   * tier 1 — 6.4.6/6.4.7: the "Add" entries register, but four things CANNOT move and the
+#     suite pins them in the file — the EMPTY suppressors (the API takes an action and pushes
+#     it, so "exists and is empty" is inexpressible), the podcasts-* per-app override (Material
+#     tests `appCat in customActions`, the FILE object alone), and 'track'/'queue-track' (the
+#     only two it resolves in the BROWSER, snapshotted once on a bus event only the
+#     customactions.json fetch fires — 0.1.97).
+#   * tier 2 — >= 6.4.8, where upstream PR #1257 closed all three gaps: everything registers and
+#     the file is PRUNED, then UNLINKED once it is empty.
+#
+# Tier 2 needs the capability AND the version, and that is the point of the tier table below:
+# on 6.4.6/6.4.7 the one-argument empty-section call pushes a NULL into the section, which
+# breaks every custom action in it — other plugins' included. A bare ->can() test is not safe.
+#
+# Note the suite has no getPluginVersion stub by default, so everything outside the tier-2
+# section runs at tier 1. That is deliberate — it is the tier most installs are on — but it is
+# also why the tier-2 section exists at all: without it, 746 checks passed against code they
+# never executed.
 #
 # Nothing here is asserted from a copy of the action definitions: the categories and the entry
 # shapes are read back out of _materialActionSet, and the two delivery paths are compared against
@@ -45,9 +54,11 @@ sub is {
 sub section { printf "\n== %s\n", $_[0] }
 
 # --- the fake Material -------------------------------------------------------------------
-# The API is a plain sub, and _useActionApi is a ->can() test, so presence is controlled by
-# installing / deleting the symbol rather than by a flag — which is precisely what the plugin
-# checks. @REG records every ($section, $action) pushed.
+# The API is a plain sub, and _materialActionTier's capability half is a ->can() test, so
+# presence is controlled by installing / deleting the symbol rather than by a flag — which is
+# precisely what the plugin checks. Its VERSION half is driven by set_material_version() below.
+# @REG records every call: [ $section, $action ] for an entry, [ $section ] for an empty
+# section (0.1.110) — that argument count IS the difference, so the suite reads it directly.
 our @REG;
 sub install_api {
     no strict 'refs';
@@ -76,8 +87,34 @@ sub reset_all {
     $Plugins::ListenLater::Plugin::REGISTERED   = 0;
     $Plugins::ListenLater::Plugin::REGISTERED_N = 0;
     %Plugins::ListenLater::Plugin::UNREGISTERED = ();
+    %Plugins::ListenLater::Plugin::REGISTERED_EMPTY = ();
     File::Path::remove_tree("$tmp/material-skin");
 }
+
+# The DELIVERY TIER is a version test as well as a capability one (0.1.110), because the
+# one-argument "declare an empty section" call means something different — and destructive —
+# on 6.4.6/6.4.7. Material reports its version through a class METHOD, so the stub takes the
+# class name as its first argument, exactly as the real one does. Absent by default, which is
+# what pins tier 1 as the safe answer when the version can't be read.
+sub set_material_version {
+    my ($v) = @_;
+    no strict 'refs';
+    no warnings 'redefine';
+    if (defined $v) {
+        *{'Plugins::MaterialSkin::Plugin::getPluginVersion'} = sub { $v };
+    }
+    else {
+        delete $Plugins::MaterialSkin::Plugin::{getPluginVersion};
+    }
+}
+# A one-argument registerCustomAction records [ $cat ] — a two-argument one [ $cat, $action ].
+# That is the whole difference between declaring an empty section and pushing an entry, so the
+# suite reads it straight off @REG rather than through a flag of its own.
+sub registered_empties { my @e = sort map { $_->[0] } grep { @$_ == 1 } @REG; return @e }
+sub registered_actions { my @a = grep { @$_ == 2 } @REG; return @a }
+# scalar() on a sub returning `sort ...` is undefined, so count through an array, always.
+sub n_empties { my @e = registered_empties(); return scalar @e }
+sub n_actions { my @a = registered_actions(); return scalar @a }
 # A Material whose registerCustomAction DIES — the case the file write has to catch. $REFUSE
 # is a coderef deciding per section, so a total failure and a partial one are the same stub.
 our $REFUSE;
@@ -623,6 +660,462 @@ $Plugins::ListenLater::Plugin::REGISTERED_N = 1;          # $live: the re-assert
 is('clear path: a failed write leaves the seed intact too',
     (ref $Slim::Utils::Prefs::VALUES{material_owned_cats} eq 'ARRAY') ? 'recorded' : 'unset',
     'unset');
+
+# ---------------------------------------------------------------------------
+section('UNINSTALL: shutdownPlugin clears the file on the way out (0.1.108)');
+# The residue this suite's whole subject matter creates had no owner once the plugin was
+# removed: LMS deletes our directory and nothing of ours ever runs again, so the "Add"
+# entries stayed in every Material menu for ever and the only remedy was editing JSON by
+# hand. Slim::Utils::PluginManager sets plugin.state to needs-uninstall/needs-disable when
+# the user clicks Apply and removes us at the NEXT start, so shutdownPlugin is the last
+# moment we can still tidy.
+my $STATE_NS = 'plugin.state';
+my $ME       = 'Plugins::ListenLater::Plugin';
+sub set_state { Slim::Utils::Prefs::set_test_pref_ns($STATE_NS, $ME, $_[0]) }
+# Everything the departing clean must remove, in one list: our own view suppressors, a radio
+# one, and the file-only podcasts override.
+my @MUST_GO = qw(listenlater-album LLHome-album music-album podcasts-album);
+sub survivors { my ($d) = @_; return join(',', grep { exists $d->{$_} } @MUST_GO) }
+
+reset_all();
+install_api();
+set_state('enabled');
+Plugins::ListenLater::Plugin::_registerMaterialActions();
+Plugins::ListenLater::Plugin::_writeMaterialActions();
+Plugins::ListenLater::Plugin->shutdownPlugin();
+is('a NORMAL shutdown changes nothing', ours_in_file(read_file()), $FILEHALF);
+is('...and leaves the suppressors in place', (survivors(read_file()) ? 'kept' : 'gone'), 'kept');
+
+# The anti-test for the $departing flag, and the reason it had to exist. With registrations
+# live, a plain clear KEEPS the empties on purpose — they are all that stops the still-live
+# registered online-* pair showing "Add" inside our own list until the restart. On an
+# uninstall that reasoning inverts: there is no next run to protect, so keeping them strands
+# them for ever, suppressing another plugin's online-* on podcasts and every radio command.
+reset_all();
+install_api();
+set_state('enabled');
+Plugins::ListenLater::Plugin::_registerMaterialActions();
+Plugins::ListenLater::Plugin::_writeMaterialActions();
+Plugins::ListenLater::Plugin::_clearMaterialActions();          # no $departing
+is('registrations live: a plain clear keeps the suppressors',
+    survivors(read_file()), join(',', @MUST_GO));
+
+reset_all();
+install_api();
+set_state('needs-uninstall');
+Plugins::ListenLater::Plugin::_registerMaterialActions();
+Plugins::ListenLater::Plugin::_writeMaterialActions();
+is('something of ours is in the file to begin with',
+    (ours_in_file(read_file()) > 0 ? 'yes' : 'no'), 'yes');
+Plugins::ListenLater::Plugin->shutdownPlugin();
+my $gone = read_file();
+is('needs-uninstall: no entry of ours survives', ours_in_file($gone), 0);
+is('...nor any suppressor category we own',      survivors($gone), '');
+is('...and the ownership ledger is forgotten',
+    scalar @{ $Slim::Utils::Prefs::VALUES{material_owned_cats} // [] }, 0);
+
+# A third party sharing the file must come through an uninstall untouched — this pass runs
+# with no user present to notice, so it is the least recoverable place to get it wrong.
+reset_all();
+install_api();
+set_state('needs-uninstall');
+File::Path::make_path("$tmp/material-skin");
+open my $ufh, '>:raw', actions_file() or die $!;
+print $ufh $JSON->encode({
+    'album'       => [ { title => 'Someone else',   lmscommand => [ 'otherplugin', 'go' ] } ],
+    'qobuz-album' => [ { title => 'Their scoping',  lmscommand => [ 'otherplugin', 'go' ] } ],
+    'tunein-album' => [],   # somebody else's deliberate empty suppressor
+});
+close $ufh;
+Plugins::ListenLater::Plugin::_registerMaterialActions();
+Plugins::ListenLater::Plugin::_writeMaterialActions();
+Plugins::ListenLater::Plugin->shutdownPlugin();
+my $left = read_file();
+is('a third party entry survives the uninstall', scalar @{ $left->{'album'} // [] }, 1);
+is('...and is theirs',                           $left->{'album'}[0]{title}, 'Someone else');
+is('their populated per-command category survives',
+    scalar @{ $left->{'qobuz-album'} // [] }, 1);
+is('and nothing of ours is left beside it',      ours_in_file($left), 0);
+
+# Disabling is the same promise: the user asked for the entries to go, and postinit's
+# pref-off branch cannot help because we will not be loaded to run it.
+reset_all();
+install_api();
+set_state('needs-disable');
+Plugins::ListenLater::Plugin::_registerMaterialActions();
+Plugins::ListenLater::Plugin::_writeMaterialActions();
+Plugins::ListenLater::Plugin->shutdownPlugin();
+is('needs-disable clears too', ours_in_file(read_file()), 0);
+
+# The legacy path has no registrations at all, so the file is the ONLY place the entries
+# live — an uninstall that missed this would strand the complete set, not just the file half.
+reset_all();
+remove_api();
+set_state('needs-uninstall');
+Plugins::ListenLater::Plugin::_writeMaterialActions();
+is('older Material: the full set is in the file',
+    (ours_in_file(read_file()) >= $TOTAL ? 'yes' : 'no'), 'yes');
+Plugins::ListenLater::Plugin->shutdownPlugin();
+is('...and the uninstall takes all of it', ours_in_file(read_file()), 0);
+install_api();
+
+# ---------------------------------------------------------------------------
+section('UNTICKING the box actually sticks across a restart (0.1.108)');
+# THE REPORTED BUG, and the reason it survived three versions of wrong diagnosis: an unticked
+# checkbox posts NOTHING, so save_settings() above — which passes an explicit 0 — was never
+# the real form. The real one omits the key entirely.
+#
+# Chain: Slim::Web::Settings::handler sets every pref in prefs() unconditionally from
+# $params->{pref_*}, so an absent key writes undef over the 0 the plugin just set; then
+# Prefs::Base::init re-seeds any pref that "exists as an undef value" back to its default at
+# the next module load. Net effect: the box came back TICKED on every restart, and because
+# material_action was stuck on, postinitPlugin never took the branch that clears actions.json.
+sub untick { # what the browser actually posts: the key is simply not there
+    Slim::Utils::Log::clear();
+    Plugins::ListenLater::Settings->handler(undef, { saveSettings => 1, pref_sort => 'added' });
+}
+# A restart: Plugin.pm's $prefs->init runs again at module load with the same defaults.
+sub restart_init {
+    Slim::Utils::Prefs::preferences('plugin.listenlater')
+        ->init({ material_action => 1, debug_log => 0, sort => 'added' });
+}
+
+reset_all();
+install_api();
+Slim::Utils::Prefs::preferences('plugin.listenlater')->set('material_action', 1);
+untick();
+is('the pref is 0 right after the save',
+    (Slim::Utils::Prefs::preferences('plugin.listenlater')->get('material_action') ? 1 : 0), 0);
+is('...and is a real 0, NOT undef (undef is what init re-seeds)',
+    (defined Slim::Utils::Prefs::preferences('plugin.listenlater')->get('material_action')
+        ? 'defined' : 'undef'), 'defined');
+restart_init();
+is('...and it is STILL off after a restart',
+    (Slim::Utils::Prefs::preferences('plugin.listenlater')->get('material_action') ? 1 : 0), 0);
+restart_init();
+is('...and after another one',
+    (Slim::Utils::Prefs::preferences('plugin.listenlater')->get('material_action') ? 1 : 0), 0);
+
+# The same for the other checkbox on that page — one bug, two fields.
+Slim::Utils::Prefs::preferences('plugin.listenlater')->set('debug_log', 1);
+untick();
+restart_init();
+is('debug_log unticks and stays unticked too',
+    (Slim::Utils::Prefs::preferences('plugin.listenlater')->get('debug_log') ? 1 : 0), 0);
+
+# Ticking must still work, or the fix has just broken the box the other way.
+Slim::Utils::Log::clear();
+Plugins::ListenLater::Settings->handler(undef, {
+    saveSettings => 1, pref_sort => 'added', pref_material_action => 1,
+});
+restart_init();
+is('ticking it still turns it ON, and that survives a restart',
+    Slim::Utils::Prefs::preferences('plugin.listenlater')->get('material_action'), 1);
+
+# And the consequence the user actually saw: with the pref stuck ON, postinit took the write
+# branch every time and the entries could never be cleared. Off and staying off, the clear
+# branch is reachable.
+Slim::Utils::Prefs::preferences('plugin.listenlater')->set('material_action', 1);
+reset_all();
+install_api();
+Plugins::ListenLater::Plugin::_registerMaterialActions();
+Plugins::ListenLater::Plugin::_writeMaterialActions();
+untick();
+restart_init();
+is('so a restart after unticking reaches the CLEAR branch',
+    (Slim::Utils::Prefs::preferences('plugin.listenlater')->get('material_action') ? 'write' : 'clear'),
+    'clear');
+Slim::Utils::Prefs::preferences('plugin.listenlater')->set('material_action', 1);
+
+# ---------------------------------------------------------------------------
+section('tier 1 — the deferred pass gained a register call, and it must be INERT here');
+
+# 0.1.110 made _writeMaterialActionsDeferred register as well as write, because on tier 2 the
+# radio suppressors it discovers late have to be REGISTERED. On 6.4.6/6.4.7 that call must do
+# nothing at all: the positives are latched, and the empty-section loop is gated on tier 2 —
+# where it would push a NULL into the section and break every custom action in it. This is the
+# one code path 0.1.110 changes for an install that is NOT yet on 6.4.8, so it is pinned here.
+reset_all();
+install_api();
+set_material_version('6.4.7');
+Plugins::ListenLater::Plugin::_registerMaterialActions();
+Plugins::ListenLater::Plugin::_writeMaterialActions();
+my $t1before = read_file();
+my $t1reg    = n_actions();
+
+$Slim::Control::Request::RESULTS{radios} = [ { cmd => 'bbcsounds' } ];
+Plugins::ListenLater::Plugin::_writeMaterialActionsDeferred();
+delete $Slim::Control::Request::RESULTS{radios};
+my $t1after = read_file();
+
+is('the deferred pass registers no further entries on 6.4.7', n_actions(), $t1reg);
+is('...and NO empty section (that would push a null and break the menu)', n_empties(), 0);
+is('...it still writes the late-discovered radio suppressor to the FILE, as before',
+    (exists $t1after->{'bbcsounds-album'} ? 'written' : 'missed'), 'written');
+is('...and changes nothing else about the file',
+    $JSON->encode({ map { $_ => $t1after->{$_} }
+                    grep { !/^bbcsounds-/ } keys %$t1after }),
+    $JSON->encode($t1before));
+is('...leaving our entries in the file exactly once', ours_in_file($t1after), $FILEHALF);
+set_material_version(undef);
+
+# ===========================================================================
+# TIER 2 — Material >= 6.4.8 (upstream PR #1257). 0.1.110.
+#
+# #1257 closed all three gaps that forced the file half, so everything registers and the file
+# is PRUNED rather than written. Two properties carry the whole release and are what most of
+# this section is about:
+#   * the prune must be SURGICAL. actions.json is shared, LL has always MERGED into it rather
+#     than overwriting it, so a hand-written one has coexisted with ours the whole time and
+#     cannot be assumed absent.
+#   * the file is UNLINKED when the prune empties it — but only then.
+# ===========================================================================
+section('the delivery tier — capability AND version, because 6.4.6/6.4.7 mis-handle the empty call');
+
+reset_all();
+remove_api();
+set_material_version('6.4.9');
+is('no registerCustomAction is tier 0, whatever the version says',
+    Plugins::ListenLater::Plugin::_actionTier(), 0);
+
+install_api();
+set_material_version(undef);
+is('API present but the version unreadable falls back to tier 1 (the safe API tier)',
+    Plugins::ListenLater::Plugin::_actionTier(), 1);
+for my $c (['6.4.5', 1], ['6.4.6', 1], ['6.4.7', 1], ['6.4.8', 2], ['6.4.9', 2],
+           ['6.5.0', 2], ['7.0.0', 2], ['6.4.10', 2]) {
+    set_material_version($c->[0]);
+    is("Material $c->[0] is tier $c->[1]", Plugins::ListenLater::Plugin::_actionTier(), $c->[1]);
+}
+set_material_version('DEVELOPMENT');
+is('a dev/test build is treated as newest, like Browse::_headerType',
+    Plugins::ListenLater::Plugin::_actionTier(), 2);
+
+# ---------------------------------------------------------------------------
+section('tier 2 — the action set folds, and the suppressors become registrable');
+
+set_material_version('6.4.9');
+my ($t2pos, $t2file, $t2empty) = Plugins::ListenLater::Plugin::_materialActionSet(2);
+is('the client-resolved surfaces move OUT of the file half (PR #1257 re-emits)',
+    join(',', sort keys %$t2file), '');
+is('...and into the registered set, alongside the six that were always there',
+    join(',', sort keys %$t2pos),
+    'album,album-track,online-album,online-track,playlist,playlist-track,queue-track,track');
+is('the own-surface suppressors are now declarable as EMPTY sections',
+    join(',', @$t2empty),
+    'listenlater-album,listenlater-track,listenlater-artist,'
+    . 'LLHome-album,LLHome-track,LLHome-artist');
+is('nothing is in both halves (that would double every Add)',
+    join(',', grep { exists $t2pos->{$_} } sort keys %$t2file), '');
+# The entries themselves must not have been respelled on the way across.
+is('a folded entry is the SAME action the file half carried at tier 1',
+    $JSON->encode($t2pos->{'track'}), $JSON->encode($FILEONLY->{'track'}));
+
+my $T2TOTAL = 0; $T2TOTAL += scalar @{ $t2pos->{$_} } for keys %$t2pos;
+is('...so the registered total is the old registered set plus the old file set',
+    $T2TOTAL, $TOTAL + $FILEHALF);
+
+# ---------------------------------------------------------------------------
+section('tier 2 — upgrading an install whose entries are in the file');
+
+reset_all();
+remove_api();
+set_material_version(undef);
+Plugins::ListenLater::Plugin::_writeMaterialActions();     # a 0.1.109 install, as upgraded from
+my $pre = read_file();
+is('the pre-upgrade file has all our entries', ours_in_file($pre), $TOTAL + $FILEHALF);
+is('...and its suppressor categories', (exists $pre->{'listenlater-album'} ? 'yes' : 'no'), 'yes');
+
+install_api();
+set_material_version('6.4.9');
+my $n2 = Plugins::ListenLater::Plugin::_registerMaterialActions();
+Plugins::ListenLater::Plugin::_writeMaterialActions();
+
+is('every entry registered, the folded ones included',
+    n_actions(), $T2TOTAL);
+is('...and the empty suppressors registered as sections',
+    (grep { $_ eq 'listenlater-album' } registered_empties()) ? 'yes' : 'no', 'yes');
+is('...radio suppressors too — they are per-app overrides like the rest',
+    (grep { $_ eq 'music-album' } registered_empties()) ? 'yes' : 'no', 'yes');
+is('an empty section is registered with ONE argument (two would push a null entry)',
+    (grep { @$_ != 1 } grep { $_->[0] eq 'listenlater-album' } @REG) ? 'two args' : 'one arg',
+    'one arg');
+is('the return counts entries and sections together', $n2,
+    $T2TOTAL + n_empties());
+is('THE FILE IS GONE — nothing of ours is left on the user\'s machine',
+    (-e actions_file() ? 'still there' : 'removed'), 'removed');
+is('...and the ownership ledger is cleared with it',
+    scalar @{ Slim::Utils::Prefs::preferences('plugin.listenlater')->get('material_owned_cats') || [] },
+    0);
+
+# The steady state: this runs at every startup for ever, so it must be free and must not
+# resurrect the file.
+Plugins::ListenLater::Plugin::_writeMaterialActions();
+Plugins::ListenLater::Plugin::_writeMaterialActions();
+is('re-running the prune on an absent file does not recreate it',
+    (-e actions_file() ? 'recreated' : 'still absent'), 'still absent');
+is('...and registers nothing more', n_actions(), $T2TOTAL);
+
+# ---------------------------------------------------------------------------
+section("tier 2 — a hand-written actions.json survives the prune intact");
+
+reset_all();
+install_api();
+set_material_version('6.4.9');
+File::Path::make_path("$tmp/material-skin");
+# A third party's populated category, their own deliberate EMPTY suppressor, and — the case
+# the title fallback used to break — an entry of theirs TITLED like ours, with no lmscommand.
+my $foreign = {
+    'album'            => [ { title => 'Their Thing', command => ['their', 'cmd'] } ],
+    'otherplugin-album'=> [],
+    'online-album'     => [ { title => 'Add to Listen Later', script => 'theirs.js' } ],
+};
+open my $ffh, '>:raw', actions_file() or die $!;
+print $ffh $JSON->encode($foreign); close $ffh;
+
+Plugins::ListenLater::Plugin::_registerMaterialActions();
+Plugins::ListenLater::Plugin::_writeMaterialActions();
+my $after = read_file();
+is('the file is KEPT — someone else has entries in it',
+    (-e actions_file() ? 'kept' : 'deleted'), 'kept');
+is("their populated category survives verbatim",
+    $JSON->encode($after->{'album'}), $JSON->encode($foreign->{'album'}));
+is('their deliberate empty suppressor survives — an empty category is not litter',
+    (exists $after->{'otherplugin-album'} ? 'kept' : 'deleted'), 'kept');
+is('an entry TITLED like ours but not ours is left alone (no title guessing, 0.1.110)',
+    $JSON->encode($after->{'online-album'}), $JSON->encode($foreign->{'online-album'}));
+is('...and _isOurAction agrees, on its own',
+    Plugins::ListenLater::Plugin::_isOurAction($foreign->{'online-album'}[0]), 0);
+is('nothing of OURS is in the file', ours_in_file($after), 0);
+
+# ---------------------------------------------------------------------------
+section('tier 2 — a refused registration still reaches the user, via the file');
+
+reset_all();
+install_failing_api(sub { $_[0] eq 'online-album' });
+set_material_version('6.4.9');
+Plugins::ListenLater::Plugin::_registerMaterialActions();
+Plugins::ListenLater::Plugin::_writeMaterialActions();
+my $part = read_file();
+is('the refused section is written to the file instead of being lost',
+    scalar @{ $part->{'online-album'} // [] }, 2);
+is('...and the file is kept alive for it',
+    (-e actions_file() ? 'kept' : 'deleted'), 'kept');
+is('nothing Material DID take is also in the file (that would double it)',
+    ours_in_file($part) - 2, 0);
+
+# The same, for an empty section — the failure that silently un-suppresses our own rows.
+reset_all();
+install_failing_api(sub { $_[0] eq 'listenlater-album' });
+set_material_version('6.4.9');
+Plugins::ListenLater::Plugin::_registerMaterialActions();
+Plugins::ListenLater::Plugin::_writeMaterialActions();
+my $sup = read_file();
+is('a suppressor Material refused STAYS in the file, or "Add" reappears on our own rows',
+    (exists $sup->{'listenlater-album'} ? 'kept' : 'gone'), 'kept');
+is('...and stays EMPTY, which is what does the suppressing',
+    scalar @{ $sup->{'listenlater-album'} // [] }, 0);
+is('the ones that DID register are not also left in the file',
+    (exists $sup->{'listenlater-track'} ? 'both' : 'registered only'), 'registered only');
+
+# ---------------------------------------------------------------------------
+section('tier 2 — the deferred pass registers radio commands discovered late');
+
+reset_all();
+install_api();
+set_material_version('6.4.9');
+Plugins::ListenLater::Plugin::_registerMaterialActions();
+my $empties1 = n_empties();
+is('bbcsounds is not known at postinit (its directory has not loaded)',
+    (grep { $_ eq 'bbcsounds-album' } registered_empties()) ? 'known' : 'unknown', 'unknown');
+
+# TuneIn's directory arrives ~60s later; the deferred pass is what sees it (0.1.56).
+$Slim::Control::Request::RESULTS{radios} =
+    [ { cmd => 'bbcsounds' }, { cmd => 'qobuz' }, { cmd => 'music' } ];
+Plugins::ListenLater::Plugin::_writeMaterialActionsDeferred();
+is('the deferred pass registers the newly-discovered command',
+    (grep { $_ eq 'bbcsounds-album' } registered_empties()) ? 'registered' : 'missed', 'registered');
+is('...but not one we can actually replay',
+    (grep { $_ eq 'qobuz-album' } registered_empties()) ? 'suppressed' : 'left alone',
+    'left alone');
+is('...and does NOT re-register the ones it already asked for',
+    n_empties(), $empties1 + 2);
+is('...nor re-register any positive entry', n_actions(), $T2TOTAL);
+is('the file is still absent afterwards',
+    (-e actions_file() ? 'recreated' : 'absent'), 'absent');
+delete $Slim::Control::Request::RESULTS{radios};
+
+# ---------------------------------------------------------------------------
+section('tier 2 — the pref turned off, and downgrading again');
+
+reset_all();
+install_api();
+set_material_version('6.4.9');
+Plugins::ListenLater::Plugin::_registerMaterialActions();
+Plugins::ListenLater::Plugin::_writeMaterialActions();
+Slim::Utils::Log::clear();
+Plugins::ListenLater::Plugin::_clearMaterialActions();
+is('turning the pref off leaves nothing of ours on disk',
+    (-e actions_file() ? 'file remains' : 'nothing'), 'nothing');
+is('...and says the registered half goes at the next restart',
+    (grep { /next\s+server restart/ } Slim::Utils::Log::lines()) ? 'warned' : 'silent',
+    'warned');
+
+# The path postinitPlugin's `elsif` takes: the pref was ALREADY off at startup, so nothing
+# registered this run. A suppressor only exists to hold OUR live online-* pair off our own
+# rows — with nothing of ours live there is nothing to hold back, and writing the empty
+# `<cmd>-*` categories anyway would suppress ANOTHER plugin's online-* actions on every radio
+# and podcast row, with nothing of ours left running to clean them up. So the file-fallback
+# for suppressors is gated on something actually having registered.
+reset_all();
+install_api();
+set_material_version('6.4.9');
+File::Path::make_path("$tmp/material-skin");
+open my $lfh, '>:raw', actions_file() or die $!;
+print $lfh $JSON->encode({ 'listenlater-album' => [], 'music-album' => [],
+                           'online-album' => [ { title => 'Add to Listen Later',
+                                                 lmscommand => ['listenlater','addctx'] } ] });
+close $lfh;
+Plugins::ListenLater::Plugin::_clearMaterialActions();     # pref off at startup — no register
+is('pref off at STARTUP (nothing registered) removes the file outright',
+    (-e actions_file() ? 'file remains' : 'nothing'), 'nothing');
+
+# Uninstall/disable. 0.1.108's rule, unchanged by the tier: on the way out there is no next
+# run to protect, so nothing of ours may be left behind — not even a fallback for something
+# Material refused, since nothing will ever come back to tidy it.
+reset_all();
+install_failing_api(sub { $_[0] eq 'online-album' });
+set_material_version('6.4.9');
+Plugins::ListenLater::Plugin::_registerMaterialActions();
+Plugins::ListenLater::Plugin::_writeMaterialActions();
+is('a refused section left a file behind while we were running',
+    (-e actions_file() ? 'kept' : 'gone'), 'kept');
+Plugins::ListenLater::Plugin::_clearMaterialActions(1);    # $departing
+is('...and the uninstall takes even that away',
+    (-e actions_file() ? 'stranded' : 'nothing'), 'nothing');
+install_api();
+
+# A Material downgrade (or an uninstall of it, or a rollback) must self-heal: the tier drops
+# and the legacy write rebuilds the file it had removed. Nothing is stranded.
+set_material_version('6.4.7');
+reset_all();
+Plugins::ListenLater::Plugin::_registerMaterialActions();
+Plugins::ListenLater::Plugin::_writeMaterialActions();
+my $down = read_file();
+is('downgrading to 6.4.7 rebuilds the file half', ours_in_file($down), $FILEHALF);
+is('...including the suppressors, which no longer register there',
+    (exists $down->{'listenlater-album'} && exists $down->{'music-album'}) ? 'yes' : 'no', 'yes');
+is('...and no empty section was registered on the way',
+    n_empties(), 0);
+
+remove_api();
+reset_all();
+set_material_version(undef);
+Plugins::ListenLater::Plugin::_writeMaterialActions();
+is('dropping to a Material with no API at all restores the full legacy file',
+    ours_in_file(read_file()), $TOTAL + $FILEHALF);
+
+set_material_version(undef);
 
 printf "\n%d passed, %d failed\n", $pass, $fail;
 exit($fail ? 1 : 0);
