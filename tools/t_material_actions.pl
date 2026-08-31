@@ -417,14 +417,30 @@ is('turning it ON again restores the client-resolved half',
 is('...and Now Playing / the queue have their Add back',
     join(',', map { scalar @{ read_file()->{$_} // [] } } qw(queue-track track)), '2,2');
 
-# The other direction: the pref was off at STARTUP, so postinit never registered. Now the
-# file has to carry everything, or turning it on does nothing until a restart.
+# The other direction: the pref was off at STARTUP, so postinit never registered — and the
+# save has to deliver the entries itself, or turning the toggle on does nothing until a
+# restart.
+#
+# **This assertion CHANGED in 0.1.111, and the old one is worth recording because it argued
+# for a defect.** It used to demand the save write all 16 entries to the FILE and register
+# NOTHING ("without registering behind postinit's back"), on the belief that registering
+# outside postinit was unsafe. It is not: `$REGISTERED` is a per-run latch and it is FALSE in
+# exactly this case, because the pref being off at startup is what stopped postinit
+# registering. There is nothing to double. On tier 2 that belief was fatal — with no file
+# write left, the save did nothing whatsoever and the toggle needed a server restart, which is
+# how it was reported. So the save now registers on EVERY tier, and here the positives go to
+# Material with only the client-resolved half left in the file — the normal tier-1 split,
+# reached a different way. (Registering is also the better half to land late: the CLI query is
+# not browser-cached, where customactions.json is — 0.1.57.)
 reset_all();
 install_api();
 save_settings(material_action => 1, debug_log => 0);
-is('turning it ON when nothing registered writes the full set',
-    ours_in_file(read_file()), $TOTAL + $FILEHALF);
-is('...without registering behind postinit\'s back', scalar @REG, 0);
+is('turning it ON when nothing registered DELIVERS the whole set',
+    n_actions() + ours_in_file(read_file()), $TOTAL + $FILEHALF);
+is('...the positives by registering, since that is what tier 1 does with them',
+    n_actions(), $TOTAL);
+is('...leaving exactly the client-resolved half in the file, never both',
+    ours_in_file(read_file()), $FILEHALF);
 is('...and says nothing about a restart — nothing is waiting on one',
     (grep { /restart/ } Slim::Utils::Log::lines()) ? 'warned' : 'silent', 'silent');
 
@@ -1044,6 +1060,48 @@ is('...nor re-register any positive entry', n_actions(), $T2TOTAL);
 is('the file is still absent afterwards',
     (-e actions_file() ? 'recreated' : 'absent'), 'absent');
 delete $Slim::Control::Request::RESULTS{radios};
+
+# ---------------------------------------------------------------------------
+section('tier 2 — turning the pref ON mid-run must REGISTER (reported live, 0.1.111)');
+
+# Reported from the box: installed with "Add to Material context menus" OFF, saw no context
+# menus, ticked it on — and nothing happened until a restart.
+#
+# On tier 0/1 the Settings save wrote the full set to the FILE, and that is what made the
+# toggle work before a restart (0.1.96/0.1.97). Tier 2 has no file write, so the save has to
+# REGISTER instead. The old comment said it "cannot register (no de-dupe, no unregister, so it
+# runs once per server run, in postinit)" — but $REGISTERED *is* the de-dupe, and it is false
+# in precisely this case, because the pref being off at startup means postinit never
+# registered. There is nothing to double.
+reset_all();
+install_api();
+set_material_version('6.4.9');
+Slim::Utils::Prefs::preferences('plugin.listenlater')->set('material_action', 0);
+Plugins::ListenLater::Plugin::_clearMaterialActions();     # postinit's pref-off branch
+is('the pref-off boot registers nothing', n_actions(), 0);
+
+save_settings(sort => 'added', material_action => 1);
+is('ticking it ON registers the whole set there and then', n_actions(), $T2TOTAL);
+is('...the empty suppressors too, or "Add" appears inside our own list',
+    (grep { $_ eq 'listenlater-album' } registered_empties()) ? 'yes' : 'no', 'yes');
+is('...and it still writes nothing to the file',
+    (-e actions_file() ? 'wrote a file' : 'nothing'), 'nothing');
+
+# And the guard that makes it safe: a second save must not double anything.
+save_settings(sort => 'added', material_action => 1);
+is('a second save registers nothing further (the $REGISTERED latch is the de-dupe)',
+    n_actions(), $T2TOTAL);
+is('...nor re-declares an empty section', n_empties(),
+    scalar(() = Plugins::ListenLater::Plugin::_ownSurfaceSuppressorCats())
+    + scalar(() = Plugins::ListenLater::Plugin::_radioSuppressorCats()));
+
+# The postinit case must be unaffected: if it already registered, the save adds nothing.
+reset_all();
+Plugins::ListenLater::Plugin::_registerMaterialActions();  # postinit, pref on
+my $postinit = n_actions();
+save_settings(sort => 'added', material_action => 1);
+is('a save after a normal pref-on boot registers nothing extra', n_actions(), $postinit);
+Slim::Utils::Prefs::preferences('plugin.listenlater')->set('material_action', 1);
 
 # ---------------------------------------------------------------------------
 section('tier 2 — the pref turned off, and downgrading again');

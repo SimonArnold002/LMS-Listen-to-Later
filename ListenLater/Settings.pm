@@ -67,23 +67,43 @@ sub handler {
         $prefs->set('material_action', $params->{pref_material_action});
         $prefs->set('debug_log',       $params->{pref_debug_log});
 
-        # Re-run Material's actions.json write now, mirroring postinitPlugin's two branches
-        # exactly, so the toggle takes effect on THIS save rather than at the next restart:
-        #   * ON  — _writeMaterialActions writes the full set to the file. It cannot register
-        #           (registerCustomAction has no de-dupe and no unregister, so it runs once
-        #           per server run, in postinit), and that is precisely why the file write is
-        #           what makes turning it on mid-run work at all.
-        #   * OFF — _clearMaterialActions strips our entries from the shared file. Anything
-        #           registered at startup can only go at the next restart; it says so.
+        # Re-run Material's delivery now, mirroring postinitPlugin's two branches EXACTLY, so
+        # the toggle takes effect on THIS save rather than at the next restart:
+        #   * ON  — register, then write. Both, in that order, as postinit does.
+        #   * OFF — _clearMaterialActions removes our file entries. Anything registered at
+        #           startup can only go at the next restart; it says so.
+        #
+        # **THE SAVE MUST REGISTER, and 0.1.110 shipped without that (reported live).** The
+        # comment here used to claim it "cannot register — registerCustomAction has no de-dupe
+        # and no unregister, so it runs once per server run, in postinit", and that the FILE
+        # write was "precisely why turning it on mid-run works at all". Both halves were wrong
+        # the moment tier 2 removed the file write:
+        #   * `$REGISTERED` IS the de-dupe. It is a per-run latch, so calling
+        #     _registerMaterialActions here is a no-op whenever postinit already registered.
+        #   * It is FALSE in exactly the case this branch exists for. The pref being off at
+        #     startup is what sent postinit down its `elsif`, so nothing registered and there
+        #     is nothing to double.
+        # Without it, on Material >= 6.4.8 ticking the box wrote nothing (the prune writes
+        # only refused entries) and registered nothing, so the toggle did nothing at all until
+        # a server restart. On tier 0/1 the file write still carries it, exactly as before.
+        #
+        # The user still needs a Material reload to SEE it — the client fetches both lists at
+        # app start — but that is the same one-refresh cost the file path always had (0.1.57),
+        # not a restart.
+        #
         # debug_log deliberately does NOT gate this — it gates only the diagnostics SNAPSHOT
-        # that _writeMaterialActions stashes for the textarea below. Gating the write on it
-        # (as we did before 0.1.97) meant the Material toggle silently did nothing on the
-        # default config, where debug logging is off.
+        # that the write stashes for the textarea below. Gating the write on it (as we did
+        # before 0.1.97) meant the Material toggle silently did nothing on the default config,
+        # where debug logging is off.
         if ( Slim::Utils::PluginManager->isEnabled('Plugins::MaterialSkin::Plugin') ) {
             eval {
-                $prefs->get('material_action')
-                    ? Plugins::ListenLater::Plugin::_writeMaterialActions()
-                    : Plugins::ListenLater::Plugin::_clearMaterialActions();
+                if ( $prefs->get('material_action') ) {
+                    Plugins::ListenLater::Plugin::_registerMaterialActions();
+                    Plugins::ListenLater::Plugin::_writeMaterialActions();
+                }
+                else {
+                    Plugins::ListenLater::Plugin::_clearMaterialActions();
+                }
                 1;
             } or $log->error("LL: settings-page Material action rewrite failed: $@");
         }

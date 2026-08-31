@@ -252,6 +252,13 @@ Anything foreign keeps the file alive, so "remove ours" and "leave theirs alone"
 - `$departing` (uninstall/disable) forces both to empty — 0.1.108's rule, unchanged: on the way
   out there is no next run to protect, so nothing may be stranded.
 
+**Turning the pref ON mid-run REGISTERS (0.1.111).** `Settings::handler` mirrors
+`postinitPlugin` exactly — register, then write. It used to only write, on the belief that
+registering outside postinit was unsafe; `$REGISTERED` is the per-run latch that makes it safe,
+and it is FALSE in exactly this case because the pref being off at startup is what stopped
+postinit registering. On tier 2 that belief was fatal: with no file write left, ticking the box
+did nothing at all until a server restart.
+
 **Ordering: registration comes FIRST, in the same run.** The file empties are load-bearing until
 the equivalent sections are registered. `postinitPlugin` and the deferred pass both call
 `_registerMaterialActions` before the write/prune, long before any client fetches either list, so
@@ -2151,6 +2158,56 @@ The "Add to Listen Later"/"Add to Wish List" custom actions appear on streaming 
 
   Podcast `CACHE_VER` bumped 14 -> 15 with the build per the dev-build cache rule; nothing here
   parses a feed, so it is hygiene, not a fix.
+
+- **0.1.111 — on Material >= 6.4.8, ticking "Add to Material context menus" ON did nothing
+  until a restart. Reported from the live box, one release after 0.1.110 shipped it.**
+
+  `Settings::handler` only ever called `_writeMaterialActions`, on a comment that claimed the
+  save "cannot register — `registerCustomAction` has no de-dupe and no unregister, so it runs
+  once per server run, in postinit", and that the FILE write was "precisely why turning it on
+  mid-run works at all". Both halves stopped being true the moment tier 2 removed the file
+  write: the prune writes only refused entries, so the save wrote nothing AND registered
+  nothing. Dead toggle.
+
+  **The premise was wrong, not just outdated.** `$REGISTERED` IS the de-dupe — a per-run latch —
+  and it is FALSE in exactly the case this branch exists for, because the pref being off at
+  startup is what sent `postinitPlugin` down its `elsif` without registering. There was never
+  anything to double. The save now mirrors postinit on every tier: register, then write.
+
+  **Tier 1 changes shape too, for the better.** It used to write all 16 entries to the file;
+  now the 12 positives register and only the client-resolved half stays in the file — the
+  normal tier-1 split, reached a different way. Registering is also the better half to land
+  late: the `plugin-actions` CLI query is not browser-cached, where `customactions.json` is
+  (0.1.57). Either way the user needs a Material reload, not a restart.
+
+  **MISDIAGNOSIS, recorded so it is not repeated: the `actions.json` on the box is NOT ours.**
+  The report was "ticking it on created an actions.json, which we are supposed to be getting
+  away from". Checked live rather than reasoned about — the served `/material/customactions.json`
+  holds exactly two sections, Discography's `artist` and Album Booklet's `track`, and no Listen
+  Later entry anywhere; `material_owned_cats` is `[]`, i.e. the prune ran to completion. The
+  file exists because two OTHER plugins write it, and LL correctly left it alone — that is the
+  prune's only-ours/only-empty rule working, not failing. **Tier 2 itself was verified healthy
+  in the same query**: `["material-skin","plugin-actions"]` returns 38 sections — all ten
+  populated LL ones including `track`, `queue-track` and `podcasts-*` (the tier-2 fold), every
+  empty suppressor, `bbcsounds-*` proving the +60s deferred pass registered a late-discovered
+  radio command, and **no nulls anywhere**, which is the 6.4.6/6.4.7 hazard confirmed absent on
+  6.4.9.
+
+  **The live probes that settled it, worth reusing** (no SSH, and `log.txt` was useless — the
+  tail was flooded by another plugin):
+  `curl -s http://plex:9000/material/customactions.json` for what the file actually serves, and
+  `["material-skin","plugin-actions"]` over `jsonrpc.js` for what is registered. Between them
+  they distinguish "our entries are in the file" from "a file exists" — which is the whole
+  question, and one the log could not answer.
+
+  Six checks in `t_material_actions.pl`, and **two existing tier-1 assertions were REWRITTEN
+  because they encoded the defect**: they demanded the save write the full set to the file and
+  register nothing ("without registering behind postinit's back"). That is the repo's own rule
+  about a suite arguing for a bug, hit from the inside. **814 checks across 12 suites**, up
+  from 806. Anti-tested: reverting the save to write-only fails 6, including the live symptom
+  (`ticking it ON registers the whole set there and then -> got '0'`).
+
+  Podcast `CACHE_VER` bumped 15 -> 16 with the build per the dev-build cache rule.
 
 ## Regression tests — RUN THESE BEFORE ANY BUILD (added 2026-07-29)
 
