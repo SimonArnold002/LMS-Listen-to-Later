@@ -2344,9 +2344,28 @@ The "Add to Listen Later"/"Add to Wish List" custom actions appear on streaming 
   to read an id from), which still works off the album+artist names Spotty does publish.
   Every other path carries the id and replays exactly.
 
-  **Verified against Spotty v4.62.2 source and the test suite only — NOT run against a
-  live Spotty install** (Spotty is not on the test server). The rebuild path, the
-  search fallback's encoding, and the release-type classification are all source-derived.
+  **VERIFIED LIVE 2026-09-02** against Spotty v4.62.2 on the test server, from two real
+  Material adds (`log.txt` + the rendered rows over `jsonrpc.js`):
+  - a playlist add with `svc=spotty` → source `spotify` (the `%SVC_ALIAS` fold) and
+    `playlist_id` extracted;
+  - an album add with **`svc=` EMPTY** — the row carried no browse command, so the source
+    came from the favurl SCHEME. That is exactly the path the normalisation fixes: before
+    it, this fell through to the cover sniff, still guessed `spotify` from `i.scdn.co`, and
+    **silently lost the album id**, leaving a row that replays by fuzzy search. The log
+    printing `spotify://album:…` is itself the proof normalisation ran, since Spotty can
+    only ever emit `spotify:album:…`;
+  - the row rendering as **"Blondie – Parallel Lines (1978)"** from an add whose `artist=`
+    was BLANK — i.e. `_backfillStreamingArtist`'s Spotify branch called `$api->album` with
+    the URI rebuilt from the stored id and got an answer. That is the same
+    `API::album` + URI mechanism `_streamingAlbumNode` replays through, so **the URI
+    reconstruction is confirmed correct** — a bare id returns nothing there;
+  - `rel=album` settled at insert, so `classifyRelType`'s Spotify branch answered too.
+
+  **Still NOT observed directly:** audio. Spotify blocks playback on this rig entirely —
+  see [[spotify-playback-blocked-on-test-rig]]; metadata and artwork arrive and the clock
+  never moves. That is a Spotify restriction, not a plugin fault, and it is why every check
+  above is an API/tracklist check rather than a play. Never verify a Spotify adapter by
+  playing something. Also unobserved: the accented-artist `query_enc` case.
 
 
 ## Regression tests — RUN THESE BEFORE ANY BUILD (added 2026-07-29)
