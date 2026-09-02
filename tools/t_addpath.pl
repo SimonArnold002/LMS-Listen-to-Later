@@ -267,9 +267,14 @@ section('a year the ADD did not carry is filled in before the row is stored');
     my $r = add(name => 'Open Soul', artist => "Tomorrow's People", svc => 'qobuz',
                 favurl => 'qobuz://album:zzz3');
     is('no year: still stored',          (defined $r ? 'yes' : 'no'), 'yes');
-    # NB the apostrophe normalises to a SPACE ("tomorrow s people"), not away — DB::_norm
-    # replaces every non-alphanumeric run with one. Pinned here so it can't drift silently.
-    is('...keyed without one',           $r->{dedupe_key}, 'tomorrow s people|open soul|');
+    # THE APOSTROPHE ELIDES — "tomorrows people", not "tomorrow s people" (LL 0.1.112,
+    # fleet matcher sync). This assertion previously pinned the OPPOSITE, deliberately
+    # and with a note saying so, and it is what caught the fold change: an apostrophe
+    # used to become a SPACE like any other non-alphanumeric run, which split "Tomorrow's"
+    # into two tokens and made `_artistMatch`'s token-subset test unable to reconcile it
+    # with the plain "Tomorrows People" spelling — so Played never marked the record.
+    # Still pinned, now to the new contract, so the next change is just as loud.
+    is('...keyed without one',           $r->{dedupe_key}, 'tomorrows people|open soul|');
 }
 
 section('the EXACT favurl ListenBrainz Fresh Releases 0.9.144 emits');

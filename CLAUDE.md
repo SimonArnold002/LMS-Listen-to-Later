@@ -42,8 +42,17 @@ does not cover. Say which ledger entry you are challenging and what changed.
   A saved streaming item replays with EMPTY artist metadata (0.1.66), so an empty
   artist must match. The pins live in
   `../LMS-ListenBrainz-New-Releases/tools/matcher_sync_check.py` (`_norm`,
-  `_albumMatches`, `_artistMatch`) and the check passes them as documented
-  variants. Do not "fix" the leniency.
+  `_albumMatches`, `_artistMatch`, plus `DB::_norm` under the `LLDB` tag) and the
+  check passes them as documented variants. Do not "fix" the leniency.
+  **What is NO LONGER a variant (0.1.112): the FOLD.** LL took the fleet's
+  apostrophe elision and ~90-entry `%FOLD`, so all four repos now agree about what
+  a NAME is; what stays LL-only is the punctuation pass and the lenient gates.
+  **The compound-word tier was deliberately NOT taken** — it only reaches LL's
+  replay gate, where `_bestMatches` re-ranks afterwards. Don't report its absence.
+- **LL has THREE normalisers and they must not be unified** — `Sources::_norm`
+  (fuzzy gate, strips all parens), `Sources::_normStrict` (replay ranker, keeps
+  "(LP4)"), `DB::_norm` (dedupe key, keeps qualifiers). They share `DB::foldLatin`
+  and differ only after it. Unifying any pair breaks either the key or the gate.
 - **An ASSERTED release type inserts immediately and corrects in the background.**
   Only an UNKNOWN type blocks the add. This is a settled UX call: a visible delay
   on every add is worse than a type that self-corrects seconds later.
@@ -76,9 +85,11 @@ does not cover. Say which ledger entry you are challenging and what changed.
 
 ### B. KNOWN-OPEN AND ACCEPTED — do not re-report as new
 
-- **`matcher_sync_check.py` exits 1 fleet-wide.** A known, deliberate hold while
-  DSC's provisional `_albumMatches` alias pass proves in the field. LL's own
-  copies are pinned variants and pass. Not a regression here.
+- ~~**`matcher_sync_check.py` exits 1 fleet-wide.**~~ **CLOSED 2026-09-02** — the
+  hold was lifted, the sync ran repo by repo (PFR 0.9.33, LBF 0.9.194, LL 0.1.112),
+  and the check **exits 0**. A non-zero exit is a real finding again. LL's three
+  matcher subs are still pinned variants, and `DB.pm` is now scanned too (tag
+  `LLDB`) so LL's copy of `%FOLD` is under the same alarm.
 
 - **The `//` on `$t->albumname` is NOT a defect — SETTLED 2026-08-27 against the LMS source.
   Do not re-raise it.** The finding was that the line uses `//` where its neighbours use
@@ -2212,6 +2223,88 @@ The "Add to Listen Later"/"Add to Wish List" custom actions appear on streaming 
 
   Podcast `CACHE_VER` bumped 15 -> 16 with the build per the dev-build cache rule.
 
+- **0.1.112 — LL joins the fleet matcher sync, and because `DB::_norm` builds a STORED
+  key rather than a cache key, it comes with a MIGRATION.**
+
+  DSC/PFR/LBF took three Discography-origin rules; LL takes **two** — apostrophe elision
+  (+ the `'n'` guard) and the ~90-entry `%FOLD`. The compound-word collapse was
+  deliberately skipped: it only reaches the replay gate, where `_bestMatches` re-ranks
+  afterwards.
+
+  **WHY THIS WAS PARKED, and what actually made it safe.** LL's shape is the reason the
+  memory note said "a rewrite, not a copy". It has THREE normalisers, and the fleet check
+  only ever saw one of them:
+
+  | sub | job | changing it |
+  |---|---|---|
+  | `Sources::_norm` | fuzzy match gate | live only |
+  | `Sources::_normStrict` | replay ranker | live only |
+  | **`DB::_norm`** | **dedupe_key — UNIQUE, on every row** | **data migration** |
+
+  In the other three repos `_norm` feeds caches, so a fold change is a cache bump. Here it
+  rewrites stored identity. The two are genuinely separate subs and never meet, which is
+  what makes the live half free — and what makes the stored half unavoidable.
+
+  **What LL actually gained.** `_artistMatch` is an exact-token SUBSET test, so a playing
+  "Jane's Addiction" (`jane s addiction`) against a saved "Janes Addiction"
+  (`janes addiction`) shared no token for `janes` and **the row silently never moved to
+  Played** — LL's core feature, failing the way it failed in DSC and LBF. Accents were
+  worse here than anywhere else: `[^a-z0-9]+ -> ' '` turned every non-ASCII letter into a
+  SPACE, so "Sigur Rós" keyed `sigur r s`, shattered into single-letter tokens.
+
+  **THE FOLD LIVES IN `DB.pm`, NOT WITH THE MATCHER, and the reason is asymmetric damage.**
+  Both are leaf modules (neither requires the other), so one has to reach the other at
+  runtime through `->can` — which means one of them has a FALLBACK path. On the live
+  matching path a fallback is a worse match, discarded at the end of the request; on the
+  dedupe-key path it would write a wrong key into a UNIQUE column, permanently, and the row
+  would be invisible to every later lookup. So the authority sits with the irreversible
+  consumer: `DB::_norm` calls `foldLatin` directly, `Sources` reaches it via `->can`.
+  Pinned by `t_refold.pl` §5, because the failure it prevents is a permanent wrong key
+  rather than anything a passing call would show.
+
+  **THE MIGRATION (`_migrateRefold`, `user_version` 5) — the collision policy is the
+  design.** Every key written under the old fold is stale, and a stale key is INVISIBLE:
+  `add()` stops deduping against it, Played's lookups stop finding it. Rows are GROUPED by
+  their new `(source, key)` and each group settled as a unit — a per-row loop also collides
+  transiently against rows it has not reached yet, so the constraint error tells you
+  nothing about whether a real duplicate exists.
+  - **Same status across the group** → genuinely one album saved twice under two spellings.
+    Collapse into the EARLIEST save, carrying play history, resolved counts, release type
+    and — importantly — **the loser's `ref` if the survivor has none**, since that is what
+    makes a row replayable at all.
+  - **Mixed status** (one `later`, one `played`, one Wish List) → **LEFT ALONE on their old
+    keys**, with a WARN naming the ids. Collapsing would have to silently pick a list for
+    the user: resurrect something finished with, or mark something still queued. An old key
+    costs one un-deduped row — visible and reversible by hand; guessing costs a list entry
+    that vanishes unexplained. **Nothing is ever deleted without a same-status twin.**
+  - **Playlists keep their identity segment verbatim.** A playlist's identity is the
+    service's own id in the `|p:<source>:<id>` tail, which cannot be rebuilt from any
+    column — only the title segment is re-folded.
+  - Idempotent, and LAST in the ladder on purpose: it recomputes keys from stored columns,
+    so it must run after the migrations that change what a key is built FROM (0.1.43's year
+    segment, 0.1.71's artist-prefix cleanup).
+
+  **Two existing fixtures broke and were REWRITTEN rather than renumbered**, which is what
+  they were for: `t_addpath.pl` pinned `'tomorrow s people|open soul|'` with a note saying
+  the apostrophe becomes a space "so it can't drift silently" — it caught this exactly as
+  intended and now pins the elided form; `t_db.pl` pinned the ladder height at 4.
+
+  **TESTS.** New `tools/t_refold.pl`, **52 checks**: the fold in all three normalisers, the
+  three punctuation passes still differing where they should, the lenient gates untouched,
+  and the migration end to end against real SQLite (rekey, same-status merge with the ref
+  carried across, mixed-status left alone, track and playlist identity segments, and
+  idempotence). **Anti-tested five ways — 15 / 7 / 5 / 8 / 3 red.** The `->can`-miss mutant
+  is the informative one: 5 red on the LIVE path while every §4 migration assertion stays
+  GREEN, which is the asymmetry that put the table in `DB.pm`.
+
+  **Fleet:** `matcher_sync_check.py` **exits 0**; LL's `_norm` re-pinned
+  `92c2a19a0832 → a054575b2b5b`, and `ListenLater/DB.pm` is now scanned as its own tag
+  (`LLDB`) so LL's `%FOLD` is compared — it hashes `3b0d43f368e9`, byte-identical to
+  DSC/LBF/PFR — with `DB::_norm` pinned as the deliberate variant it is.
+
+  **No cache bump** (LL matches live; the stored half is the migration). Podcast
+  `CACHE_VER` bumped with the build per the dev-build cache rule.
+
 ## Regression tests — RUN THESE BEFORE ANY BUILD (added 2026-07-29)
 
     sh tools/t_all.sh          # one line per suite, non-zero exit on any failure
@@ -2242,6 +2335,7 @@ session scratchpads and are gone — so nothing carried forward. Anything worth 
 | `t_prefs_migration.pl` | 0.1.94's pref migrations and the rule that makes them one-shot: that a leading-underscore pref cannot be stored at all (pinning the stub against `Slim::Utils::Prefs::Base::set` — if that assertion ever passes with a value, every other one here stops meaning anything), that the rebrand copy runs once and never reverts a later choice, that an install which already ran the broken copy isn't copied over again, and that the threshold bump re-applies exactly once. Runs the two migrations in the real startup order — the ordering IS the bug — for both an install that carries a pre-rebrand namespace and one that doesn't. **A real user's box is the second shape**: the rebrand landed in 0.1.25 and the first release was tagged v0.1.69, so no installed copy ever wrote a `plugin.listentolater` pref and the copy has nothing to import. `reset_prefs` seeds that namespace (Simon's dev box, the only one that ran the pre-rebrand code); `reset_prefs_no_legacy` doesn't — pick the one that matches the install you mean, or an assertion proves the wrong thing |
 | `t_material_actions.pl` | 0.1.95's delivery split: that the six SERVER-resolved positive categories are REGISTERED with Material (6.4.6+) and no longer written to actions.json while `track`/`queue-track` stay in the file (0.1.97), that nothing registered is also left in the file (the merge is additive — a leftover means every "Add" shows twice), that registration happens exactly ONCE across a re-register, a Settings save and the deferred radio write, that the suppressors and `podcasts-*` stay in the file where Material can actually see them, that an older Material still gets the byte-identical file it always did, and that a third party's entries in a category we vacated survive. Plus the FAILURE path: a `registerCustomAction` that dies falls back to the file (all of it, or exactly the refused sections on a partial failure — never both places), and a file write with no registration behind it (the pref switched on mid-run) writes the full set. Plus the SETTINGS save itself, driven through `Settings::handler` with `debug_log` OFF (0.1.97): turning `material_action` off clears the file half on the save and warns about the registered half, turning it back on restores `track`/`queue-track` without re-writing anything Material already took, and turning it on when nothing registered writes everything. And the 0.1.98 rule that the OFF save must obey: while entries are still registered, the empty suppressors (ours and the radio ones) STAY and stay EMPTY — deleting them while the `online-*` pair cannot be withdrawn ADDS "Add" to our own rows instead of removing it — including on the path that rule was written for and originally missed, **the file being GONE**, where all three families have to be RE-CREATED rather than preserved. And the same rule from the other side for the one category that is ours, file-only AND per-app: with nothing registered, `podcasts-*` is DELETED rather than left as an empty husk — including for a user who has since unsubscribed from every feed, the state `_materialActionSet` can no longer name — because an empty per-app override hides Add on the Podcasts app for good; with entries still live it stays, and stays empty, for exactly the reason the radio empties do. Plus the 0.1.110 DELIVERY TIER, which needed `set_material_version()` because without a `getPluginVersion` stub every one of the previous 746 checks ran at tier 1 and could not reach the new code at all: the tier table (capability alone is never enough — the one-argument empty-section call pushes a null on 6.4.6/6.4.7), the folded action set, an upgrade from a file install ending with the file UNLINKED, a hand-written actions.json surviving verbatim — populated category, their own empty suppressor, and an entry titled like ours that is not ours — both refusal fallbacks (a refused positive and a refused empty section each reach the user through the file, and the file is created for them if it has gone), the deferred pass registering a late-discovered radio command without re-pushing anything, the pref off at STARTUP vs mid-run (only the latter has anything registered to suppress), the uninstall stranding nothing, and both downgrade steps rebuilding the file |
 | `t_material_matrix.pl` | the actions.json STATE MACHINE, as invariants rather than scenarios. Enumerates starting file x Material version x podcast subscriptions x user journey and drives real op SEQUENCES (boot on/off, Settings on/off, restarts), checking after EVERY step: **I1** a pref-OFF terminal leaves none of our entries, and with nothing registered none of our categories either; **I2** a foreign category — entries AND deliberate empty suppressors — is byte-identical before and after every operation; **I3** no EMPTY `<cmd>-album/-track` exists for a command we can replay (the 0.1.51 regression as a property); **I4** any journey ending pref-ON converges on the clean baseline, whatever route it took. Exists because the scenario suite is structurally blind to both halves of these bugs: they are TWO-TRANSITION (the clear pass writing `podcasts-*` empty is correct — it goes wrong at the next WRITE) and they live in the one untested cell of a 2x2, since every `$live` case in `t_material_actions.pl`'s podcast block subscribes a feed first. The invariants deliberately carry almost no vocabulary of "which categories are ours" — that list is the bug generator, so a test restating it would inherit the fault; the reference is a BASELINE from a clean run of the same config. I4 compares the MERGED file+registered view, not the file, or a Settings-save enable (which cannot register, so it delivers through the file by design) reads as drift. **A world must reset `%Slim::Utils::Prefs::VALUES`** — a pref written by one journey turns the next journey's "upgrade from an older build" case into an already-migrated one, silently hiding this exact bug class |
+| `t_refold.pl` | 0.1.112's fleet fold and the migration it owes: apostrophe elision (and the `'n'` guard) plus `%FOLD` in ALL THREE normalisers, that the three punctuation passes still differ where they must (the key keeps "(Deluxe)", the gate strips it, the ranker keeps "(LP4)"), that the lenient empty-artist gates are untouched, and `_migrateRefold` end to end against real SQLite — a stale key rewritten, same-status duplicates collapsed into the earliest save with the loser's `ref` carried across, MIXED-status rows left alone on their old keys, track `|t:` and playlist `|p:<svc>:<id>` identity segments preserved, and idempotence. Plus, at source level, that the fold lives in `DB.pm` and that `DB::_norm` calls it DIRECTLY while `Sources` goes through `->can` — the failure that guards is a permanent wrong key in a UNIQUE column, which no passing call can show |
 | `t_load.pl` | every shipped module compiles AND loads, plus a called-vs-defined sweep — `perl -c` passes on a call to a sub that doesn't exist, which nearly shipped a runtime crash in 0.1.83 |
 
 Two rules that follow from how this suite is built:
@@ -2660,10 +2754,22 @@ fallback helpers `_stripFmt`/`_asciiNorm`/`_punctNorm`/`_stripArtistPrefix`; LBF
 - `LMS-Discography/Discography/Sources.pm`
 - `LMS-Listen-to-Later/ListenLater/Sources.pm` (hash-pinned LENIENT variant — empty-artist
   saved-item replay must still match; do NOT blindly align it)
+- `LMS-Listen-to-Later/ListenLater/DB.pm` (tag `LLDB`, added 0.1.112) — LL's `%FOLD` lives
+  here, so it is compared like any other copy; the `_norm` also found here is the
+  DEDUPE-KEY normaliser, a different sub sharing the name, pinned as a variant
+- `LMS-Search-Hub/SearchHub/Text.pm` (tag `SH`) — **FROZEN and pinned**, on hold with no
+  development (Simon, 2026-08-29). It keeps the pre-sync `_norm` and the 10-entry `%FOLD`.
+  Pinned rather than removed from the comparison, so it still raises the alarm if it moves;
+  if it is ever unfrozen, take the fleet copy and DELETE its two pins
+
+**LL TOOK THE FOLD IN 0.1.112** — apostrophe elision + the ~90-entry `%FOLD` — so all four
+repos agree about what a NAME is. What stays LL-only is the punctuation pass and the lenient
+gates. **Its fold is in `DB.pm` because `DB::_norm` builds a STORED key**, so a change there
+is a MIGRATION, not a cache bump (see 0.1.112 and `_migrateRefold`).
 
 **THE RULE: a matching fix in ANY of these repos must be applied to ALL repos carrying the
 affected sub, in the SAME work session.** Enforcement — this must exit 0 before any matcher
-change is called done:
+change is called done (it does today; a non-zero exit is a real finding, not the old hold):
 
     python3 LMS-ListenBrainz-New-Releases/tools/matcher_sync_check.py
 

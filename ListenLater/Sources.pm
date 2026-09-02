@@ -1086,12 +1086,32 @@ sub _hasPodcastHandler {
     } ? 1 : 0;
 }
 
+# Latin folding + apostrophe elision, shared with DB::_norm and _normStrict so all
+# three normalisers agree about what a name is. It lives in DB.pm — see the block
+# comment there for why the authority sits with the durable-key consumer rather
+# than here with the rest of the matcher.
+#
+# Reached through ->can at RUNTIME so this leaf module gains no compile-time
+# dependency on DB.pm (neither requires the other; Plugin.pm loads both at init,
+# long before any match runs). The fallback is a plain lc, which is what this sub
+# did before 0.1.112 — a degraded MATCH, thrown away at the end of the request.
+# That is the whole reason the table is not kept here: the same fallback on the
+# dedupe-key path would write a wrong key into a UNIQUE column, permanently.
+sub _fold {
+    my $f = Plugins::ListenLater::DB->can('foldLatin');
+    return $f ? $f->($_[0]) : lc($_[0] // '');
+}
+
 # Normalise for fuzzy MATCHING. NB: intentionally differs from DB::_norm — this one
 # also STRIPS "(…)"/"[…]" (deluxe/remaster/edition qualifiers) so a saved title
 # matches the service's variant. Don't unify it with DB::_norm, whose dedupe key
 # must keep those qualifiers distinct.
+#
+# FLEET MATCHER SYNC (LL 0.1.112): folding and apostrophe elision came across from
+# DSC/PFR/LBF; the LENIENT gates below (empty artist accepts — saved-item replay,
+# LL 0.1.66) are deliberately NOT aligned and stay pinned as an LL variant.
 sub _norm {
-    my $s = lc($_[0] // '');
+    my $s = _fold($_[0]);
     $s =~ s/\([^)]*\)//g;
     $s =~ s/\[[^\]]*\]//g;
     $s =~ s/[^a-z0-9]+/ /g;
@@ -1232,8 +1252,14 @@ sub libraryAlbumYear {
 # Like _norm but KEEPS distinguishing "(...)" content (e.g. "(LP4)") as words — only
 # quality/format qualifiers are dropped — so replay can tell same-base-title releases
 # apart. (_norm strips ALL parens: right for the fuzzy title GATE, but it collapses these.)
+#
+# FOLDED THE SAME WAY AS _norm (LL 0.1.112), and that is required rather than tidy:
+# _albumMatches gates a candidate with _norm and _bestMatches then RANKS the very
+# same candidate with this sub. If one folded "England's" and the other spaced it,
+# a title could clear the gate and then fail its own exact-title tier — the ranker
+# silently disagreeing with the gate about which release it is looking at.
 sub _normStrict {
-    my $s = lc($_[0] // '');
+    my $s = _fold($_[0]);
     $s =~ s/\((?:hi-res[^)]*|explicit|mono|stereo|album|track|remaster(?:ed)?[^)]*|deluxe[^)]*)\)//g;
     $s =~ s/[^a-z0-9]+/ /g;
     $s =~ s/^\s+|\s+$//g;

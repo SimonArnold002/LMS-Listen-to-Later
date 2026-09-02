@@ -159,6 +159,22 @@ SQL
             . "re-measured on the next play") if $n && $n ne '0E0';
         $h->do('PRAGMA user_version = 4');
     }
+    # 0.1.112: the fleet matcher sync gave DB::_norm Latin folding and apostrophe
+    # elision, and DB::_norm builds `dedupe_key`. Every key stored under the old fold
+    # is therefore stale — and a stale key is INVISIBLE, not merely untidy: add() would
+    # no longer dedupe against it and Played's lookups would no longer find it. Rewrite
+    # them, collapsing the duplicates the new fold merges. See _migrateRefold for the
+    # collision policy (same-status groups merge into the earliest save; mixed-status
+    # ones are left alone rather than guessing which list the user wanted).
+    #
+    # LAST in the ladder on purpose: it reads every row and recomputes its key, so it
+    # must run AFTER the migrations that change what a key is built from (0.1.43's year
+    # segment, 0.1.71's artist-prefix cleanup), or it would faithfully rekey rows that
+    # those passes are about to rewrite again.
+    if ($schemaVer < 5) {
+        _migrateRefold($h);
+        $h->do('PRAGMA user_version = 5');
+    }
     return;
 }
 
@@ -190,6 +206,138 @@ sub _addColumn {
 # REAL title genuinely is "<its own artist> - <rest>" with spaces is indistinguishable from
 # the pollution by stored content alone and is still stripped — vanishingly rare, and library
 # rows (where it's most plausible) are excluded outright.
+# One-off REKEY for the 0.1.112 fleet matcher sync. `DB::_norm` gained Latin folding
+# and apostrophe elision, and it builds `dedupe_key` — a UNIQUE column on every row —
+# so every stored key computed under the old fold is now wrong. A key nothing
+# recomputes the same way is invisible: add() would stop deduping against it and
+# Played's lookups would stop finding it. This is the migration the fold change owes.
+#
+# THE NEW FOLD MERGES KEYS THAT WERE DISTINCT, which is the point ("Jane's Addiction"
+# and "Janes Addiction" are one album) and also the whole difficulty — UNIQUE(source,
+# dedupe_key) has to be satisfied while collapsing them. Rows are therefore GROUPED by
+# their new (source, key) and each group settled as a unit, rather than updated one at
+# a time and catching the constraint error: a per-row loop also collides transiently
+# against rows it has not reached yet, so the error tells you nothing about whether a
+# real duplicate exists.
+#
+# COLLISION POLICY, and the asymmetry is deliberate:
+#
+#   • SAME STATUS across the group -> genuinely the same album saved twice under two
+#     spellings. Collapse into the EARLIEST-SAVED row (that is the save the user
+#     remembers making) and carry the play history and any resolved metadata across,
+#     so nothing learned about the release is lost. The others are deleted.
+#
+#   • MIXED STATUS (one 'later', one 'played', one in the Wish List) -> LEFT ALONE, on
+#     their OLD keys, with a WARN naming the ids. Collapsing would have to silently
+#     pick a list for the user: marking a Wish List item played, or resurrecting
+#     something they had finished with. An old key on a genuinely ambiguous pair costs
+#     one un-deduped row — visible, harmless, and reversible by hand — where guessing
+#     costs a list entry that vanishes without explanation. NOTHING IS EVER DELETED
+#     without a same-status twin to merge into.
+#
+# Idempotent: a second run recomputes the same keys, finds them already stored, and
+# changes nothing. Gated once on PRAGMA user_version regardless.
+sub _migrateRefold {
+    my ($h) = @_;
+
+    my $rows = eval {
+        $h->selectall_arrayref(
+            "SELECT id, source, kind, status, artist, album_title, track_title, year,
+                    dedupe_key, added_at, played_at, play_count, track_count, rel_type,
+                    artwork, ref_kind, ref_json
+               FROM albums",
+            { Slice => {} });
+    } or return;
+    return unless $rows && @$rows;
+
+    # A PLAYLIST key is not rebuildable from artist/album/year — its identity is the
+    # service's own id, which lives in the '|p:<source>:<id>' tail rather than in any
+    # column here. Re-normalise the TITLE segment and carry that tail across verbatim,
+    # so the one part that identifies the row cannot be disturbed by a fold change.
+    my %group;
+    for my $r (@$rows) {
+        my $new;
+        if (($r->{kind} || '') eq 'playlist' && $r->{dedupe_key} =~ /(\|p:.*)$/s) {
+            $new = '' . '|' . _norm($r->{album_title}) . '|' . '' . $1;
+        }
+        elsif (($r->{kind} || '') eq 'track' && length($r->{track_title} // '')) {
+            $new = dedupeKey($r->{artist}, $r->{album_title}, $r->{year}, $r->{track_title});
+        }
+        else {
+            $new = dedupeKey($r->{artist}, $r->{album_title}, $r->{year});
+        }
+        $r->{_new} = $new;
+        push @{ $group{ ($r->{source} // '') . "\0" . $new } }, $r;
+    }
+
+    my ($rekeyed, $merged, $skipped) = (0, 0, 0);
+    for my $g (values %group) {
+        # Untouched by the fold: nothing to do, and no group to settle.
+        next if @$g == 1 && $g->[0]{dedupe_key} eq $g->[0]{_new};
+
+        if (@$g > 1) {
+            my %status = map { ($_->{status} // '') => 1 } @$g;
+            if (keys %status > 1) {
+                $skipped += @$g;
+                $log->warn("Listen Later: refold would merge rows with different statuses ("
+                    . join(', ', map { "id $_->{id} [" . ($_->{status} // '?') . "]" } @$g)
+                    . ") — left on their old keys, merge by hand if you want them as one");
+                next;
+            }
+        }
+
+        # Earliest save wins; added_at can be NULL on a very old row, so sort those last
+        # rather than letting undef order arbitrarily.
+        my @sorted = sort { ($a->{added_at} // 9**15) <=> ($b->{added_at} // 9**15)
+                         || $a->{id} <=> $b->{id} } @$g;
+        my $keep = shift @sorted;
+
+        for my $lose (@sorted) {
+            $keep->{play_count} = ($lose->{play_count} // 0) > ($keep->{play_count} // 0)
+                                ? $lose->{play_count} : $keep->{play_count};
+            $keep->{played_at}  = $lose->{played_at}
+                if !defined $keep->{played_at}
+                || (defined $lose->{played_at} && $lose->{played_at} > $keep->{played_at});
+            for my $f (qw(track_count rel_type artwork year)) {
+                $keep->{$f} = $lose->{$f} if !defined $keep->{$f} && defined $lose->{$f};
+            }
+            # A ref is what makes a row REPLAYABLE, so a row that has one beats a row
+            # that does not — taken as a pair, since ref_kind describes ref_json.
+            if (!length($keep->{ref_kind} // '') && length($lose->{ref_kind} // '')) {
+                @{$keep}{qw(ref_kind ref_json)} = @{$lose}{qw(ref_kind ref_json)};
+            }
+        }
+
+        # Losers go FIRST, so the survivor's UPDATE cannot collide with a row that is
+        # about to be removed.
+        for my $lose (@sorted) {
+            eval { $h->do('DELETE FROM albums WHERE id = ?', undef, $lose->{id}); 1 }
+                or $log->warn("Listen Later: refold could not delete id $lose->{id}: $@");
+            $merged++;
+        }
+
+        eval {
+            $h->do('UPDATE albums SET dedupe_key = ?, played_at = ?, play_count = ?,
+                                      track_count = ?, rel_type = ?, artwork = ?, year = ?,
+                                      ref_kind = ?, ref_json = ?
+                     WHERE id = ?',
+                undef, $keep->{_new}, $keep->{played_at}, $keep->{play_count} // 0,
+                $keep->{track_count}, $keep->{rel_type}, $keep->{artwork}, $keep->{year},
+                $keep->{ref_kind}, $keep->{ref_json}, $keep->{id});
+            1;
+        } or do {
+            $skipped++;
+            $log->warn("Listen Later: refold could not rekey id $keep->{id}: $@");
+        };
+        $rekeyed++;
+    }
+
+    $log->info("Listen Later: dedupe-key refold — $rekeyed row(s) rekeyed, "
+             . "$merged duplicate(s) merged, $skipped left on the old key")
+        if $rekeyed || $merged || $skipped;
+    return;
+}
+
 sub _migrateArtistPrefix {
     my ($h) = @_;
     my $rows = eval {
@@ -216,13 +364,106 @@ sub _migrateArtistPrefix {
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
+# ---------------------------------------------------------------------------
+# LATIN FOLDING — SHARED BY ALL THREE NORMALISERS, AND IT LIVES HERE ON PURPOSE.
+#
+# LL has three normalisers in two LEAF modules (neither Sources nor DB requires
+# the other): DB::_norm builds the durable dedupe key, Sources::_norm is the fuzzy
+# match gate, Sources::_normStrict is the replay ranker. All three must fold the
+# same way or they disagree about what a name is.
+#
+# It sits in DB.pm rather than in Sources.pm with the rest of the matcher, and the
+# reason is asymmetric damage. Sources reaches this through `->can` at runtime (no
+# compile-time cycle between two leaf modules — the same pattern LBF's
+# API::_foldKey uses to reach Browse::_norm), and a `->can` that ever missed would
+# take a fallback path. In the LIVE matching path a fallback is merely a worse
+# match, thrown away at the end of the request. In the DEDUPE KEY path it would
+# write a DIFFERENT KEY into a UNIQUE column, permanently, and the row would then
+# be invisible to every later lookup. So the authority lives with the irreversible
+# consumer, and DB::_norm calls it DIRECTLY — never through ->can, never with a
+# fallback.
+#
+# (Fleet matcher sync, LL 0.1.112: the ~90-entry table is DSC/PFR/LBF's, verbatim.
+# LL previously had NO folding at all, and its `[^a-z0-9]` pass turned every
+# non-ASCII letter into a SPACE — so "Sigur Rós" keyed as 'sigur r s', shattered
+# into single-letter tokens, and `_artistMatch`'s token-subset test could never
+# reconcile it with the plain "Sigur Ros" spelling.)
+# ---------------------------------------------------------------------------
+my $HAVE_NFD = eval { require Unicode::Normalize; 1 } ? 1 : 0;
+my %FOLD = (
+    # ligatures and digraphs
+    "\x{e6}"  => 'ae', "\x{153}" => 'oe', "\x{df}"  => 'ss', "\x{fe}" => 'th',
+    "\x{133}" => 'ij', "\x{1c6}" => 'dz', "\x{1f3}" => 'dz', "\x{1c9}" => 'lj',
+    "\x{1cc}" => 'nj', "\x{223}" => 'ou', "\x{195}" => 'hv', "\x{1a3}" => 'oi',
+    # stroked / barred letters
+    "\x{f8}"  => 'o', "\x{111}" => 'd', "\x{142}" => 'l', "\x{127}" => 'h',
+    "\x{167}" => 't', "\x{180}" => 'b', "\x{19a}" => 'l', "\x{1e5}" => 'g',
+    "\x{23c}" => 'c', "\x{23f}" => 's', "\x{240}" => 'z', "\x{247}" => 'e',
+    "\x{249}" => 'j', "\x{24b}" => 'q', "\x{24d}" => 'r', "\x{24f}" => 'y',
+    "\x{1b6}" => 'z', "\x{2c65}" => 'a', "\x{2c66}" => 't', "\x{289}" => 'u',
+    "\x{268}" => 'i', "\x{275}" => 'o',
+    # hooked letters
+    "\x{253}" => 'b', "\x{188}" => 'c', "\x{256}" => 'd', "\x{257}" => 'd',
+    "\x{192}" => 'f', "\x{260}" => 'g', "\x{199}" => 'k', "\x{1ad}" => 't',
+    "\x{1a5}" => 'p', "\x{272}" => 'n', "\x{19e}" => 'n', "\x{288}" => 't',
+    "\x{28b}" => 'v', "\x{1b4}" => 'y', "\x{271}" => 'm',
+    # dotless, long-s, turned and archaic forms
+    "\x{131}" => 'i', "\x{17f}" => 's', "\x{140}" => 'l', "\x{138}" => 'k',
+    "\x{149}" => 'n', "\x{14b}" => 'n', "\x{1dd}" => 'e', "\x{259}" => 'e',
+    "\x{254}" => 'o', "\x{25b}" => 'e', "\x{25c}" => 'e', "\x{292}" => 'z',
+    "\x{250}" => 'a', "\x{26f}" => 'm', "\x{28a}" => 'u', "\x{26a}" => 'i',
+    "\x{283}" => 'sh', "\x{263}" => 'g', "\x{28c}" => 'v', "\x{280}" => 'r',
+    "\x{21d}" => 'g', "\x{1bf}" => 'w', "\x{1a8}" => 's', "\x{225}" => 'z',
+    "\x{221}" => 'd', "\x{234}" => 'l', "\x{235}" => 'n', "\x{236}" => 't',
+    "\x{237}" => 'j', "\x{f0}"  => 'd',
+);
+
+# Lowercase, decode, strip combining marks, fold the atomic letters NFD cannot
+# split, and elide apostrophes. Everything up to (not including) the punctuation
+# pass, which is where the three normalisers legitimately differ.
+sub foldLatin {
+    my $s = lc($_[0] // '');
+
+    # Input arrives as OCTETS from SQLite and as characters from a live request.
+    # Fold only what is valid UTF-8, and only adopt the decode if it succeeds —
+    # a latin-1 byte string is left exactly as it was.
+    if (!utf8::is_utf8($s) && $s =~ /[^\x00-\x7f]/) {
+        my $d = $s;
+        $s = $d if utf8::decode($d);
+    }
+    if ($HAVE_NFD && utf8::is_utf8($s)) {
+        $s = Unicode::Normalize::NFC(
+             Unicode::Normalize::NFD($s) =~ s/[\x{0300}-\x{036F}]+//gr );
+        $s =~ s/([^\x00-\x7f])/exists $FOLD{$1} ? $FOLD{$1} : $1/ge;
+    }
+
+    # APOSTROPHES ELIDE — they do NOT become a space. Every other mark the callers'
+    # punctuation passes handle SEPARATES words; an apostrophe sits INSIDE one.
+    # Spacing it keyed "Jane's Addiction" as 'jane s addiction' against 'janes
+    # addiction', and `Sources::_artistMatch` is an exact-token SUBSET test — so the
+    # token 'janes' matched nothing and Played never marked the record.
+    #
+    # GUARD — "'n'" contracting "and" joins two WORDS rather than sitting inside
+    # one. All three spellings of "Rock'n'Roll" agree today; eliding blindly would
+    # key the first 'rocknroll' and break a set that works. Space that form first.
+    my $apos = qr/['\x{2019}\x{2018}\x{02bc}\x{00b4}\x{2032}`]/;
+    $s =~ s/(?<=\w)${apos}n${apos}(?=\w)/ n /g;
+    $s =~ s/$apos//g;
+
+    return $s;
+}
+
 # Normalise for the dedupe KEY. NB: intentionally differs from Sources::_norm —
 # this one KEEPS parenthesised/bracketed text (only collapses non-alphanumerics),
 # so "Album (Deluxe)" and "Album" dedupe as distinct saves. Do NOT unify the two:
 # Sources::_norm strips "(…)"/"[…]" for fuzzy match tolerance, which is the opposite
 # of what a stable dedupe key needs.
+#
+# CHANGING THIS SUB CHANGES A STORED KEY. It is not a cache — dedupe_key sits in a
+# UNIQUE column on every row, so any edit needs a migration that rewrites existing
+# rows AND resolves the collisions the new fold creates. See _migrateRefold.
 sub _norm {
-    my $s = lc($_[0] // '');
+    my $s = foldLatin($_[0]);
     $s =~ s/[^a-z0-9]+/ /g;
     $s =~ s/^\s+|\s+$//g;
     return $s;
