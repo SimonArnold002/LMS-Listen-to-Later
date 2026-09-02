@@ -196,13 +196,14 @@ our %UNREGISTERED;       # cat => [ actions registerCustomAction refused ] — f
 our %REGISTERED_EMPTY;
 
 # Can we actually save AND replay an album from this source? Only the local library and
-# the streaming services with an adapter in Sources.pm (Qobuz/Bandcamp/Tidal, when their
-# plugin is installed). Everything else — Deezer, Spotify, BBC Sounds, radio stations,
-# any service we haven't added support for — would store a record that can never resolve
+# the streaming services with an adapter in Sources.pm (Qobuz/Bandcamp/Tidal/Deezer/Spotify,
+# each when its plugin is installed). Everything else — BBC Sounds, radio stations, any
+# service we haven't added support for — would store a record that can never resolve
 # to a playable album (it fails at play time with "Could not find this album to play"), so
 # we REJECT the add instead of storing junk. NB the test is adapter support, NOT whether a
-# favurl was supplied: Deezer sends a perfectly good `deezer://album:<id>` favurl and still
-# can't play, because there's no Deezer adapter. This is the one reliable gate — it runs on
+# favurl was supplied: a service can send a perfectly good `<scheme>://album:<id>` favurl
+# and still not play, if nothing here knows how to replay it — which is exactly what Deezer
+# and Spotify did before their adapters existed. This is the one reliable gate — it runs on
 # every add path regardless of which (often flaky) Material surface triggered it, which is
 # why we no longer try to scope the "Add" button itself per service.
 sub _isReplayableSource {
@@ -528,8 +529,11 @@ sub _clearMaterialActions {
 # 'radios' menu (e.g. Qobuz) is skipped by _unsupportedRadioCommands so its radio
 # rows keep "Add". BBC Sounds is dual-listed (apps + radios) but unsupported, so
 # it is NOT here and gets blocked wherever it shows.
+# NB these are browse COMMANDS, not source tags, and Spotify's differ: the Spotty plugin
+# registers `tag => 'spotty'` (its Plugin.pm:130) for the service everything else here
+# calls 'spotify' (Sources::%SVC_ALIAS folds the two).
 my %SUPPORTED_CMD = map { $_ => 1 }
-    qw(qobuz bandcamp tidal deezer listenbrainzfreshreleases listenlater);
+    qw(qobuz bandcamp tidal deezer spotty listenbrainzfreshreleases listenlater);
 
 # TuneIn's top-level radio categories are fetched ASYNC from mysqueezebox.com, so they
 # aren't in the 'radios' menu when the plugin initialises. But Material reads
@@ -595,11 +599,22 @@ sub _unsupportedRadioCommands {
 # reasoning, and the protection for a third party's file lives where it can actually be exact:
 # `_isOurAction` (no title guessing) and the prune's only-empty / only-ours / never-unlink-a-
 # non-empty-file rules.
+#
+# 'spotty' is excluded from the SEED alongside 'listenlater', for a different reason but the
+# same rule: the seed may only claim what LL can have written. It sweeps the husks left by
+# the 0.1.46-0.1.50 scoping experiments — and those wrote empty categories only for services
+# LL SUPPORTED (a per-service Add scope) and, via _radioSuppressorCats, for RADIO commands.
+# Spotty is a music service that has never been either: it was unsupported until Spotify
+# support was added, and it does not appear under 'radios'. So no pre-ledger install can
+# hold a spotty-album/-track husk of ours, and a seed that claimed them would be claiming
+# categories only somebody ELSE can have written — which the prune could then delete. A
+# service that is supported from the day it arrives needs no seed entry; the ledger records
+# its categories the first time we actually write them.
 sub _ownedCats {
     my $l = $prefs->get('material_owned_cats');
     return { map { $_ => 1 } @$l } if ref $l eq 'ARRAY';
     return { map { ("$_-album" => 1, "$_-track" => 1) }
-        'podcasts', grep { $_ ne 'listenlater' } keys %SUPPORTED_CMD };
+        'podcasts', grep { $_ ne 'listenlater' && $_ ne 'spotty' } keys %SUPPORTED_CMD };
 }
 sub _setOwnedCats { $prefs->set('material_owned_cats', [ sort keys %{ $_[0] } ]) }
 
@@ -2491,6 +2506,20 @@ sub _addCtxCommand {
     my ($favCover, $favBandcampUrl, $favArtist, $favYear, $favAlbum, $favRelType, $favTracks)
         = @{$priv}{qw(cover bandcamp_url artist year album rel_type tracks)};
 
+    # Spotify hands Material a bare Spotify URI ('spotify:album:<id>') where every other
+    # service sends a scheme url, and this plugin reads a favurl as a scheme url in four
+    # separate places — $favScheme below, and Sources' sourceFromUrl / favurlIsTrack /
+    # playlistFromRow. Normalising it to 'spotify://album:<id>' HERE, at the one point a
+    # favurl enters, means all four keep working unchanged instead of each growing a
+    # Spotify case; see Sources::normaliseFavurl for the full reasoning.
+    #
+    # Deliberately AFTER the strip, not before: _stripPrivateParams answers a different
+    # question (what did a sibling plugin pack into the query string) and should keep
+    # seeing exactly what the service sent. Running second also means the addctx log line
+    # just below prints the url the rest of this sub will actually work from. Every other
+    # service's favurl is returned byte-for-byte unchanged.
+    $p{favurl} = Plugins::ListenLater::Sources::normaliseFavurl($p{favurl});
+
     my $list = _wantedList($request->getParam('list'));
 
     $log->warn('LL: addctx params -> '
@@ -2559,11 +2588,12 @@ sub _addCtxCommand {
         # parent album is unknown → leave it to the '&al=' handshake (usually undef).
         my $album = defined $p{trackname} ? ($favAlbum // $p{name}) : $favAlbum;
         return _saveTrackRecord($request, $list,
-            # `svc` is only trusted when it NAMES a service (Sources::knownSource) — Material's
-            # $SERVICE is the browse command, which on a home shelf is the shelf id. Masked on
+            # `svc` is only trusted when it NAMES a service (Sources::sourceFromSvc) —
+            # Material's $SERVICE is the browse command, which on a home shelf is the shelf
+            # id, and for Spotify is 'spotty' rather than the service's own name. Masked on
             # this path today (a track row's favurl names its own source below), but the hole
             # is identical, so it's closed in both places.
-            source  => (Plugins::ListenLater::Sources::knownSource($p{svc}) ? lc $p{svc} : ''),
+            source  => Plugins::ListenLater::Sources::sourceFromSvc($p{svc}),
             # The RAW svc as well as the source it yielded: _saveTrackRecord's now-playing
             # fallback needs to know whether a container command arrived AT ALL, and a
             # non-service one (favorites, a home-shelf id) leaves `source` empty.
@@ -2668,7 +2698,7 @@ sub _addCtxCommand {
         # let the reject gate below refuse it, rather than guessing 'qobuz' and storing an
         # unplayable row.
         #
-        # `svc` must NAME a service to be believed (Sources::knownSource), not merely LOOK like
+        # `svc` must NAME a service to be believed (Sources::sourceFromSvc), not merely LOOK like
         # one. Material's $SERVICE is the browse COMMAND, and on a home shelf that command is
         # the home-extra id — so the stock Qobuz plugin's own "Qobuz" shelf sends
         # svc='QobuzExtrasqobuz' for exactly the rows the Apps menu sends svc='qobuz' for.
@@ -2677,7 +2707,7 @@ sub _addCtxCommand {
         # sitting in a static.qobuz.com URL, was never consulted and the add was rejected.
         # (Its hyphenated sibling shelves — QobuzExtrasnew-releases-full etc. — failed the
         # shape test and therefore worked, which is why this went unreported for so long.)
-        my $svc = Plugins::ListenLater::Sources::knownSource($p{svc}) ? lc $p{svc} : '';
+        my $svc = Plugins::ListenLater::Sources::sourceFromSvc($p{svc});
         $source = $svc || Plugins::ListenLater::Sources::sourceFromImage($artwork) || '';
         $ref    = { _svc => $source };
         # Qobuz browse rows carry no favurl/album id, but the cover URL embeds the album
@@ -2741,7 +2771,7 @@ sub _addCtxCommand {
         return _savePodcastEpisode($request, $list, \%p, $source);
     }
 
-    # Reject a source we can't replay (Deezer/Spotify/radio/…): don't store a record that
+    # Reject a source we can't replay (radio, BBC Sounds, anything unadapted): don't store a record that
     # would only fail at play time — reject it (silently) instead. This is the one reliable
     # gate, so we no longer bother hiding the Material "Add" button per service.
     return _rejectAdd($request, $source, $album) unless _isReplayableSource($source);
@@ -2885,11 +2915,11 @@ sub _finishAlbumAdd {
         _verifyRelease($request->client, $id, $rec, $source, $albumId);
     }
 
-    # Tidal/Deezer browse rows send no $ARTISTNAME (Material doesn't map their subtitle) and
-    # their cover URL has no artist/id — but the favurl gives the album id, so fetch the
-    # artist from the album's tracks in the background. Without it the row never auto-moves to
+    # Tidal/Deezer/Spotify browse rows can send no $ARTISTNAME (Material doesn't map their
+    # subtitle) and their cover URL has no artist/id — but the favurl gives the album id, so
+    # fetch the artist in the background. Without it the row never auto-moves to
     # Played (keys on source+artist+album). Fire-and-forget; only for a fresh artist-less add.
-    if ($id && !$already && ($source eq 'tidal' || $source eq 'deezer')
+    if ($id && !$already && ($source eq 'tidal' || $source eq 'deezer' || $source eq 'spotify')
             && (!defined $artist || !length $artist) && $albumId) {
         _backfillStreamingArtist($request->client, $id, $albumId, $source);
     }
@@ -3119,7 +3149,7 @@ sub _verifyRetryTick {
 # Fetch a streaming album's artist from its tracks and backfill it onto the saved
 # record. Some services' browse rows arrive with an empty $ARTISTNAME (Material doesn't
 # map their subtitle) and a cover URL with no recoverable artist/id — **Tidal and Deezer
-# both do this** — but the favurl carries the album id, so we fetch the album's tracks
+# both do this, and Spotify can too** — but the favurl carries the album id, so we fetch the album's tracks
 # (getAlbum → albumTracks → each rendered track's line2 = artist name) and update the
 # record. Without an artist the row shows album-only and never auto-moves to Played
 # (Played keys on source+artist+album). Both plugins' getAlbum share the same shape
@@ -3128,6 +3158,37 @@ sub _verifyRetryTick {
 sub _backfillStreamingArtist {
     my ($client, $recId, $albumId, $source) = @_;
     return unless $client && $recId && defined $albumId && length $albumId;
+
+    # Spotify goes its own way, and NOT for want of trying to share the path below. Its
+    # album node (Plugins::Spotty::OPML::album) does return the same {items=>…} tracklist
+    # shape, so it would slot into $getAlbum cleanly — but the artist is then read off the
+    # first track's line2, and Spotty builds that as "Artist \x{2022} Album" (OPML.pm:1170),
+    # not the bare artist name Tidal and Deezer put there. We'd be storing "Artist • Album"
+    # as the artist, and Played matches on it.
+    #
+    # Asking the API directly is both simpler and exact: the normalized album object carries
+    # a plain `artist` string (its cache fills it from artists[0] — API/Cache.pm normalize),
+    # so there is no string surgery and nothing to get subtly wrong. Same call
+    # Sources::classifyRelType makes; it only ever runs on a row that arrived artist-less.
+    if ($source eq 'spotify' && Plugins::Spotty::Plugin->can('getAPIHandler')) {
+        my $api = eval { Plugins::Spotty::Plugin->getAPIHandler($client) };
+        return unless $api && $api->can('album');
+        eval {
+            $api->album(sub {
+                my $album = shift;
+                return unless ref $album eq 'HASH';
+                my $artist = (defined $album->{artist} && !ref $album->{artist})
+                    ? $album->{artist}
+                    : (ref $album->{artists} eq 'ARRAY' && ref $album->{artists}[0] eq 'HASH')
+                        ? $album->{artists}[0]{name} : undef;
+                return unless defined $artist && length $artist;
+                Plugins::ListenLater::DB::updateArtist($recId, $artist);
+                $log->info("LL: backfilled spotify artist '$artist' onto rec $recId");
+            }, { uri => "spotify:album:$albumId" });
+            1;
+        } or $log->warn("LL: spotify artist backfill failed: $@");
+        return;
+    }
 
     my $getAlbum = ($source eq 'tidal'  && Plugins::TIDAL::Plugin->can('getAlbum'))  ? \&Plugins::TIDAL::Plugin::getAlbum
                  : ($source eq 'deezer' && Plugins::Deezer::Plugin->can('getAlbum')) ? \&Plugins::Deezer::Plugin::getAlbum

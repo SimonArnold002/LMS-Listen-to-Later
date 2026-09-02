@@ -228,6 +228,101 @@ is('undef favurl: no fields',            (grep { defined } values %$nout) ? 'som
 is('undef favurl: still undef',          $none{favurl}, undef);
 
 # ---------------------------------------------------------------------------
+section('Spotify URI normalisation (Sources::normaliseFavurl)');
+
+# Spotty sets favorites_url to a bare Spotify URI, with no '//' anywhere:
+#   album spotify:album:<id> | track spotify:track:<id> | playlist spotify:playlist:<id>
+# Every favurl reader in the plugin is anchored on '^(\w+)://', so until this sub runs a
+# Spotify album reads as source 'library', a Spotify track is not seen as a track, and the
+# album id sitting in the favurl is never captured. Asserted through the SHIPPED sub, and
+# then through the four readers that consume its output — asserting the rewritten string
+# alone would prove only that a regex ran, not that anything downstream now answers right.
+sub norm { Plugins::ListenLater::Sources::normaliseFavurl($_[0]) }
+
+is('album URI gains //',        norm('spotify:album:1DFixLWuPkv3KT3TnV35m3'), 'spotify://album:1DFixLWuPkv3KT3TnV35m3');
+is('track URI gains //',        norm('spotify:track:4uLU6hMCjMI75M1A2tKUQC'), 'spotify://track:4uLU6hMCjMI75M1A2tKUQC');
+is('playlist URI gains //',     norm('spotify:playlist:37i9dQZF1DXcBWIGoYBM5M'), 'spotify://playlist:37i9dQZF1DXcBWIGoYBM5M');
+is('artist URI gains //',       norm('spotify:artist:0OdUWJ0sBjDrqHygGUXeCF'), 'spotify://artist:0OdUWJ0sBjDrqHygGUXeCF');
+is('episode URI gains //',      norm('spotify:episode:512ojhOuo1ktJprKbVcKyQ'), 'spotify://episode:512ojhOuo1ktJprKbVcKyQ');
+# The legacy playlist form. Only the FIRST segment is rewritten; the 'playlist:<id>' tail
+# has to survive intact, because that tail is what playlistFromRow reads the id from.
+is('legacy user playlist form', norm('spotify:user:bob:playlist:37i9dQZF1DX'), 'spotify://user:bob:playlist:37i9dQZF1DX');
+
+# It must be inert on everything else. A false rewrite here would corrupt a working favurl.
+for my $other (
+    'qobuz://album:dmuizydvpcxsy', 'tidal://album:412345678', 'deezer://album:301234',
+    'bandcamp://album:1234567', 'qobuz://123456789.flac',
+    'spotify://album:already',                 # already normalised — must not double up
+    'spotify:unknowntype:xyz',                 # a type we do not judge is left alone
+    'notspotify:album:xyz',                    # anchored: only a whole Spotify URI matches
+) {
+    is("inert: $other", norm($other), $other);
+}
+is('undef is a no-op',          norm(undef), undef);
+is('empty string is a no-op',   norm(''), '');
+
+section('...and the readers that consume it now answer correctly');
+
+# sourceFromUrl: the album case that used to come back 'library'.
+is('album -> source spotify',   Plugins::ListenLater::Sources::sourceFromUrl(norm('spotify:album:abc')), 'spotify');
+is('track -> source spotify',   Plugins::ListenLater::Sources::sourceFromUrl(norm('spotify:track:abc')), 'spotify');
+
+# favurlIsTrack: containers no, audio yes — and NONE of these may reach the fail-open
+# branch, which logs a warning. The no-warnings check at the end of this file is what
+# actually enforces that, so these cases are deliberately run before it.
+is('album is not a track',      Plugins::ListenLater::Sources::favurlIsTrack(norm('spotify:album:abc')), 0);
+is('playlist is not a track',   Plugins::ListenLater::Sources::favurlIsTrack(norm('spotify:playlist:abc')), 0);
+is('artist is not a track',     Plugins::ListenLater::Sources::favurlIsTrack(norm('spotify:artist:abc')), 0);
+is('show is not a track',       Plugins::ListenLater::Sources::favurlIsTrack(norm('spotify:show:abc')), 0);
+is('legacy playlist not track', Plugins::ListenLater::Sources::favurlIsTrack(norm('spotify:user:bob:playlist:abc')), 0);
+is('track IS a track',          Plugins::ListenLater::Sources::favurlIsTrack(norm('spotify:track:abc')), 1);
+is('episode IS a track',        Plugins::ListenLater::Sources::favurlIsTrack(norm('spotify:episode:abc')), 1);
+
+# playlistFromRow: both spellings must yield the same id, since _streamingPlaylistNode
+# rebuilds the short URI from it either way.
+{
+    my ($src, $pid) = Plugins::ListenLater::Sources::playlistFromRow(norm('spotify:playlist:37i9dQZF1DX'), undef);
+    is('playlist row -> source',  $src, 'spotify');
+    is('playlist row -> id',      $pid, '37i9dQZF1DX');
+    my ($src2, $pid2) = Plugins::ListenLater::Sources::playlistFromRow(norm('spotify:user:bob:playlist:37i9dQZF1DX'), undef);
+    is('legacy row -> source',    $src2, 'spotify');
+    is('legacy row -> same id',   $pid2, '37i9dQZF1DX');
+}
+
+# The album-id capture in _addCtxCommand is a plain '(?:[:/])album:(…)' match on the
+# favurl. It is generic, but it never ran on Spotify before, because the branch holding it
+# is guarded by a '^(\w+)://' scheme test. Pin that it now extracts the id.
+{
+    my ($aid) = norm('spotify:album:1DFixLWuPkv3KT3TnV35m3') =~ m{(?:[:/])album:([A-Za-z0-9._-]+)};
+    is('album id recovered from favurl', $aid, '1DFixLWuPkv3KT3TnV35m3');
+}
+
+# The strip runs BEFORE the normalise in _addCtxCommand, and a Spotify favurl carries no
+# handshake params (the sibling plugin leaves Spotify favurls undecorated, because Spotty's
+# own album:(.*) is greedy and would swallow one). Confirm the strip is a clean no-op on it.
+{
+    my ($sf, $su) = strip('spotify:album:1DFixLWuPkv3KT3TnV35m3');
+    is('strip leaves Spotify URI alone', $su, 'spotify:album:1DFixLWuPkv3KT3TnV35m3');
+    my @set = grep { defined $sf->{$_} } sort keys %$sf;
+    is('...and sets no field',           (@set ? join(',', @set) : 'none'), 'none');
+}
+
+section('the browse command -> source alias (Sources::sourceFromSvc)');
+
+# Spotty registers its menu under `tag => 'spotty'`, so Material's $SERVICE says 'spotty'
+# for a service every other part of this plugin calls 'spotify'.
+is("svc 'spotty' -> spotify",   Plugins::ListenLater::Sources::sourceFromSvc('spotty'), 'spotify');
+is("svc 'Spotty' -> spotify",   Plugins::ListenLater::Sources::sourceFromSvc('Spotty'), 'spotify');
+is("svc 'spotify' -> spotify",  Plugins::ListenLater::Sources::sourceFromSvc('spotify'), 'spotify');
+is("svc 'qobuz' unaffected",    Plugins::ListenLater::Sources::sourceFromSvc('qobuz'), 'qobuz');
+# The exact-match discipline knownSource is held to must survive the alias: a home-shelf id
+# still answers '' so the cover sniff gets its turn, rather than being matched loosely.
+is("home shelf id -> ''",       Plugins::ListenLater::Sources::sourceFromSvc('SpottyExtrasspotty'), '');
+is("'QobuzExtrasqobuz' -> ''",  Plugins::ListenLater::Sources::sourceFromSvc('QobuzExtrasqobuz'), '');
+is("'spottyfoo' -> ''",         Plugins::ListenLater::Sources::sourceFromSvc('spottyfoo'), '');
+is("undef -> ''",               Plugins::ListenLater::Sources::sourceFromSvc(undef), '');
+
+# ---------------------------------------------------------------------------
 section('no warnings emitted');
 is('warning count', scalar(@warnings), 0);
 printf "  warning: %s", $_ for @warnings;

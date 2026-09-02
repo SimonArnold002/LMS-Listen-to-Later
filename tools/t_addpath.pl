@@ -701,9 +701,14 @@ like('an empty title says so, rather than blaming the service',
      reject_line(kind => 'track', trackname => '', artist => 'Someone',
                  svc => 'qobuz', favurl => 'qobuz://12345.flac'),
      qr/rejected add — no track title \(source 'qobuz'\)/);
-like('an unreplayable source still reads exactly as it did',
-     reject_line(kind => 'track', trackname => 'A Track', svc => 'spotify',
-                 favurl => 'spotify://track:x'),
+# Spotify IS an adapted service now, so this case says something different than it used to:
+# it proves the ->can gate is still what decides. Spotty is not stubbed at this point in the
+# file (its stubs are declared further down, immediately before the Spotify section), so
+# _serviceCan finds no Plugins::Spotty::OPML::album and the add is refused — which is exactly
+# what must happen on a server where the user has no Spotty installed.
+like('an adapted service with its plugin ABSENT is still refused',
+     reject_line(kind => 'track', trackname => 'A Track', svc => 'spotty',
+                 favurl => 'spotify:track:x'),
      qr/rejected add — unsupported source 'spotify'/);
 
 # ---------------------------------------------------------------------------
@@ -753,6 +758,106 @@ $plPlay = Plugins::ListenLater::Played::_matchRecord(
     undef, FakeTrack->new(artist => '', album => 'Dance Pop'), 'tidal://12345.flac');
 is('...nor does an artist-less play',
    (defined $plPlay ? 'WRONGLY MATCHED' : 'no match'), 'no match');
+
+# ---------------------------------------------------------------------------
+section('Spotify — a bare Spotify URI must add exactly like a scheme url');
+#
+# Placed at the END of this file ON PURPOSE. Declaring the Spotty stubs here rather than with
+# the others at the top means every test ABOVE ran with Spotty absent — including the refusal
+# case in the rejection section, which proves the ->can gate still turns the service away when
+# the plugin is not installed. Both states are therefore covered by one file, in order.
+# The two node subs RECORD what they were handed, because the rebuild assertions at the end
+# of this section turn on the passthrough being exactly right — a node that plays once and
+# then loses its album on the next page open is the classic way an adapter passes review and
+# fails in use, and the only thing that catches it is checking what the coderef receives.
+our ($SPOTTY_ALBUM_ARG, $SPOTTY_PLAYLIST_ARG);
+{
+    no strict 'refs';
+    *{'Plugins::Spotty::OPML::album'} = sub {
+        my ($client, $cb, $params, $args) = @_;
+        $SPOTTY_ALBUM_ARG = $args;
+        $cb->({ items => [ map { { type => 'audio', url => "spotify://track:t$_" } } 1 .. 3 ] });
+    };
+    *{'Plugins::Spotty::OPML::playlist'} = sub {
+        my ($client, $cb, $params, $args) = @_;
+        $SPOTTY_PLAYLIST_ARG = $args;
+        $cb->({ items => [ { type => 'audio', url => 'spotify://track:p1' } ] });
+    };
+    *{'Plugins::Spotty::OPML::_albumItem'}      = sub { };
+    *{'Plugins::Spotty::Plugin::getAPIHandler'} = sub { undef };
+}
+
+# The album. Spotty sends 'spotify:album:<id>' with no '//', which before normaliseFavurl
+# read as source 'library' and dropped the id on the floor. Both halves are asserted,
+# because the id is what separates an exact replay from a fuzzy artist+album search.
+$r = add(name => 'Random Access Memories', artist => 'Daft Punk', svc => 'spotty',
+         favurl => 'spotify:album:4m2880jivSbbyEGAKfITCa?rt=album');
+is('a Spotify URI stores an album',      $r->{kind},          'album');
+is('...with source spotify, not library',$r->{source},        'spotify');
+is('...and the album id off the URI',    $r->{ref}{album_id}, '4m2880jivSbbyEGAKfITCa');
+
+# The track. Spotty's track favurl is 'spotify:track:<id>' while its PLAY url is
+# 'spotify://track:<id>' — the normalised form is byte-for-byte the play url, so the stored
+# ref needs no conversion. That equivalence is the whole reason the track leg is free.
+$r = add(kind => 'track', trackname => 'Get Lucky', artist => 'Daft Punk', svc => 'spotty',
+         favurl => 'spotify:track:69kOkLUCkxIZYexIgSG8rq');
+is('a Spotify track URI stores a track', $r->{kind},      'track');
+is('...with source spotify',             $r->{source},    'spotify');
+is('...and a playable spotify:// url',   $r->{ref}{url},  'spotify://track:69kOkLUCkxIZYexIgSG8rq');
+
+# The playlist, in both spellings Spotify uses. The legacy 'user:<name>:playlist:<id>' form
+# must land the same id as the modern one, because _streamingPlaylistNode rebuilds the SHORT
+# URI from whatever is stored and hands that to Spotty either way.
+$r = add(name => 'Discover Weekly', svc => 'spotty', favurl => 'spotify:playlist:37i9dQZEVXcQ9COmYvdajy');
+is('a Spotify playlist URI stores a playlist', $r->{kind},             'playlist');
+is('...with source spotify',                   $r->{source},           'spotify');
+is('...and the playlist id',                   $r->{ref}{playlist_id}, '37i9dQZEVXcQ9COmYvdajy');
+
+$r = add(name => 'Old Style List', svc => 'spotty', favurl => 'spotify:user:bob:playlist:37i9dQZEVXcLEGACY');
+is('the legacy playlist form also stores', $r->{kind},             'playlist');
+is('...and lands the same short id',       $r->{ref}{playlist_id}, '37i9dQZEVXcLEGACY');
+
+# An album row entered from the Spotify APP menu sends svc='spotty' — the browse command,
+# not the service name. Without the alias that is not a known source, and the add would fall
+# through to the cover sniff. Prove the name alone is enough, by giving it no cover at all.
+$r = add(name => 'Homework', artist => 'Daft Punk', svc => 'spotty',
+         favurl => 'spotify:album:2wart5Qjnvx1fd7LPdQxgJ?rt=album');
+is("svc 'spotty' resolves to source spotify", $r->{source}, 'spotify');
+
+# And the reverse of the earlier gate check: with Spotty present, the same shape that was
+# refused above now stores. Nothing but the ->can gate changed between the two.
+$r = add(kind => 'track', trackname => 'A Track', artist => 'Someone', svc => 'spotty',
+         favurl => 'spotify:track:x');
+is('the refusal above was the gate, not the shape', ($r ? $r->{source} : 'REFUSED'), 'spotify');
+
+# THE REBUILD TEST — replaying a STORED row, which is the check most likely to be skipped
+# and the one that catches a match that plays once and is then gone. Nothing above proves it:
+# an add can store a perfectly good id and still be unreplayable, because the id has to be
+# turned back into the service's own node with the shape that service expects.
+#
+# Spotty is unusually easy to get wrong here. Its album call reads a full URI out of
+# $params->{uri} — API::album does `$args->{uri} =~ /album:(.*)/`, so a BARE id (what every
+# other adapted service is handed) matches nothing and the replay silently returns an album
+# with no tracks. Assert the URI was rebuilt, not just that some node came back.
+$r = add(name => 'Discovery', artist => 'Daft Punk', svc => 'spotty',
+         favurl => 'spotify:album:2noRn2Aes5aoNVsU6iWThc?rt=album');
+my $spTracks;
+Plugins::ListenLater::Sources::resolveTracks(undef, $r, sub { $spTracks = shift });
+is('a stored Spotify album replays',        scalar(@{ $spTracks || [] }), 3);
+is('...through a rebuilt full album URI',   $SPOTTY_ALBUM_ARG->{uri}, 'spotify:album:2noRn2Aes5aoNVsU6iWThc');
+is('...and NOT a bare id',                  (($SPOTTY_ALBUM_ARG->{uri} // '') =~ /^spotify:album:/ ? 'uri' : 'bare id'), 'uri');
+
+# The playlist mirror, including the legacy row: whichever spelling was added, the SHORT
+# URI is what Spotty gets — its own getPlaylistUserAndId resolves the owner from its cache.
+my $plRec = add(name => 'Weekly', svc => 'spotty', favurl => 'spotify:playlist:37i9dQZREBUILD');
+my $spPl;
+Plugins::ListenLater::Sources::resolveTracks(undef, $plRec, sub { $spPl = shift });
+is('a stored Spotify playlist replays',     scalar(@{ $spPl || [] }), 1);
+is('...through a short playlist URI',       $SPOTTY_PLAYLIST_ARG->{uri}, 'spotify:playlist:37i9dQZREBUILD');
+
+my $lgRec = add(name => 'Weekly Legacy', svc => 'spotty', favurl => 'spotify:user:bob:playlist:37i9dQZLEG');
+Plugins::ListenLater::Sources::resolveTracks(undef, $lgRec, sub { });
+is('...and a legacy row rebuilds short too', $SPOTTY_PLAYLIST_ARG->{uri}, 'spotify:playlist:37i9dQZLEG');
 
 printf "\n%d passed, %d failed\n", $pass, $fail;
 exit($fail ? 1 : 0);

@@ -28,7 +28,47 @@ my %SCHEME = (
     bandcamp => 'bandcamp',
     tidal    => 'tidal',
     deezer   => 'deezer',
+    spotify  => 'spotify',
 );
+
+# Spotify speaks URIs, not urls — normalise one to the shape every other service sends.
+#
+# THE PROBLEM. Every other plugin hands Material a scheme url ('tidal://album:123'), and
+# this whole module is anchored on that: sourceFromUrl, favurlIsTrack and playlistFromRow
+# all open with '^(\w+)://', and Plugin::_addCtxCommand reads its $favScheme the same way.
+# Spotty's renderers set favorites_url to a bare Spotify URI instead —
+#   album     spotify:album:<id>        (OPML::_albumItem, verified v4.62.2 OPML.pm:1247)
+#   track     spotify:track:<id>        (trackList, OPML.pm:1183)
+#   playlist  spotify:playlist:<id>     (_playlistItem, OPML.pm:1463)
+# — with no '//' anywhere. So EVERY one of those tests failed on it: an album favurl read
+# as source 'library', a track favurl was not seen as a track, and the album id sitting
+# right there in the favurl was never captured (Plugin.pm's 'album:<id>' match never ran,
+# because the branch guarded by $favScheme was not entered).
+#
+# THE FIX, and why it is one line rather than five branches. Inserting the '//' turns a
+# Spotify URI into exactly the shape the generic code already understands, and every one
+# of those readers then answers correctly with no per-service test. It is also free on the
+# TRACK side: 'spotify://track:<id>' is not an invention, it is byte-for-byte the play url
+# Spotty itself builds ("'spotify://' . $track_uri", OPML.pm:1181), so a saved track row
+# stores a directly playable url with no conversion anywhere else.
+#
+# Applied at the ONE place a favurl enters the plugin (Plugin::_addCtxCommand, right after
+# the private handshake params are stripped) — but defined HERE, next to %SCHEME and the
+# readers it exists to satisfy, because "what does this service's url look like" is this
+# module's question. Anything else is returned untouched, so it is safe on every path.
+sub normaliseFavurl {
+    my ($u) = @_;
+    return $u unless defined $u && length $u;
+    # An explicit type list, not a blanket 'spotify:(\w+):'. Every one of these is a type
+    # favurlIsTrack knows how to judge (album/playlist/artist/show/user are containers,
+    # track/episode are audio), so normalising one can never hand the fail-open branch a
+    # shape it has to guess at. 'user' is in the list for the LEGACY playlist form,
+    # 'spotify:user:<name>:playlist:<id>': rewriting its first segment still leaves the
+    # 'playlist:<id>' tail for playlistFromRow's container match, which is unanchored.
+    # Anchored at the front, so it can only ever fire on a whole Spotify URI.
+    $u =~ s{^spotify:(?=(?:album|track|playlist|artist|episode|show|user):)}{spotify://};
+    return $u;
+}
 
 # ---------------------------------------------------------------------------
 # Source detection
@@ -54,11 +94,21 @@ sub favurlIsTrack {
     # A CONTAINER ref is decisive → not a track. 'album:' is the one the services actually
     # emit; the others cost nothing and stop a playlist/artist/mix row being replayed as a
     # single audio url.
-    return 0 if $u =~ m{(?:[:/])(?:album|playlist|artist|mix):};
+    # 'show'/'user' are here for Spotify: a show is a podcast CONTAINER, and 'user' opens
+    # the legacy 'spotify://user:<name>:playlist:<id>' form (whose 'playlist:' tail this
+    # same expression catches anyway — both spellings are covered, deliberately).
+    return 0 if $u =~ m{(?:[:/])(?:album|playlist|artist|mix|show|user):};
     # Explicit track shapes: a media-file extension (Qobuz .flac, Deezer .flc, Tidal
     # .flac/.m4a, …) or a '/track/' path (Bandcamp/SoundCloud).
     return 1 if $u =~ m{\.(?:flac|flc|mp3|m4a|mp4|aac|ogg|oga|opus|wav|alac|aiff?)(?:[?#].*)?$}i;
     return 1 if $u =~ m{/track/};
+    # Spotify says it in a container ref of its own rather than by extension or path:
+    # 'spotify://track:<id>' / 'spotify://episode:<id>' (Sources::normaliseFavurl inserted
+    # the '//'). Stated explicitly so the fail-open warning below stays a real signal —
+    # without this every Spotify track add would answer correctly but log a suspect.
+    # Placed AFTER the container test above, which must keep winning: an album drilled
+    # from Spotify carries 'album:' and is not a track, whatever else the url holds.
+    return 1 if $u =~ m{(?:[:/])(?:track|episode):};
     # Otherwise: for every service we support, an ALBUM favurl is either EMPTY or carries
     # 'album:' — so a remaining non-empty scheme url with neither is a track (e.g. an
     # extension-less tidal://<id>). This is a fail-OPEN default and nothing enforces the
@@ -126,6 +176,29 @@ sub knownSource {
     my ($s) = @_;
     return 0 unless defined $s && length $s;
     return $KNOWN_SOURCE{ lc $s } ? 1 : 0;
+}
+
+# Browse COMMANDS that name a service we know, but not by the name we call it. Material's
+# $SERVICE is the command a plugin registered its menu under, and one plugin's command is
+# not its service's name: Spotty registers `tag => 'spotty'` (Plugin.pm:130) for a service
+# whose source tag here — and in the url scheme, the cover host and every stored row — is
+# 'spotify'. Left unmapped, an add from the Spotify app menu is judged by knownSource,
+# correctly told "that is not a source name", and falls through to the cover sniff; that
+# happens to answer 'spotify' from scdn.co, so it works by luck rather than by knowing.
+# Say it instead, so a Spotify row with an unproxied or missing cover still lands right.
+my %SVC_ALIAS = ( spotty => 'spotify' );
+
+# The canonical source tag for a Material $SERVICE, or '' when the string does not name a
+# service at all. The one thing both add paths should ask: it folds the alias above and
+# then applies knownSource's exact-match discipline, so 'spotty' answers 'spotify' while a
+# home-shelf id ('SpottyExtrasspotty', 'QobuzExtrasqobuz') still answers '' and leaves the
+# cover sniff to decide — which is the behaviour 0.1.96 deliberately introduced.
+sub sourceFromSvc {
+    my ($s) = @_;
+    return '' unless defined $s && length $s;
+    my $lc = lc $s;
+    $lc = $SVC_ALIAS{$lc} if $SVC_ALIAS{$lc};
+    return knownSource($lc) ? $lc : '';
 }
 
 # Our OWN browse surfaces, by the command Material passes as $SERVICE: the plugin's list
@@ -674,6 +747,47 @@ sub classifyRelType {
             return if $ok;
         }
     }
+
+    # Spotify, the same deal as Qobuz and for the same reason: one album fetch answers the
+    # type (album_type), the count (total_tracks) and the year (release_date), so there is
+    # nothing to gain from resolving a tracklist as well. Its count is a catalogue count →
+    # provisional, exactly as above.
+    #
+    # THE ONE TRAP, and why no extra guard is written for it: Spotify has NO EP class — an
+    # EP comes back as album_type 'single'. That would matter a great deal if the assertion
+    # were taken at face value, because to this plugin 'single' means "exactly one track"
+    # and Played would mark a 5-track EP heard after its first track. It is already handled:
+    # _settle defers a claimed 'single' to the count whenever singleIsWrong says the count
+    # contradicts it, and the short-circuit below refuses to fire in exactly that case, so
+    # a 5-track "single" goes and proves itself against a real tracklist and settles as an
+    # EP. The generic machinery is stricter here than a hand-written total_tracks guard
+    # would be, so do not add one — it would only duplicate singleIsWrong less carefully.
+    if ($source eq 'spotify' && defined $albumId && length $albumId
+            && Plugins::Spotty::Plugin->can('getAPIHandler')) {
+        # getAPIHandler is a CLASS method on Spotty (Plugin.pm:317), unlike Qobuz's and
+        # TIDAL's function-form calls above — and it returns undef when the client has no
+        # Spotty account, which the guard below treats as "ask the tracklist instead".
+        my $api = eval { Plugins::Spotty::Plugin->getAPIHandler($client) };
+        if ($api && $api->can('album')) {
+            my $ok = eval {
+                $api->album(sub {
+                    my $album = shift;
+                    return _countThen($client, $rec, $claim, $cb) unless ref $album eq 'HASH';
+                    my $rt = $claim || _normRelType($album->{album_type});
+                    my $n  = albumTrackCount($album);          # total_tracks
+                    my $yr = serviceYear($album);              # release_date
+                    return $cb->(_settle($rt, $n), $n, 1, $yr) if $n && !singleIsWrong($rt, $n);
+                    _countThen($client, $rec, $rt, sub {
+                        my ($t, $c, $p) = @_;
+                        $cb->($t, $c, $p, $yr);
+                    });
+                }, { uri => "spotify:album:$albumId" });
+                1;
+            };
+            return if $ok;
+        }
+    }
+
     return _countThen($client, $rec, $claim, $cb);
 }
 
@@ -699,10 +813,21 @@ sub classifyRelType {
 # _searchService's Tidal/Deezer branches carry the counts, through the plugins' own public
 # search. That path isn't used here only because searching is the expense we're avoiding —
 # so these two names stay both verified and (via search) reachable without going private.
+#
+# SPOTIFY IS THE EXCEPTION to the paragraph above, and it is not a loophole in it: Spotty's
+# PUBLIC album call (API::album, reached through the same getAPIHandler its own OPML uses)
+# returns the album object itself, and its cache keeps `total_tracks`, `album_type` and
+# `release_date` on the way through (API/Cache.pm normalize, v4.62.2 — _removeUnused strips
+# only available_markets/href/external_urls/external_ids/type/copyright/label). So Spotify
+# joins Qobuz in answering type and count from one fetch, with nothing private touched.
+# Its count is a CATALOGUE count exactly like Qobuz's, and is flagged provisional the same
+# way. (The sibling ListenBrainz plugin found the same field on Spotify's SEARCH payload —
+# it is the one service whose search results carry a usable count.)
 sub albumTrackCount {
     my ($album) = @_;
     return undef unless ref $album eq 'HASH';
-    my $n = $album->{tracks_count} // $album->{nb_tracks} // $album->{numberOfTracks};
+    my $n = $album->{tracks_count} // $album->{nb_tracks} // $album->{numberOfTracks}
+         // $album->{total_tracks};
     return (defined $n && "$n" =~ /^\d+$/ && $n > 0) ? $n + 0 : undef;
 }
 
@@ -831,6 +956,20 @@ sub _streamingAlbumNode {
         $item{url} = \&Plugins::Deezer::Plugin::getAlbum;
         $item{passthrough} = [ { id => $albumId } ];
     }
+    elsif ($source eq 'spotify' && Plugins::Spotty::OPML->can('album')) {
+        # Spotty's album node lives in OPML, not Plugin (its Plugin.pm `use`s OPML, so the
+        # package is loaded whenever the service is), and it reads a full URI from
+        # $params->{uri} — NOT a bare id. API::album does `$args->{uri} =~ /album:(.*)/`
+        # (v4.62.2 API.pm:279), so handing it the id alone yields no match and an undef
+        # request path. Rebuild the URI from the stored id, which is exactly the id that
+        # match extracts, so the round trip is lossless.
+        #
+        # That regex is GREEDY to end-of-string, which is also why nothing may ever be
+        # appended here: a trailing '?…' would be swallowed into the id. The sibling
+        # ListenBrainz plugin leaves Spotify favurls undecorated for the same reason.
+        $item{url} = \&Plugins::Spotty::OPML::album;
+        $item{passthrough} = [ { uri => "spotify:album:$albumId" } ];
+    }
     else {
         return undef;
     }
@@ -871,6 +1010,16 @@ sub _streamingPlaylistNode {
         # Deezer's getPlaylist reads $params->{id}.
         $item{url}         = \&Plugins::Deezer::Plugin::getPlaylist;
         $item{passthrough} = [ { id => $playlistId, creatorId => '' } ];
+    }
+    elsif ($source eq 'spotify' && Plugins::Spotty::OPML->can('playlist')) {
+        # Spotty's playlist node reads a full URI from $params->{uri}, like its album one.
+        # It takes no creatorId: API::getPlaylistUserAndId (v4.62.2 API.pm:509) derives the
+        # owner from the URI, and for the short 'spotify:playlist:<id>' form we build here
+        # it falls back to the owner Spotty cached when it first rendered the list — so the
+        # short form is sufficient even for a list the legacy 'spotify:user:…:playlist:<id>'
+        # url originally named. No undef-warning workaround is needed on this service.
+        $item{url}         = \&Plugins::Spotty::OPML::playlist;
+        $item{passthrough} = [ { uri => "spotify:playlist:$playlistId" } ];
     }
     else {
         return undef;
@@ -997,6 +1146,58 @@ sub _searchService {
         return;
     }
 
+    # Spotify, via the Spotty plugin — an older, independent codebase, so almost every
+    # convention differs from the three branches above and each difference is load-bearing:
+    #
+    #  • getAPIHandler is a CLASS method (`->`, Plugin.pm:317), not the function-form call
+    #    Qobuz/TIDAL/Deezer use. It returns undef when this client has no Spotty account.
+    #  • the search key is `query`, not `search`, and `type` is SINGULAR 'album'
+    #    (API.pm:229). A wrong key here returns an empty list, not an error.
+    #  • it wants CHARACTERS, not octets: _prepareCall escapes with uri_escape_utf8
+    #    (API.pm:1293), so the octet-encoded $artistQuery built above — which is right for
+    #    the other three — would double-encode an accented name here and find nothing.
+    #    That is why the raw $artist is passed instead, and it is the first thing to check
+    #    if this branch ever comes back empty for a non-ASCII artist.
+    #  • the album TITLE is `name` (the others say `title`), and `artist` is a plain string
+    #    holding the first credit, alongside the full `artists` list.
+    #  • the renderer lives in OPML, not Plugin, and yields url => \&OPML::album with the
+    #    album URI in passthrough — the same node _streamingAlbumNode rebuilds from an id.
+    #
+    # Errors are indistinguishable from a clean miss here, and that is Spotty's design, not
+    # an omission: its Pipeline feeds an error hash to the same extractor a result goes
+    # through, so an outage arrives as the same empty arrayref a genuine zero-hit search
+    # does. Nothing downstream can tell them apart, so both end at _noMatch — which is the
+    # honest answer for a replay attempt, and costs only a retry on the next play.
+    if ($source eq 'spotify' && Plugins::Spotty::Plugin->can('getAPIHandler')
+                             && Plugins::Spotty::OPML->can('_albumItem')) {
+        my $api = eval { Plugins::Spotty::Plugin->getAPIHandler($client) };
+        return $cb->(_noMatch($client)) unless $api;
+        $api->search(sub {
+            my $albums = shift;
+            my @cand;
+            for my $a (@{ (ref $albums eq 'ARRAY') ? $albums : [] }) {
+                next unless ref $a eq 'HASH';
+                my $candArtist = (defined $a->{artist} && !ref $a->{artist}) ? $a->{artist}
+                    : (ref $a->{artists} eq 'ARRAY' && ref $a->{artists}[0] eq 'HASH')
+                        ? $a->{artists}[0]{name} : '';
+                next unless _albumMatches(_norm($artist), _norm($album), $candArtist, $a->{name});
+                # Guard the foreign renderer: we are inside an async callback, so a die
+                # here is caught by nothing — skip the bad candidate instead (the same
+                # treatment the sibling plugin gives every service's renderer).
+                my $item = eval { Plugins::Spotty::OPML::_albumItem($client, $a) };
+                if ($@ || ref $item ne 'HASH') {
+                    $log->warn("LL: Spotify _albumItem failed: $@") if $@;
+                    next;
+                }
+                my $cy = serviceYear($a)                      # release_date
+                      || _yearOf($item->{name}) || _yearOf($item->{line1}) || _yearOf($item->{line2});
+                push @cand, [ $item, $a->{name}, $cy ];
+            }
+            $cb->(_bestMatches(\@cand, $album, $recYear) || _noMatch($client));
+        }, { query => $artist, type => 'album', limit => 50 });
+        return;
+    }
+
     return $cb->(_noMatch($client));
 }
 
@@ -1055,6 +1256,10 @@ sub _serviceCan {
     return 1 if $source eq 'bandcamp' && Plugins::Bandcamp::Plugin->can('get_album');
     return 1 if $source eq 'tidal'    && Plugins::TIDAL::Plugin->can('getAlbum');
     return 1 if $source eq 'deezer'   && Plugins::Deezer::Plugin->can('getAlbum');
+    # Spotify's album node is Plugins::Spotty::OPML::album, not a Plugin method — probe the
+    # sub this plugin actually calls, per the adapter spec's R8, rather than the more
+    # familiar-looking Plugin->can(...) that nothing here would invoke.
+    return 1 if $source eq 'spotify'  && Plugins::Spotty::OPML->can('album');
     # A podcast EPISODE needs no service adapter at all — it's a single self-contained
     # enclosure url, stored podcast://-wrapped, and replay is a straight handoff to the
     # Podcast plugin's own protocol handler (which also keeps its resume-position
@@ -1074,6 +1279,7 @@ sub _serviceCanPlaylist {
     return 1 if $source eq 'qobuz'  && Plugins::Qobuz::Plugin->can('QobuzPlaylistGetTracks');
     return 1 if $source eq 'tidal'  && Plugins::TIDAL::Plugin->can('getPlaylist');
     return 1 if $source eq 'deezer' && Plugins::Deezer::Plugin->can('getPlaylist');
+    return 1 if $source eq 'spotify' && Plugins::Spotty::OPML->can('playlist');
     return 0;
 }
 
