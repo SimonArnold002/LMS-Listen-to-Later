@@ -82,6 +82,22 @@ does not cover. Say which ledger entry you are challenging and what changed.
   `_savePlaylistRecord` deliberately does not call `_finishAlbumAdd`.** Both are
   release semantics. `Browse::_albumTracks`'s write-back guard is therefore
   `kind eq 'album'` and NOT `ne 'track'` — that is the fix, not a typo.
+- **`_migrateRefold`'s merge sort puts a NULL `added_at` LAST, and that does not
+  contradict "earliest save wins" — DECLINED 2026-09-03.** The finding was that the
+  `9**15` sentinel sorts an unknown `added_at` as the NEWEST row, so the migration
+  keeps a timestamped sibling over a possibly-earlier NULL one. The comment states
+  the rule AND this exception in the same breath, and three things make LAST right.
+  (1) **Nothing can produce a NULL**: `add()` is the only INSERT and always passes
+  `time()`. (2) **Keeping the NULL row would be strictly worse.** The duplicate-collapsing
+  fold (the `for my $lose (@sorted)` loop just above the DELETEs — not a git merge)
+  carries `play_count`, `played_at`, `track_count`, `rel_type`, `artwork`, `year` and
+  the `ref` pair across — but NOT `added_at`, so a NULL survivor keeps NULL for ever
+  and `$SORT{added}` (`added_at DESC`) then files it unpredictably in "Recently added"
+  with nothing left to repair it from. Sorting NULL last is what protects that view.
+  (3) In an all-NULL group the `|| $a->{id} <=> $b->{id}` tiebreak keeps the lowest
+  id, which IS the earliest save — so the stated rule holds in every reachable case.
+  Don't "fix" the sentinel; if that fold is ever made to carry `added_at`, revisit
+  reason (2) first, because it is the only one that would change.
 
 ### B. KNOWN-OPEN AND ACCEPTED — do not re-report as new
 
