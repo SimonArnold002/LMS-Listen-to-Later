@@ -196,6 +196,26 @@ our %UNREGISTERED;       # cat => [ actions registerCustomAction refused ] — f
 # only ever ask for sections we have not asked for.
 our %REGISTERED_EMPTY;
 
+# How many entries per category the API half actually DELIVERED: what we built, minus what
+# registerCustomAction refused. ONE carrier, because "delivered" was written out three times and
+# two of the copies subtracted the caller's %fallback instead of %UNREGISTERED. That reads
+# correctly in _writeMaterialActions — there %fallback IS %UNREGISTERED — but _pruneMaterialActions
+# zeroes %fallback on the $departing / $prefOff paths as a WRITE-POLICY decision, and the copied
+# expression then reported every refused entry as registered: turning the pref off after a total
+# registration failure had the dump claim "plugin API", "registered sections = …", "streaming Add
+# active" and per-service "Add shown (via its own registered '<cmd>-album' section)" while nothing
+# was live at all. The refusal ledger is the only honest input here, so take it directly and never
+# let a caller pass a substitute.
+sub _deliveredCounts {
+    my ($positive) = @_;
+    my %n;
+    for my $cat (keys %$positive) {
+        my $d = scalar(@{ $positive->{$cat} }) - scalar(@{ $UNREGISTERED{$cat} || [] });
+        $n{$cat} = $d if $d > 0;
+    }
+    return %n;
+}
+
 # Can we actually save AND replay an album from this source? Only the local library and
 # the streaming services with an adapter in Sources.pm (Qobuz/Bandcamp/Tidal/Deezer/Spotify,
 # each when its plugin is installed). Everything else — BBC Sounds, radio stations, any
@@ -439,16 +459,38 @@ sub _clearMaterialActions {
         # diagnostic as the per-service verdict in _dumpMaterialState, in the log a "why is Add
         # still there / why has Add gone" report starts from.
         if (!$departing && ($REGISTERED_N || %REGISTERED_EMPTY)) {
+            # The suppressor clause must report what the PRUNE ON THE NEXT LINE will leave live,
+            # not merely what registered — the two are not the same on this path. With the pref
+            # off the prune's %fallback is empty, so its %emptyFallback gate collapses to
+            # $REGISTERED_N and it writes every suppressor registration REFUSED into actions.json.
+            # Saying "no suppressor registered either, so another plugin's Add is not being held
+            # off those rows" was therefore contradicted three lines later by the code that wrote
+            # exactly those suppressors — and inside this branch it is not even reachable as a
+            # true statement: the outer condition means an empty %REGISTERED_EMPTY implies
+            # $REGISTERED_N, which is precisely when the file half is written. Computed the same
+            # way _pruneMaterialActions computes it, so the two cannot drift.
+            my @toFile = $REGISTERED_N
+                ? grep { !$REGISTERED_EMPTY{$_} }
+                       ( _ownSurfaceSuppressorCats(), _radioSuppressorCats() )
+                : ();
             $log->warn('LL: material_action is off — '
                 . ($REGISTERED_N
                     ? 'the registered "Add" entries go at the next server restart (Material has no '
                     . 'unregister API)'
                     : 'nothing of ours registered, so no "Add" entry of ours is live')
-                . (%REGISTERED_EMPTY
-                    ? '. The suppressors are registered too, so until then "Add" still does not '
-                    . 'appear inside our own list or on radio rows'
-                    : '. No suppressor registered either, so another plugin\'s "Add" is not being '
-                    . 'held off those rows'));
+                . (%REGISTERED_EMPTY || @toFile
+                    ? '. The suppressors are '
+                    . (%REGISTERED_EMPTY && @toFile
+                        ? 'registered, and the ' . scalar(@toFile) . ' the API refused go to '
+                        . 'actions.json'
+                        : %REGISTERED_EMPTY
+                            ? 'registered'
+                            : 'not registered, so the ' . scalar(@toFile) . ' of them go to '
+                            . 'actions.json instead')
+                    . ', so until then "Add" still does not appear inside our own list or on '
+                    . 'radio rows'
+                    : '. No suppressor is live and none is being written, so another plugin\'s '
+                    . '"Add" is not being held off those rows'));
         }
         return _pruneMaterialActions($departing, 1);
     }
@@ -1137,14 +1179,10 @@ sub _writeMaterialActions {
 
     # What the API half actually DELIVERED, per category — not what we built. A failed
     # registration builds an entry and Material never gets it, so counting %positive would
-    # report "streaming Add active" for a menu with nothing in it.
-    my %regCount;
-    if ($api) {
-        for my $cat (keys %$positive) {
-            my $n = scalar(@{ $positive->{$cat} }) - scalar(@{ $fallback{$cat} || [] });
-            $regCount{$cat} = $n if $n > 0;
-        }
-    }
+    # report "streaming Add active" for a menu with nothing in it. Shares _deliveredCounts with
+    # the prune: the subtraction used to be written out here and twice more, and the copies
+    # drifted (see the sub). On tier 0/1 nothing registered at all, so the count stays empty.
+    my %regCount = $api ? _deliveredCounts($positive) : ();
 
     _dumpMaterialState($file, $data, \@radioCats, \%regCount, $api) if $prefs->get('debug_log');
     return;
@@ -1240,7 +1278,7 @@ sub _pruneMaterialActions {
     # to be made from, so it must not be the one state the dump cannot describe.
     if (!-e $file && !%fallback && !%emptyFallback) {
         my ($positive) = _materialActionSet(2);
-        my %regCount = map { $_ => scalar @{ $positive->{$_} } } keys %$positive;
+        my %regCount = _deliveredCounts($positive);
         _dumpMaterialState($file, {}, \@radioCats, \%regCount, 1, 2)
             if $prefs->get('debug_log');
         return;
@@ -1290,14 +1328,12 @@ sub _pruneMaterialActions {
 
     my $record = { map { $_ => 1 } keys %fallback, keys %emptyFallback };
 
-    # What the API half actually delivered, per category — built the same way the write path
-    # builds it, so the diagnostics read identically on both.
+    # What the API half actually delivered, per category. NOT "built minus %fallback" — that is
+    # the write path's formula and it only reads as "delivered" THERE, where %fallback IS
+    # %UNREGISTERED. Here %fallback has been zeroed for a write-policy reason ($departing /
+    # $prefOff), so the same expression counts every REFUSED entry as delivered.
     my ($positive) = _materialActionSet(2);
-    my %regCount;
-    for my $cat (keys %$positive) {
-        my $n = scalar(@{ $positive->{$cat} }) - scalar(@{ $fallback{$cat} || [] });
-        $regCount{$cat} = $n if $n > 0;
-    }
+    my %regCount = _deliveredCounts($positive);
 
     if (!keys %$data) {
         # Nothing of ours left and nothing of anyone else's. Remove the file rather than leave

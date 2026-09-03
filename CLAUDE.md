@@ -123,6 +123,41 @@ does not cover. Say which ledger entry you are challenging and what changed.
   Latin-1, and it changes a stored key, so it owes a migration.
 
 
+- **`_migrateRefold` CANNOT be trapped in a permanent retry loop by an ordinary
+  collision — WITHDRAWN 2026-09-03 (fourth round).** The finding was that a group
+  whose rekey collides with a PERMANENTLY-skipped mixed-status row fails on every
+  boot for ever: same scan, same warn, `user_version` never stamped, rows stuck on
+  the old fold. **The grouping is what makes this near-unreachable, and that is the
+  part to check before re-raising it.** Groups are keyed by `(source, _new)`, so
+  every row sharing a survivor's TARGET key is in the SAME group and is DELETEd
+  before the UPDATE — an outside collision cannot come from a row that folds to the
+  same key. It needs a row whose OLD key equals another group's NEW key, i.e. a
+  fold change that is NON-MONOTONE (the new pass must be able to PRODUCE a form the
+  old pass also produced for different input). Every fold change LL has made is a
+  strict collapse — accents, apostrophes, `%FOLD` — whose output space excludes the
+  old-only forms, so `oldfold(X) == newfold(B)` has no solution. Constructible only
+  with a contrived pair (old replaces a mark where new deletes it, plus a second
+  segment that folds). The retry-at-next-start policy stands: the reachable causes
+  really are transient. **Re-raise only with a concrete non-monotone rule** — naming
+  one is the new information, not restating the loop.
+- **The 0.1.116 `lc`-ordering fix owes NO schema-6 rung — CONFIRMED 2026-09-03
+  (fourth round), and the "no migration owed" note is right as written.** The
+  finding was that `_migrateRefold` stamps `user_version = 5` at 0.1.112, so a row
+  written by a raw-CLI add under 0.1.112–0.1.115's buggy fold keeps the mangled key
+  and nothing rekeys it. The mechanism is real; the population is empty. **`main` is
+  0.1.93** — 0.1.112 through 0.1.116 never shipped, so the only DB that ever ran
+  them is the dev box's, and only for an add of an UPPERCASE-accented name made
+  through the raw CLI in that window. Nothing in the wild can be in that state.
+  Before re-raising any "this build owes a migration" finding, **check `git show
+  main:ListenLater/install.xml` first** — a rung is only owed for a version a user
+  can have run.
+- **`_migrate`'s rung-5 failure warn prints the version `_migrate` was ENTERED at,
+  not the current one — accepted 2026-09-03 (fourth round).** `$schemaVer` is read
+  once at the top and never reassigned, so rungs 3/4 stamp `user_version` without
+  updating it and a 2 → 5 upgrade that fails at the refold says "schema left at
+  version 2" when the DB is at 4. True, and cosmetic: one word in a warn on a path
+  that has already failed and already says it will retry. Not worth a change.
+
 ### B. KNOWN-OPEN AND ACCEPTED — do not re-report as new
 
 - ~~**`matcher_sync_check.py` exits 1 fleet-wide.**~~ **CLOSED 2026-09-02** — the
@@ -255,6 +290,42 @@ Carried forward, and bigger than any of the six:
   The dump's old radio fall-back read the list of categories we mean to suppress,
   which agrees with reality in every healthy state and lies in the one state worth
   a bug report. Diagnostics assert only what the file HAS and what Material TOOK.
+
+**Fourth round of 2026-09-03 — CLOSED, five findings dispositioned, two fixed.**
+Run against the 0.1.117 tree (`0639796..HEAD`: the refold transaction/stamping,
+the `watch_outside` checkbox, the `foldLatin` `lc` ordering, the prune's `$prefOff`
+argument and `%emptyFallback` gate, the per-service diagnostic). **Three of the
+five were WITHDRAWN under challenge — all three DB findings — and the reasoning
+for each is in section A2 above so the next round starts from it.** Tests
+`t_material_actions.pl` 215 → 223.
+
+| # | finding | disposition |
+|---|---|---|
+| 1 | `_pruneMaterialActions`'s `%regCount` counts entries registration REFUSED as delivered, because it subtracts the caller's `%fallback` — which the `$prefOff`/`$departing` paths deliberately zero | **FIXED** — `_deliveredCounts` subtracts `%UNREGISTERED` directly (2 red without it) |
+| 2 | the pref-off warn says "No suppressor registered either, so another plugin's Add is not being held off those rows" and the prune then writes exactly those suppressors | **FIXED** — the clause now reports what the prune will leave live (2 red without it) |
+| 3 | a refold collision with a permanently-skipped mixed-status group could withhold `user_version` for ever | **WITHDRAWN** — grouping makes it need a non-monotone fold rule; section A2 |
+| 4 | the 0.1.116 `lc` fix changes the octet-path key with no new migration rung | **WITHDRAWN** — `main` is 0.1.93, those builds never shipped; section A2 |
+| 5 | the rung-5 failure warn prints the entry `$schemaVer`, not the stamped one | **ACCEPTED, no change** — cosmetic; section A2 |
+
+Carried forward, and the reason #1 and #2 existed at all:
+
+- **A formula is only as portable as what its inputs MEAN.** `built minus %fallback`
+  reads as "delivered" in `_writeMaterialActions`, where `%fallback` IS
+  `%UNREGISTERED`. The prune copied the expression verbatim and then zeroed
+  `%fallback` for an unrelated WRITE-POLICY reason (`$prefOff` must not re-write
+  what the user asked to be rid of), at which point the same characters computed
+  something else entirely. The third round's knock-on pass traced the *concept*
+  "is our half live" through the writers; it did not trace the *arithmetic* that
+  reports on it. Both now go through `_deliveredCounts`, which takes the refusal
+  ledger directly and cannot be handed a substitute.
+- **A message about what happens next must be computed from what happens next.**
+  #2's warn was rewritten in the third round to state one fact per clause — and the
+  second fact was still about registration when the sentence was about suppression,
+  three lines above the code that does the suppressing. Inside that branch the old
+  text was not merely wrong, it was UNREACHABLE as a true statement: the outer
+  condition means an empty `%REGISTERED_EMPTY` implies `$REGISTERED_N`, which is
+  exactly when the file half gets written. The clause now recomputes the prune's own
+  `%emptyFallback` set, so the two cannot drift.
 
 ### D. ADDING TO THIS LEDGER
 
@@ -2659,6 +2730,51 @@ The "Add to Listen Later"/"Add to Wish List" custom actions appear on streaming 
   otherwise in a repo that commits versions in batches) and the `utf8::is_utf8` fold gate
   (no LL input producer downgrades). Podcast `CACHE_VER` bumped 20 → 21 with the build per
   the dev-build cache rule; nothing here parses a feed, so it is hygiene, not a fix.
+
+- **0.1.118 — two diagnostics that reported what we BUILT as what Material TOOK.** The
+  fourth 2026-09-03 review round. Five findings, and the shape of the round is the point:
+  **the three DB findings were all withdrawn under challenge** and only the two Material
+  ones survived. Neither changes behaviour — both are the log a "where did Add go" report
+  is made from, which is the whole reason they have to be true. Suite 215 → 223, two red
+  per fix.
+
+  **`%regCount` credited refused entries as delivered.** `_pruneMaterialActions` counted
+  "what we built minus `%fallback`" — the formula lifted verbatim from
+  `_writeMaterialActions`, where it is correct because `%fallback` there IS `%UNREGISTERED`.
+  But the prune deliberately zeroes `%fallback` on the `$departing` / `$prefOff` paths (a
+  WRITE-POLICY decision: the pref being off must not re-write what the user asked to be rid
+  of), and with nothing subtracted the count became "everything we built". Turn the pref off
+  after registration refused the lot and the dump claimed `plugin API (Material 6.4.6+)`,
+  `registered sections = album(2), online-album(2), …`, `streaming Add active` and
+  per-service `Add shown (via its own registered '<cmd>-album' section)` — with nothing live
+  anywhere and the file half just deleted. Same lie through the early-return branch, which
+  did not subtract at all. **Fixed by `_deliveredCounts`**, one carrier that reads the
+  refusal ledger directly and cannot be handed a substitute; all three copies now call it.
+  *The lesson is narrower than "don't duplicate code": a formula is only as portable as what
+  its inputs MEAN. The third round's knock-on pass traced the concept "is our half live"
+  through the writers — it did not trace the arithmetic that reports on it.*
+
+  **The pref-off warn was contradicted by the line below it.** With the positives registered
+  but the one-argument empty-section calls refused (a dead `$register` coderef leaves either
+  half at zero, independently), it logged *"No suppressor registered either, so another
+  plugin's Add is not being held off those rows"* — and `_pruneMaterialActions` then wrote
+  exactly those suppressors into `actions.json` three lines later. Inside that branch the old
+  text was not merely wrong but **unreachable as a true statement**: the outer condition means
+  an empty `%REGISTERED_EMPTY` implies `$REGISTERED_N`, which is precisely when the file half
+  gets written. The clause now recomputes the prune's own `%emptyFallback` set and reports
+  what will be LIVE, so the message and the mechanism cannot drift; the test asserts the file
+  really does contain the suppressors, pinning the message to the behaviour rather than to
+  itself. *This warn had been rewritten one round earlier to state one fact per clause — and
+  the second fact was still about registration when the sentence was about suppression.*
+
+  **Three DB findings withdrawn, all recorded in the Review Ledger §A2** so the next round
+  starts from the reasoning rather than re-deriving it: the refold "permanent retry loop"
+  (grouping by `(source, _new)` means an outside collision needs a NON-MONOTONE fold rule,
+  and every fold change LL has made is a strict collapse), the missing schema-6 rung for
+  0.1.116's `lc` fix (real mechanism, empty population — **`main` is 0.1.93**, so 0.1.112–
+  0.1.116 never shipped), and the rung-5 failure warn printing the entry `$schemaVer` rather
+  than the stamped one (true, cosmetic, accepted). Podcast `CACHE_VER` bumped 22 → 23 with
+  the build per the dev-build cache rule — hygiene, nothing here parses a feed.
 
 ## Regression tests — RUN THESE BEFORE ANY BUILD (added 2026-07-29)
 

@@ -1407,5 +1407,75 @@ is('...whereas the correct call answers undef',
         ($src =~ /\$1\s*<=>\s*\d+\s*\|\|/ ? 'inline compare left' : 'none'), 'none');
 }
 
+# ---------------------------------------------------------------------------
+section('the pref-off diagnostics must describe what is LIVE, not what we built');
+
+# Both cases below are the same substitution the third 2026-09-03 round fixed in the writer
+# and the per-service verdict — "did our half register" standing in for "is our entry live" —
+# caught in the two places that round did not reach. Neither changes behaviour: both are the
+# log a "where did Add go" report is made from, which is exactly why they have to be true.
+
+sub snapshot { return $Slim::Utils::Prefs::VALUES{material_debug_snapshot} // '' }
+
+# (a) Registration refuses EVERYTHING, then the user turns the pref off. The prune drops the
+# positive file fallback on that path (%fallback = ()), so a count of "built minus %fallback"
+# credits every REFUSED entry as delivered — the dump then claims the plugin API carried
+# entries that Material never took.
+Slim::Utils::Prefs::set_test_pref('debug_log', 1);
+reset_all();
+install_failing_api(sub { 1 });          # nothing registers, positives land in %UNREGISTERED
+set_material_version('6.4.9');
+Plugins::ListenLater::Plugin::_registerMaterialActions();
+Plugins::ListenLater::Plugin::_writeMaterialActions();
+is('the refused positives are recorded as unregistered',
+    (scalar keys %Plugins::ListenLater::Plugin::UNREGISTERED) ? 'recorded' : 'none',
+    'recorded');
+$Slim::Utils::Prefs::VALUES{material_debug_snapshot} = '';
+Plugins::ListenLater::Plugin::_clearMaterialActions();      # pref off, tier 2
+is('a total registration failure is reported as NONE registered, not as a full set',
+    (snapshot() =~ /registered sections = NONE/) ? 'NONE'
+        : (snapshot() =~ /registered sections = (.+)/ ? "claimed: $1" : '(no line)'),
+    'NONE');
+is('...so the dump never calls the API half the delivery route',
+    (snapshot() =~ /plugin API \(Material 6\.4\.6\+/) ? 'claimed the API' : 'did not',
+    'did not');
+is('...and no service is credited with a registered section',
+    (snapshot() =~ /Add shown \(via its own registered/) ? 'credited' : 'none', 'none');
+
+# (b) The halves fail independently: the positives register, the one-argument empty-section
+# calls are refused. The pref-off warn used to say "No suppressor registered either, so
+# another plugin's Add is not being held off those rows" — and _pruneMaterialActions then
+# wrote exactly those suppressors to actions.json three lines later.
+reset_all();
+{
+    no strict 'refs';
+    no warnings 'redefine';
+    # One argument IS the empty-section call; two is a real entry.
+    *{'Plugins::MaterialSkin::Plugin::registerCustomAction'} = sub {
+        die "registerCustomAction: no empty sections\n" if @_ == 1;
+        push @REG, [ @_ ];
+    };
+}
+set_material_version('6.4.9');
+Plugins::ListenLater::Plugin::_registerMaterialActions();
+Plugins::ListenLater::Plugin::_writeMaterialActions();
+is('the positives registered but no empty section did',
+    ($Plugins::ListenLater::Plugin::REGISTERED_N
+        && !keys %Plugins::ListenLater::Plugin::REGISTERED_EMPTY) ? 'split' : 'not split',
+    'split');
+Slim::Utils::Log::clear();
+Plugins::ListenLater::Plugin::_clearMaterialActions();      # pref off, tier 2
+my $warned = join "\n", Slim::Utils::Log::lines();
+is('the pref-off warn does not claim another plugin\'s Add is left unsuppressed',
+    ($warned =~ /not being held off those rows/) ? 'claimed it' : 'did not', 'did not');
+is('...it says the suppressors go to actions.json instead',
+    ($warned =~ /go to actions\.json/) ? 'said so' : 'silent', 'said so');
+is('...and the prune really did write them, which is what makes that true',
+    (grep { exists read_file()->{$_} } qw(listenlater-album music-album)) ? 'written' : 'absent',
+    'written');
+Slim::Utils::Prefs::set_test_pref('debug_log', 0);
+install_api();
+set_material_version(undef);
+
 printf "\n%d passed, %d failed\n", $pass, $fail;
 exit($fail ? 1 : 0);
