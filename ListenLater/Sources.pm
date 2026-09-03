@@ -1071,9 +1071,25 @@ sub _searchService {
     # "artist album" into one normalised query made the service's own fuzzy search
     # rank/drop the target (the lesson the sibling ListenBrainz plugin learned); an
     # artist-only search returns the discography so the year/title tiering below can pick
-    # the right same-named release. Octet-encode for the URI layer (a wide-char query warns).
-    my $artistQuery = $artist;
-    utf8::encode($artistQuery) if utf8::is_utf8($artistQuery);
+    # the right same-named release.
+    #
+    # ENCODING: there is no single right spelling, because the service plugins' own URL
+    # layers disagree — so build BOTH and let each branch pick (the sibling ListenBrainz
+    # plugin carries the same split as `query_enc`, LBF 0.9.82, after the Sigur Rós failure
+    # found in Discography on 2026-07-10):
+    #   * CHARACTERS for Qobuz (escapes with uri_escape_utf8), Tidal (transliterates with
+    #     Text::Unidecode) and Spotty (uri_escape_utf8 in _prepareCall) — handing those
+    #     octets double-encodes, so "Sigur Rós" goes out as "Sigur RÃ³s"/"Sigur RA3s" and
+    #     the search returns NOTHING for any non-ASCII artist.
+    #   * OCTETS for Deezer (complex_to_query) and Bandcamp.
+    # Both conversions fail safe: decode leaves a non-UTF-8 byte string untouched, and
+    # encode is a no-op on a string that is already octets. Only the outgoing QUERY is
+    # affected — every branch matches candidates with _norm($artist) on the raw value, so
+    # this cannot change what matches, only what the service gives us to match against.
+    my $artistChars = $artist;
+    utf8::decode($artistChars) unless utf8::is_utf8($artistChars);
+    my $artistBytes = $artist;
+    utf8::encode($artistBytes) if utf8::is_utf8($artistBytes);
 
     if ($source eq 'qobuz' && Plugins::Qobuz::Plugin->can('getAPIHandler')
                           && Plugins::Qobuz::Plugin->can('_albumItem')) {
@@ -1094,7 +1110,7 @@ sub _searchService {
                 push @cand, [ $item, $a->{title}, $cy ];
             }
             $cb->(_bestMatches(\@cand, $album, $recYear) || _noMatch($client));
-        }, lc($artistQuery), 'albums');
+        }, lc($artistChars), 'albums');
         return;
     }
 
@@ -1145,7 +1161,7 @@ sub _searchService {
                 push @cand, [ $item, $a->{title}, $cy ];
             }
             $cb->(_bestMatches(\@cand, $album, $recYear) || _noMatch($client));
-        }, { type => 'albums', search => $artistQuery, limit => 20 });
+        }, { type => 'albums', search => $artistChars, limit => 20 });
         return;
     }
 
@@ -1170,7 +1186,7 @@ sub _searchService {
                 push @cand, [ $item, $a->{title}, $cy ];
             }
             $cb->(_bestMatches(\@cand, $album, $recYear) || _noMatch($client));
-        }, { search => $artistQuery, type => 'album', strict => 'off', limit => 20 });
+        }, { search => $artistBytes, type => 'album', strict => 'off', limit => 20 });
         return;
     }
 
@@ -1182,10 +1198,13 @@ sub _searchService {
     #  • the search key is `query`, not `search`, and `type` is SINGULAR 'album'
     #    (API.pm:229). A wrong key here returns an empty list, not an error.
     #  • it wants CHARACTERS, not octets: _prepareCall escapes with uri_escape_utf8
-    #    (API.pm:1293), so the octet-encoded $artistQuery built above — which is right for
-    #    the other three — would double-encode an accented name here and find nothing.
-    #    That is why the raw $artist is passed instead, and it is the first thing to check
-    #    if this branch ever comes back empty for a non-ASCII artist.
+    #    (API.pm:1293), so octets would double-encode an accented name here and find
+    #    nothing. It is in the SAME camp as Qobuz and Tidal — only Deezer and Bandcamp
+    #    want octets; see the encoding note above `$artistChars`. (An earlier version of
+    #    this comment claimed octets were "right for the other three", which was wrong
+    #    for two of them and documented a real bug as intended behaviour.) The raw
+    #    $artist is passed rather than $artistChars only because it is already the
+    #    character form on every path that reaches here.
     #  • the album TITLE is `name` (the others say `title`), and `artist` is a plain string
     #    holding the first credit, alongside the full `artists` list.
     #  • the renderer lives in OPML, not Plugin, and yields url => \&OPML::album with the

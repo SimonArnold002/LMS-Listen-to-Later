@@ -345,7 +345,16 @@ sub postinitPlugin {
         # pair reached NEITHER half and podcast rows had no "Add" until a server restart.
         # Watching the Podcast plugin's own pref is what closes that; the deferred pass is
         # exactly the right callback, since it re-registers what is new and rewrites the file.
-        # Unsubscribing the last feed is the mirror case and the same call handles it.
+        # UNSUBSCRIBING the last feed is NOT the mirror case on tier 2, and the same call
+        # does NOT handle it: `registerCustomAction` PUSHES with no unregister (see the
+        # note above %REGISTERED_POS), so once `podcasts-*` is registered it stays live for
+        # the rest of the run with our "Add" on it — which `_savePodcastEpisode` can no
+        # longer honour, since it resolves an episode against the subscribed feeds. Tier
+        # 0/1 DO mirror it: the pair leaves %fileCats and the next file write drops it.
+        # The tier-2 residue is bounded — with no feeds there are few podcast rows left to
+        # press Add on, and it clears at the next restart — so it is accepted rather than
+        # worked around. If it ever needs closing, the fix is a hasFeeds() check inside the
+        # add handler at invocation time, not more registration bookkeeping.
         # NB a Material tab already open took its snapshot at app start, so the new entry
         # appears on the next app load — the standing late-registration caveat, not a new one.
         eval {

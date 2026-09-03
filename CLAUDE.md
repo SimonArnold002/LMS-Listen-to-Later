@@ -368,6 +368,90 @@ Carried forward, and each bigger than the finding that produced it:
   test — but there is no diacritic hazard in §4h and no rule against one in a fixture.
   **Instrument the suite itself before believing a reproduction.**
 
+**Sixth round of 2026-09-03 — CLOSED, two findings, both fixed. Shipped as 0.1.120.** Run against the
+0.1.119 tree. **The round's most useful outcome is a SCOPING correction, not either finding**, and it is
+recorded first because it governs how the next round should read its own results.
+
+| # | finding | disposition |
+|---|---|---|
+| 1 | `_searchService` hands Qobuz and Tidal OCTETS where both URL layers want CHARACTERS, so replay-by-search returns nothing for any non-ASCII artist | **FIXED** — `$artistChars`/`$artistBytes`, picked per branch; `tools/t_query_enc.pl` (5 red without it) |
+| 2 | the tier-2 podcast comment claims unsubscribing the last feed is "the mirror case and the same call handles it" — it cannot be, there is no unregister | **FIXED** — comment only; the residue is bounded and accepted, and the comment now says so |
+
+**THE SCOPING ERROR, which is the part to carry forward.** Finding 1 was reported as a defect in the
+updates under review. It is not: `git blame` puts the `utf8::encode` line at **2026-07-01**, untouched
+since, so it was never in any release any round has reviewed — which is precisely why five rounds never
+raised it and why Simon had never seen it fail. What IS in the diff is `dc3d57b` (0.1.113)'s comment
+asserting octets are "right for the other three", i.e. a NEW comment documenting an OLD bug as intended
+behaviour. The finding was then "verified" against LBF's ledger and a local repro before anyone asked
+whether it was in scope at all. **Check `git blame` on the anchor line before writing up a finding**, and
+report a pre-existing defect as pre-existing — the fix may still be worth making (it was), but calling it
+a regression of the work under review misdirects the round.
+
+**Why it has never been observed, which the first write-up also got wrong.** The search path is a
+FALLBACK: `buildPlayableItems` replays directly whenever the row carries a native `album_id`, and
+`captureFromRemote` sets `ref_kind => 'search'` only when none arrived. So it needs a Qobuz/Tidal row
+saved without an id AND a non-ASCII artist. The defect is real and silent; its reach is narrow. The
+exposure on a given install is countable —
+`SELECT source, artist, album_title FROM albums WHERE ref_kind='search' AND source IN ('qobuz','tidal')
+AND artist GLOB '*[^ -~]*'`.
+
+**THE CONSUMING END IS VERIFIED LIVE, over HTTP, and the method is reusable.** An earlier draft of
+this entry cited LBF's ledger and proposed grepping the plugin sources — wrong on both counts: the
+plugins are under `/var/lib/squeezeboxserver/Plugins/`, not `/usr/share/`, and no grep was needed
+because **the escape is visible in the response**. Drive each service's own search over `jsonrpc.js`
+with the correct string and with the mojibake the double-encode produces, and compare:
+
+    # Qobuz: item_id 0.0 is "New search"; drill the "Releases" child it returns
+    ["<mac>",["qobuz","items",0,6,"item_id:0.0","search:<term>","cachesearch:0","menu:1"]]
+    # TIDAL: 7.3 is Search > Albums, no drill needed
+    ["<mac>",["tidal","items",0,200,"item_id:7.3","search:<term>","cachesearch:0","menu:1"]]
+
+Qobuz hands back the escaped query INSIDE the child `item_id`, which is `uri_escape_utf8`'s output
+in plain sight — `0.0_Sigur%20R%C3%B3s.0` for characters versus `0.0_Sigur%20R%C3%83%C2%B3s.0` for
+octets. That is the whole hypothesis, confirmed without reading a line of the plugin.
+
+**The measured damage, 2026-09-03 (real Sigur Rós albums in the result set):**
+
+| service | correct query | what LL sends | |
+|---|---|---|---|
+| Qobuz | **47** of 200 | **1** of 88 | near-total loss |
+| TIDAL | **44** of 100 | **8** of 74 | 36 albums unreachable, incl. *Ágætis byrjun*, *Von*, *Inni*, *Hvarf-Heim* |
+
+**This CORRECTS the finding as first written, which said the search "returns nothing".** It does not.
+It returns a degraded, largely irrelevant set — Qobuz's 88 hits are things like *Sigue Caminando* and
+*Remembering Sigurd Rascher* — which LL's own `_albumMatches` then rejects, so replay still ends at
+"Could not find this album to play". The user-visible outcome is the same; the mechanism is
+**junk, not empty**, and TIDAL degrades rather than fails, so a given album may still be found by
+luck. Say "wrong/incomplete results" rather than "no results" when describing this.
+
+**THE SPEC ALREADY SAID THIS, and LL shipped against it for two months.**
+`docs/streaming-adapter-spec.md` **R6** is exactly this requirement — *"Whether the plugin's URL
+layer wants characters or octets … Encoding is picked per adapter at the call site"* — and its
+acceptance checklist has *"An accented artist name returns results, confirming `query_enc`."* LL
+carried that file, verbatim, while `_searchService` violated it. A conformance requirement that
+nothing tests is a comment; **R6 now has a test here (`t_query_enc.pl`), and it should get one in
+PFR too.**
+
+**One FLEET follow-up, deliberately NOT done in this build:** R6's symptom column reads *"Silent:
+accented names return nothing"*, which the live measurement above disproves — it is junk/degraded
+results, not zero, and on TIDAL the album may still be found. That wording is the canonical copy's,
+so per the spec header it must be edited in the ListenBrainz repo and re-copied byte-identical to
+PFR and LL (`shasum` across the three). A one-line change across three repos is its own pass, not a
+rider on an LL build — do it before the next adapter is written, since "returns nothing" is exactly
+the wrong thing to be checking for.
+
+**`cachesearch:0` does NOT stop Qobuz recording the term** — three probe searches landed in the
+user's recent-searches list. They were removed individually via
+`["qobuz","recentsearches","delete:<deleteMenu index>"]`, re-reading the list between each delete so
+only the probe entries were touched. Never use `deleteAll`. Budget for that cleanup when probing
+search.
+
+**Finding 2's residue is ACCEPTED, not fixed** — on tier 2 `registerCustomAction` has no unregister, so
+`podcasts-*` stays registered until the restart after the last feed is unsubscribed. With no feeds there
+are almost no podcast rows left to press Add on, so the cost is a stale entry rather than a broken one.
+If it ever needs closing the fix is a `hasFeeds()` check inside the add handler at invocation time, NOT
+more registration bookkeeping — that is the direction every husk bug in this file came from.
+
 ### D. ADDING TO THIS LEDGER
 
 When a finding is declined, or accepted-but-deferred, add it here in the same
@@ -692,6 +776,17 @@ Played albums are auto-removed after `played_retention_days` (default 7; **0 = k
 
 **ADDING A NEW SERVICE — READ `docs/streaming-adapter-spec.md` FIRST.** It is the adapter contract across the released plugins (LBF, PFR, LL), carried verbatim in each repo: what a service's own plugin must expose (R1-R8), the leg semantics (`undef` = inconclusive vs `[]` = a real miss, and the TTL each picks), the item fields to stamp, the acceptance tests, and — per plugin — every site that still forces an edit OUTSIDE the adapter table, with the registry field that closes it. **This repo is the exception the spec's section 9 describes: it RECOGNISES a service from a url scheme rather than searching one, and its capability logic sits in per-source branches across `Sources.pm` and `Plugin.pm` rather than in an adapter table.** The claim that full support "wants those branches collected into a sources table of coderefs first" was **DISPROVEN by the Spotify build (0.1.113)** — full parity landed in ten branches with no refactor. The refactor is still worth doing; it is not a prerequisite, so do not let it block a service. The ten sites, so the next one is counted rather than guessed at: `_streamingAlbumNode`, `_streamingPlaylistNode`, `_searchService`, `_serviceCan`, `_serviceCanPlaylist`, `%SUPPORTED_CMD`, `classifyRelType` (only if the service states a type/count on its album object), `_backfillStreamingArtist` (only if its rows can arrive artist-less), `sourceFromSvc`/`%SVC_ALIAS` (only if the service's BROWSE COMMAND differs from its source tag — Spotty browses as `spotty` and plays `spotify://`), and `normaliseFavurl` (only if its favurl is not a `<scheme>://` url — Spotty sends the bare URI `spotify:album:<id>`). **The last two were MISSED by this very sentence when 0.1.113 wrote it**, which is exactly the failure the count exists to prevent: both are conditional, like the two before them, so a service that needs neither reads the list as complete and a service that needs one finds nothing telling it to look. A missed alias silently drops the native album id (the row falls back to fuzzy search, 0.1.96's class of bug); a missed normalisation misreads the favurl in all four readers at once. Edit the canonical copy in the ListenBrainz repo and re-copy, per the header.
 
+**AN ELEVENTH SITE, added 0.1.120: `_searchService`'s QUERY ENCODING.** It is inside a site already
+on the list, which is exactly why it went unnoticed for two months — a new service's branch is written
+next to four existing ones and inherits whichever spelling of `$artistQuery` its neighbour used. There
+is no single right answer: **Qobuz, Tidal and Spotty want CHARACTERS** (`uri_escape_utf8`,
+`Text::Unidecode`, `uri_escape_utf8`), **Deezer and Bandcamp want OCTETS** (`complex_to_query`). Both
+spellings are built at the top of the sub as `$artistChars` / `$artistBytes`; pick per branch, and if a
+new service's own plugin escapes or transliterates the query, it belongs in the character camp. Getting
+it wrong is SILENT — the search returns nothing for a non-ASCII artist and replay reports "Could not
+find this album to play", which is indistinguishable from the album not being on the service. LBF
+carries the same split as a per-adapter `query_enc` field; `tools/t_query_enc.pl` pins it here.
+
 Browse rows differ by service, which is why each needs handling (all confirmed from the live `addctx` log + the Tidal/Bandcamp plugin source):
 - **Qobuz** New Releases rows carry **no** `favorites_url` and no metadata — only a positional `item_id` + title/subtitle. So Qobuz replays by **search** (`getAPIHandler->search(cb, query, 'albums')` → `{albums}{items}` → `_albumItem`). Works.
 - **Tidal** rows **do** carry the album id in `favorites_url` (`tidal://album:<id>`). `addctx` extracts it (`m{(?:[:/])album:([\w.-]+)}`) into `ref.album_id`; `_streamingAlbumNode` replays via `Plugins::TIDAL::Plugin::getAlbum` with **passthrough key `id`** (not `album_id`!) — `getAlbum` reads `$params->{id}` and returns `{items=>...}`. `_searchTidal` (`search(cb,{type=>'albums',search=>..,limit=>20})` → arrayref of album hashes → `_renderAlbum`) is the no-id fallback. Tidal capture often has an **empty artist** (online-classified items don't fill `$ARTISTNAME`), which is fine because the id path needs no artist — but the search fallback is then title-only.
@@ -701,7 +796,7 @@ Browse rows differ by service, which is why each needs handling (all confirmed f
   - **Its browse command is `spotty`, not `spotify`** (Spotty registers `tag => 'spotty'`). `Sources::%SVC_ALIAS` folds the two; `sourceFromSvc` is what both add paths now ask, replacing `knownSource(...) ? lc ... : ''`.
   - **Replay wants a full URI, never a bare id.** `API::album` does `$args->{uri} =~ /album:(.*)/`, so an id alone matches nothing and returns an empty tracklist — `_streamingAlbumNode` rebuilds `spotify:album:<id>`. That match being **greedy to end-of-string** is also why nothing may ever be appended to a Spotify favurl (the sibling LBF plugin leaves them undecorated for the same reason).
   - `getAPIHandler` is a **class** method (`Plugins::Spotty::Plugin->getAPIHandler`), unlike Qobuz's and TIDAL's function-form calls, and the renderers live in `OPML`, not `Plugin` — so `_serviceCan` probes `Plugins::Spotty::OPML->can('album')`.
-  - Search wants `{query => …, type => 'album'}` (key `query`, type SINGULAR) and **characters, not octets** — `_prepareCall` escapes with `uri_escape_utf8`, so the octet-encoded `$artistQuery` that is right for the other three would double-encode an accented name. Check this first if the branch returns nothing for a non-ASCII artist.
+  - Search wants `{query => …, type => 'album'}` (key `query`, type SINGULAR) and **characters, not octets** — `_prepareCall` escapes with `uri_escape_utf8`. It is in the SAME camp as Qobuz and Tidal; only Deezer and Bandcamp want octets. (Through 0.1.119 this line read "the octet-encoded `$artistQuery` that is right for the other three", which was wrong for two of the three and documented a real bug as intended — see 0.1.120.)
   - **Spotify is the SECOND service that answers type, count and year in one fetch** (after Qobuz): its album object keeps `album_type`, `total_tracks` and `release_date` through Spotty's cache, all via the public API. **The trap: Spotify has no EP class — an EP reports `album_type: 'single'`.** No Spotify-specific guard exists and none should be added: `singleIsWrong`/`_settle` already refuse a claimed single the count contradicts, so a 5-track "single" goes and proves itself against a real tracklist and settles as an EP. A hand-written `total_tracks` guard would only duplicate that, less carefully.
   - **No album id from a PLAYING track** — `getMetadataFor` flattens the album to a title, exactly like Deezer, so Spotify stays out of `_hasAlbumIdFromTrack` and a Now Playing add falls back to the recovered album/artist. Getting the id would mean reaching into `API->trackCached`, which is the private-internals route **declined for Tidal/Deezer on 2026-07-25** — do not re-attempt it here either.
   - `_backfillStreamingArtist` gives it its own branch rather than the shared `$getAlbum` coderef: Spotty's tracklist `line2` is `"Artist • Album"`, not the bare artist Tidal and Deezer put there, so the shared path would store the wrong artist. It asks the API for the album object instead, which carries a plain `artist` string.
@@ -2932,6 +3027,66 @@ The "Add to Listen Later"/"Add to Wish List" custom actions appear on streaming 
   making it keep our own husks fails I3 and I4 naming `qobuz-album`, `tidal-track`,
   `deezer-album` — the 0.1.51 regression, caught by category name.
 
+- **0.1.120 — Qobuz and Tidal were searched with the wrong string encoding, and a comment that
+  documented it as correct.** The sixth 2026-09-03 round. Two findings, both fixed. **Read the
+  round's ledger entry above before quoting this one — the encoding defect is PRE-EXISTING
+  (2026-07-01), not a regression of the 0.1.113–0.1.119 work, and the round's most useful outcome
+  is the scoping correction rather than either fix.**
+
+  **`_searchService` octet-encoded ONE query and handed it to five branches that do not agree.**
+  Qobuz escapes with `uri_escape_utf8` and Tidal transliterates with `Text::Unidecode`; both want
+  CHARACTERS, so octets double-encode — "Sigur Rós" went out as `sigur%20r%C3%83%C2%B3s` and
+  `Sigur RA3s` respectively, matching nothing. Deezer's `complex_to_query` and Bandcamp genuinely
+  do want octets, which is why two of the four branches were right and the split was never
+  obvious. Spotty was already correct, by passing the raw `$artist` — but the comment explaining
+  why asserted octets were "right for the other three", so the one branch that got it right
+  argued for the bug in the other two. Fixed the way the sibling did in **LBF 0.9.82** (after the
+  same failure was found in Discography on 2026-07-10): build BOTH spellings at the top of the
+  sub, pick per branch. LBF carries the split as a per-adapter `query_enc` field; here it is two
+  lexicals, because the branches are hand-written rather than table-driven.
+
+  **VERIFIED LIVE over `jsonrpc.js`, both services, 2026-09-03** — see the ledger round above for
+  the exact probes and why no source grep was needed (Qobuz returns its own `uri_escape_utf8`
+  output inside the child `item_id`). Real Sigur Rós albums in the result set: **Qobuz 47 → 1**,
+  **TIDAL 44 → 8**. Note what that corrects: the search does **not** return nothing, it returns
+  JUNK — Qobuz's 88 mojibake hits are *Sigue Caminando*, *Remembering Sigurd Rascher* and the
+  like — which `_albumMatches` then rejects. Same user-visible end ("Could not find this album to
+  play"), different mechanism, and TIDAL DEGRADES rather than fails, so an album may still be
+  found by luck. Describe it as wrong/incomplete results, never as zero.
+
+  **The failure is SILENT and that is the whole reason it survived**: a search that answers with
+  the wrong records is indistinguishable from the album not being on the service, so replay
+  reports a clean miss and nothing is logged. It also blunted 0.1.112's fold sync on this path —
+  the local gate folds accents correctly now, while the service was never asked an answerable
+  question.
+
+  **Reach is narrow, which is why Simon had never seen it.** The search is a FALLBACK: a row
+  carrying a native `album_id` replays directly through `_streamingAlbumNode` and never reaches
+  the sub. It needs `ref_kind='search'` AND a non-ASCII artist together.
+
+  **Only the QUERY changed — nothing that Played depends on.** `$artistQuery` was write-only and
+  outbound, used at three call sites and never stored, compared or returned; every branch already
+  matched candidates with `_norm($artist)` on the RAW value, and the only DB write downstream of a
+  search is `_cacheBandcampUrl`, which writes a URL. So the fix cannot alter what matches, only
+  what the service offers to match against — it can turn a miss into a hit and not the reverse,
+  since today that path returns an empty set. Played reads a different pair entirely (the playing
+  track's metadata against the stored row), and add-time capture is untouched.
+
+  **Finding 2 is comment-only.** `postinitPlugin`'s podcast watcher claimed unsubscribing the last
+  feed is "the mirror case and the same call handles it". On tier 2 it cannot be — the file three
+  paragraphs up already says `registerCustomAction` PUSHES with no unregister — so `podcasts-*`
+  stays registered with our "Add" until the restart, on rows `_savePodcastEpisode` can no longer
+  honour. Tier 0/1 really do mirror it. The residue is accepted (with no feeds there are few
+  podcast rows left to press Add on) and the comment now says which tier does what, so the next
+  change here starts from the truth.
+
+  New `tools/t_query_enc.pl`, **12 assertions** (1118 across 14 suites). Anti-tested: the pre-fix
+  single spelling fails 5 — including the two that show the consequence rather than the mechanism,
+  the double-encoded URL and `Sigur RA3s` — while every ASCII positive control still passes, which
+  is what shows the suite is not simply failing everything. `matcher_sync_check.py` exits 0
+  (nothing here touches a matcher). Podcast `CACHE_VER` bumped with the build per the dev-build
+  cache rule; nothing here parses a feed, so it is hygiene, not a fix.
+
 ## Regression tests — RUN THESE BEFORE ANY BUILD (added 2026-07-29)
 
     sh tools/t_all.sh          # one line per suite, non-zero exit on any failure
@@ -2966,6 +3121,7 @@ session scratchpads and are gone — so nothing carried forward. Anything worth 
 | `t_favurl.pl` (Spotify sections) | `normaliseFavurl` itself, and then the four readers that consume it — including that none of them reaches `favurlIsTrack`'s fail-open branch, which the file's no-warnings check enforces. Plus `sourceFromSvc`: `spotty` → `spotify`, while a home-shelf id still answers `''` so the cover sniff keeps its turn. Plus 0.1.115's `spottyArtistName`, the ONE reader of a Spotty album object's artist: both legitimate shapes (the cache's plain `artist` string and the raw API's `artists` array), the string winning when both are present, and seven miss cases — including a hash in `artist`, which is the TIDAL/DEEZER shape and must NOT be read here, so a fold of the two extractions fails rather than quietly losing a Tidal row's artist. Calls are `eval`'d because a shape the sub fails to guard DIES rather than returning, and a dying assertion aborts the run instead of reporting it. Plus source checks that both modules ask through the sub and neither open-codes the `artists[0]{name}` read outside its body (`LL_SOURCES_SRC=`/`LL_PLUGIN_SRC=` point those at mutated copies) |
 | `t_reltype.pl` (Spotify section) | That a Spotify EP — `album_type: 'single'` with `total_tracks: 5` — is NOT stored as a single, that it resolved a real tracklist to prove it, and that a 9-track "single" demotes to `album` rather than `ep`. Also that the album is requested by full URI, and that no album object at all falls through to the tracklist instead of dying or inventing |
 | `t_refold.pl` | 0.1.112's fleet fold and the migration it owes: apostrophe elision (and the `'n'` guard) plus `%FOLD` in ALL THREE normalisers, that the three punctuation passes still differ where they must (the key keeps "(Deluxe)", the gate strips it, the ranker keeps "(LP4)"), that the lenient empty-artist gates are untouched, and `_migrateRefold` end to end against real SQLite — a stale key rewritten, same-status duplicates collapsed into the earliest save with the loser's `ref` carried across, MIXED-status rows left alone on their old keys, track `|t:` and playlist `|p:<svc>:<id>` identity segments preserved, and idempotence. Plus, at source level, that the fold lives in `DB.pm` and that `DB::_norm` calls it DIRECTLY while `Sources` goes through `->can` — the failure that guards is a permanent wrong key in a UNIQUE column, which no passing call can show. Plus §4i (0.1.119): a rollback that ITSELF fails must not poison the handle — `AutoCommit` restored, a later transaction still openable, the failed pass still withholding the ladder stamp, and the assertion that actually matters, that an ordinary write made AFTER the failure is durable rather than discarded at shutdown. DBD::SQLite will not fail a rollback on demand, so only the rollback is injected (a `RootClass` subclass); the failing GROUP is 4h's reachable collision. Its squatter pair differs by an apostrophe rather than reusing 4h's accented one — that is fixture history, not a hazard in accents |
+| `t_query_enc.pl` | 0.1.120's per-branch query encoding in `_searchService`: that Qobuz and Tidal are handed CHARACTERS and Deezer OCTETS, and the CONSEQUENCE rather than just the flag — the URL `uri_escape_utf8` actually builds (called for real) and the name Unidecode actually transliterates to (modelled, since Text::Unidecode is not a dependency here). Plus the fail-safe cases in both directions, since a raw-CLI add arrives as octets and must not be corrupted on the way out. **Its fixture is the fragile part and is asserted rather than assumed:** a `"\x{f3}"` literal is stored latin-1 with `utf8::is_utf8` FALSE, so the encode never fires and every branch looks correct — `utf8::upgrade` models what `sqlite_unicode`/JSON::XS really hand back, and the first assertion fails loudly if it is ever dropped. The ASCII positive control is what stops the suite being satisfied by a change that mangles every query equally |
 | `t_load.pl` | every shipped module compiles AND loads, plus a called-vs-defined sweep — `perl -c` passes on a call to a sub that doesn't exist, which nearly shipped a runtime crash in 0.1.83 |
 
 Two rules that follow from how this suite is built:
