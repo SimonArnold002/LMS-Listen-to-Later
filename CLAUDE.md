@@ -82,6 +82,31 @@ does not cover. Say which ledger entry you are challenging and what changed.
   `_savePlaylistRecord` deliberately does not call `_finishAlbumAdd`.** Both are
   release semantics. `Browse::_albumTracks`'s write-back guard is therefore
   `kind eq 'album'` and NOT `ne 'track'` — that is the fix, not a typo.
+- **PODCASTS ARE EPISODE-LEVEL ONLY. A SERIES/SHOW IS OUT OF SCOPE EVERYWHERE, and the
+  streaming side now refuses one (uncommitted, unbuilt — the next version bump carries it).** The Podcasts app has always refused a series:
+  a feed row arrives as `kind:podcast` with the FEED name as `$TITLE`, `Podcast::resolveEpisode`
+  finds no episode containing it, and `_rejectAdd` says so (verified live 2026-09-03 on
+  "Darko.Audio podcast" — nothing stored). The STREAMING side did not, because the two gates it
+  has answer different questions: `_serviceCan` asks about the SERVICE (Spotty is installed, so
+  `spotify` says yes whatever the favurl points at) and `favurlIsTrack` asks album-vs-TRACK,
+  which presumes the row is one of the two. So a Spotify show stored as an ALBUM and a Deezer
+  series took `favurlIsTrack`'s fail-open branch and stored as a TRACK — both verified stored on
+  the test server against 0.1.122, then removed. `Sources::unsupportedContainer` is the third
+  question, called from `_addCtxCommand` ahead of every storing branch. **Do not "fix" this by
+  widening `favurlIsTrack`** — that only moves the Deezer row from the track path to the album
+  path, still stored; the anti-test in `t_addpath.pl` asserts BOTH shapes for exactly that
+  reason (4 red without the gate, and each names which wrong shape it stored as). Supporting
+  series would be a `kind='playlist'`-shaped container feature per service, not a gate change.
+- **A TIDAL `mix:` is refused, and that is NOT a claim that mixes are unaddable — it is that
+  TIDAL keeps them off the playlist call.** `Plugins::TIDAL::Plugin::getPlaylist` takes
+  `$params->{uuid}` and calls `$api->playlist`; `getMix` takes `$params->{id}` and calls
+  `$api->mix` (read from the plugin source, 2026-09-03). Routing a mix id through
+  `playlistFromRow` would hand it to the wrong endpoint, so replaying one needs a getMix
+  adapter. **Spotify's "mixes" are NOT this** — Daily Mix / Popular Playlists come through as
+  plain `spotify:playlist:<id>` (verified live), reach `playlistFromRow`, and store as
+  playlists exactly as before. Nothing in the reject list touches them, and
+  `t_addpath.pl` pins that with a positive `Daily Mix 1` row. Don't add `mix` to
+  `playlistFromRow`'s container match without the adapter.
 - **`_migrateRefold`'s merge sort puts a NULL `added_at` LAST, and that does not
   contradict "earliest save wins" — DECLINED 2026-09-03.** The finding was that the
   `9**15` sentinel sorts an unknown `added_at` as the NEWEST row, so the migration
@@ -121,25 +146,83 @@ does not cover. Say which ledger entry you are challenging and what changed.
   `Slim::Utils::Unicode` and never calls `utf8::downgrade`. Revisit only if a
   producer that downgrades is added — the fix then is to upgrade a failed decode as
   Latin-1, and it changes a stored key, so it owes a migration.
+  **RE-RAISED verbatim and RE-DECLINED 2026-09-03 (tenth round), with the three producer
+  claims MEASURED rather than asserted, since the entry above stated them without a
+  number:** JSON::XS 4.02 returns `is_utf8=1` for `Björk` from a `ö` escape, from raw
+  UTF-8 bytes, AND from the non-`utf8` decoder; DBD::SQLite 1.64 under
+  `sqlite_unicode => 1` returns flagged strings on every read, pure ASCII included; the raw
+  CLI hands octets, which the decode adopts (already pinned by `t_refold.pl` §4f). The one
+  `utf8::encode` in the plugin (`Sources.pm`, the search-query conversion) writes a LOCAL
+  copy and never reaches `dedupeKey`. **Re-raising this needs a NAMED producer that
+  downgrades — a module and a measurement, not the mechanism.** The mechanism is not in
+  dispute and restating it is not new information.
+
+- **A Spotify ARTIST row cannot reach the add command — do not report it as an unguarded
+  source. WITHDRAWN 2026-09-03 (tenth round).** The finding was that
+  `_isReplayableSource('spotify')` is true for every Spotify favurl shape, so
+  `spotify://artist:<id>` stores as an album row with no album id. The add path really would
+  store one — but nothing can hand it that favurl. Material maps a `spotify:artist:` /
+  `deezer://artist:` / `qobuz://artist:` / `tidal://artist:` favurl to
+  `STD_ITEM_ONLINE_ARTIST` (`browse-resp.js`, the `presetParams.favorites_url` branch), which
+  makes `btype` = `artist`, which resolves the category `<command>-artist` → `online-artist` —
+  and `Plugin.pm` deliberately defines NEITHER, so `getCustomActions` returns undef and no Add
+  renders on an artist row at all. **Verified live 2026-09-03**: Spotty artist rows DO carry
+  `favorites_url: spotify:artist:<id>` (so the premise is right), and no LL action is offered
+  on them. The gate exists anyway since the tenth round — `Sources::unsupportedContainer`
+  lists `artist` — but as defence in depth behind the 0.1.51 rule that the COMMAND is the
+  gate, not as a fix for a reachable bug. Don't re-derive it from `_serviceCan` being
+  per-service: that is true of every service and always was.
 
 
-- **`_migrateRefold` CANNOT be trapped in a permanent retry loop by an ordinary
-  collision — WITHDRAWN 2026-09-03 (fourth round).** The finding was that a group
-  whose rekey collides with a PERMANENTLY-skipped mixed-status row fails on every
-  boot for ever: same scan, same warn, `user_version` never stamped, rows stuck on
-  the old fold. **The grouping is what makes this near-unreachable, and that is the
-  part to check before re-raising it.** Groups are keyed by `(source, _new)`, so
-  every row sharing a survivor's TARGET key is in the SAME group and is DELETEd
-  before the UPDATE — an outside collision cannot come from a row that folds to the
-  same key. It needs a row whose OLD key equals another group's NEW key, i.e. a
-  fold change that is NON-MONOTONE (the new pass must be able to PRODUCE a form the
-  old pass also produced for different input). Every fold change LL has made is a
-  strict collapse — accents, apostrophes, `%FOLD` — whose output space excludes the
-  old-only forms, so `oldfold(X) == newfold(B)` has no solution. Constructible only
-  with a contrived pair (old replaces a mark where new deletes it, plus a second
-  segment that folds). The retry-at-next-start policy stands: the reachable causes
-  really are transient. **Re-raise only with a concrete non-monotone rule** — naming
-  one is the new information, not restating the loop.
+- **`_migrateRefold` CANNOT be trapped in a permanent retry loop by stored data —
+  WITHDRAWN 2026-09-03 (fourth round); RE-RAISED and RE-WITHDRAWN 2026-09-03 (ninth
+  round), with the fourth round's reasoning CORRECTED below. Do not raise it again.**
+  The finding is that a group whose rekey collides with a PERMANENTLY-skipped
+  mixed-status row fails on every boot for ever: same scan, same warn, `user_version`
+  never stamped, rows stuck on the old fold.
+
+  **The fourth round's reason was WRONG, and being wrong is what invited the re-raise.**
+  It said an outside collision needs a NON-MONOTONE fold rule, that every LL fold change
+  is a strict collapse, and so `oldfold(X) == newfold(B)` "has no solution". LL HAS a
+  non-monotone rule. The old `_norm` (`git show main:ListenLater/DB.pm`) had no
+  `foldLatin`, so an apostrophe fell through `s/[^a-z0-9]+/ /g` and became a SPACE;
+  `foldLatin` now ELIDES it. The new fold still produces the old form from other input:
+
+      Jane's Addiction    old=jane s addiction    new=janes addiction
+      Jane s Addiction    old=jane s addiction    new=jane s addiction   <- reproduces it
+
+  Seeded with those two rows the migration really does collide. So the algebra is not
+  the barrier and must not be offered as one again.
+
+  **THE BARRIER IS THE DATA — check this instead.** A collision needs
+  `oldfold(R) == newfold(S)` with R and S in DIFFERENT groups. If the fold does not
+  change R then `oldfold(R) == newfold(R)`, so R sits in S's OWN group and is DELETEd
+  before the UPDATE. R must therefore be CHANGED by the fold — and all the change ever
+  does is remove a character the old fold turned into a SPACE (an apostrophe inside a
+  word, or a diacritic). `oldfold(R)` consequently always carries a space where the real
+  title has punctuation, so for S to land on that key **S's own title must contain a
+  LITERAL separator in that exact position**. Service metadata does not do that. Qobuz
+  will hand you both `Jane's Addiction` and `Janes Addiction` as separate entities —
+  that is WHY the refold exists — but never `Jane s Addiction`. The realistic
+  apostrophes are not even candidates: `Guns N' Roses` and `Rock'n'Roll` fold to the
+  SAME string under both folds (the `'n'` guard), so neither can be R. And the group key
+  includes `source`, so both rows must come from the same service. A title is stored as
+  the service spells it.
+
+  **AND THE TIDY FIX IS UNSAFE — this is the part that matters most.** "A UNIQUE
+  collision is policy, not an error, so count it as `$skipped` and stamp anyway" reads as
+  obviously right. It is not. `for my $g (values %group)` is HASH order, randomised per
+  process, so a collision against a row that a LATER group would have vacated is
+  TRANSIENT — measured at ~40% of runs on the pair above, and healed by the next boot.
+  Stamping through it would retire the migration with those rows stranded on the old fold
+  for ever: the invisible-row state the migration exists to prevent, and precisely the bug
+  the third round's finding #3 fixed. Withholding the stamp is the SAFE side of that
+  trade and stays.
+
+  **Re-raise ONLY with a service-supplied title that folds to a literal separator where
+  its counterpart has punctuation.** Naming stored data that reaches the state is the new
+  information. Naming a non-monotone rule is NOT — one exists, it is written out above,
+  and it does not reach the database.
 - **The 0.1.116 `lc`-ordering fix owes NO schema-6 rung — CONFIRMED 2026-09-03
   (fourth round), and the "no migration owed" note is right as written.** The
   finding was that `_migrateRefold` stamps `user_version = 5` at 0.1.112, so a row
@@ -157,6 +240,35 @@ does not cover. Say which ledger entry you are challenging and what changed.
   updating it and a 2 → 5 upgrade that fails at the refold says "schema left at
   version 2" when the DB is at 4. True, and cosmetic: one word in a warn on a path
   that has already failed and already says it will retry. Not worth a change.
+- **`_materialActionTier`'s version gate is NOT a hole — WITHDRAWN 2026-09-03 (ninth
+  round). Every reachable case is already covered; check all four before re-raising.**
+  The finding was that `materialAtLeast` answers 1 for any string that does not parse,
+  so an unparseable version reaches tier 2 and calls the tier-2-only one-arg
+  `registerCustomAction($section)` — which on a real 6.4.6/6.4.7 pushes `undef` into the
+  section and takes out EVERY plugin's custom actions there, not just ours. The call is
+  as dangerous as that says. It is just not reachable:
+
+      no Material / no registerCustomAction  -> tier 0, returned by the ->can gate
+                                                BEFORE the version is read at all
+      getPluginVersion dies or is absent     -> undef -> materialAtLeast undef -> FALSY -> tier 1
+      "6.4.6" / "6.4.7"                      -> parses -> 0 -> tier 1
+      "6.4.7-beta1" and friends              -> the regex is UNANCHORED at the end, so the
+                                                leading triple still parses -> tier 1
+
+  So the ONLY route to tier 2 without a parsed >= 6.4.8 is a string that does not START
+  `N.N.N`, and a released Material is always `N.N.N`. That is the dev-build case, which
+  `Plugin.pm` documents as deliberate in the same breath as the window that made it wrong
+  (a dev build cut between 6.4.6 and the #1257 merge, 2026-08-30 — closed). All four rows
+  above are pinned in `t_material_actions.pl`'s tier table, the suffixed rows added by this
+  round (`6.4.7-beta1`, `6.4.6.1`, `6.4.8-rc2`) because the bare-version rows alone did not
+  cover the case the finding actually rested on. ANTI-TEST: anchor `materialAtLeast`'s regex
+  at the end (`/^(\d+)\.(\d+)\.(\d+)$/`) and exactly those two below-threshold rows go red —
+  they are what stops a real 6.4.7 reaching tier 2. The comparator's three-way answer (undef
+  vs 0 vs 1) is pinned separately, because undef and 0 are both falsy today and a caller may
+  one day need to tell them apart.
+
+  **Before re-raising, check the `->can` gate first.** It returns tier 0 and never consults
+  the version — reading the two gates as independent is what produced this finding.
 
 ### B. KNOWN-OPEN AND ACCEPTED — do not re-report as new
 
@@ -245,7 +357,7 @@ declined, plus two defects the knock-on pass found (below). Tests 13 suites gree
 | # | finding | disposition |
 |---|---|---|
 | 1 | `_pruneMaterialActions` gates `%emptyFallback` on `$REGISTERED_N` alone, so if tier-2 registration refuses EVERYTHING the refused `online-*` pair is written to the file with no suppressor on either half — "Add" back on our own list/Played/Wish List rows and on radio browse rows | **FIXED** — gate is now `($REGISTERED_N \|\| %fallback)`: "is anything of ours live", not "did anything register". `t_material_actions.pl` covers both directions (3 red without it) |
-| 2 | `_migrateRefold` DELETEs the losing rows before the survivor's UPDATE on an AutoCommit handle, so a failed rekey commits the merge away and keeps the stale key — a saved album and its play history gone, silently | **FIXED** — one transaction per group, rolled back whole. The collision is reachable with no injected failure: a mixed-status group left on its OLD keys can hold the key another survivor is claiming. `t_refold.pl` §4h builds exactly that (4 red without it, and the row count drops to 3) |
+| 2 | `_migrateRefold` DELETEs the losing rows before the survivor's UPDATE on an AutoCommit handle, so a failed rekey commits the merge away and keeps the stale key — a saved album and its play history gone, silently | **FIXED** — one transaction per group, rolled back whole. `t_refold.pl` §4h pins it by PLANTING a squatting key (4 red without it, and the row count drops to 3). The plant is what makes the test deterministic: stored data cannot reach that state (§A2, ninth round), so §4h proves the TRANSACTION, not reachability |
 | 3 | `PRAGMA user_version = 5` was stamped even when `_migrateRefold` bailed, retiring the migration for good and leaving every key on the old fold — the invisible-row state it exists to prevent | **FIXED** — `_migrateRefold` returns false on a failed SELECT or a rolled-back group, and only a true return stamps. A mixed-status skip does NOT withhold the stamp: policy, not error, and it could only re-log the same warn for ever. `t_refold.pl` §4g (6 red without it) |
 | 4 | the Settings save now calls `_registerMaterialActions` ungated, so on tier 1 ticking then unticking leaves entries live until a restart where it used to clean up in-session | **DECLINED** — unavoidable and already reported to the user. On tier 1 `$api` is `($REGISTERED && $tier)`, so without registering on save the toggle writes nothing and does nothing until a restart (that is the 0.1.110 bug the save-register fixed). Material has no unregister API, so once registered the only honest answer is the restart warning `_clearMaterialActions` already logs |
 | 5 | the per-service verdict in `_dumpMaterialState` reads only the file, so on tier 2 it reported `listenlater`/`LLHome`/`podcasts` as "Add shown (via online-\*)" when they are registered-suppressed/overridden | **FIXED** — it now reads both halves the way `browse-resp.js` does and NAMES the half ("registered empty … section" vs "empty … in actions.json"). Evidence, not intent: the old `@radioCats` fall-back claimed a suppressor we might never have delivered. 8 new checks (3 red without it) |
@@ -303,7 +415,7 @@ for each is in section A2 above so the next round starts from it.** Tests
 |---|---|---|
 | 1 | `_pruneMaterialActions`'s `%regCount` counts entries registration REFUSED as delivered, because it subtracts the caller's `%fallback` — which the `$prefOff`/`$departing` paths deliberately zero | **FIXED** — `_deliveredCounts` subtracts `%UNREGISTERED` directly (2 red without it) |
 | 2 | the pref-off warn says "No suppressor registered either, so another plugin's Add is not being held off those rows" and the prune then writes exactly those suppressors | **FIXED** — the clause now reports what the prune will leave live (2 red without it) |
-| 3 | a refold collision with a permanently-skipped mixed-status group could withhold `user_version` for ever | **WITHDRAWN** — grouping makes it need a non-monotone fold rule; section A2 |
+| 3 | a refold collision with a permanently-skipped mixed-status group could withhold `user_version` for ever | **WITHDRAWN**, but the stated reason was WRONG and was corrected in the ninth round — a non-monotone rule DOES exist (old `_norm` spaced an apostrophe, `foldLatin` elides it); the real barrier is that no service emits the title that would trigger it, and stamping through a collision would be unsafe. Section A2 |
 | 4 | the 0.1.116 `lc` fix changes the octet-path key with no new migration rung | **WITHDRAWN** — `main` is 0.1.93, those builds never shipped; section A2 |
 | 5 | the rung-5 failure warn prints the entry `$schemaVer`, not the stamped one | **ACCEPTED, no change** — cosmetic; section A2 |
 
@@ -577,6 +689,80 @@ entry (the `podcasts-*` override replaces the pair), which is where the README's
 podcast episodes" came from; playlists reach the same place by a different mechanism, and the README
 now says so. Third round running that the prose was wrong where the code was right — a review that
 diffs code against code never asks whether the product still matches its description.
+
+
+**Ninth round of 2026-09-03 — CLOSED, two findings, both WITHDRAWN; no product-code change.** Run against the
+0.1.122 tree (`@{upstream}...HEAD`, 19 commits, 0.1.107 → 0.1.122). Both were WITHDRAWN under
+challenge; the value of the round is in what the ledger now says, not in the diff. Tests 1130 → 1133 assertions, 14 suites green — the round's only executable change, three rows in the tier table.
+
+| # | finding | disposition |
+|---|---|---|
+| 1 | `_materialActionTier` treats an unparseable Material version as ≥6.4.8 and unlocks the tier-2-only one-arg `registerCustomAction($section)`, which on a real 6.4.6/6.4.7 pushes `undef` and takes out every plugin's custom actions in that section | **WITHDRAWN** — every reachable case is already covered: no API returns tier 0 BEFORE the version is read; `getPluginVersion` dying returns `undef` → falsy → tier 1; `6.4.6`/`6.4.7` parse → tier 1; and `materialAtLeast`'s regex is unanchored at the end, so `6.4.7-beta1` still parses → tier 1 (pinned, `t_material_actions.pl`). Only a genuinely non-numeric version reaches tier 2, which is the dev-build case `Plugin.pm` already documents as deliberate. The tier table gained `6.4.7-beta1` / `6.4.6.1` / `6.4.8-rc2` — the bare-version rows did not cover the suffixed case the finding rested on (2 red if the regex is anchored) |
+| 2 | a refold collision with a permanently-skipped mixed-status group withholds `user_version` for ever | **WITHDRAWN — and the proposed FIX was unsafe.** Re-raised because §A2's stated reason was wrong (see §A2: a non-monotone rule DOES exist). The barrier is the DATA, not the algebra. More important: reclassifying a UNIQUE collision as `$skipped` would have stranded rows on the old fold on ~40% of upgrades, re-introducing the third round's finding #3 |
+
+Carried forward:
+
+- **A withdrawal is only as durable as its REASON.** §A2's fourth-round entry closed this
+  finding with an argument that was false ("`oldfold(X) == newfold(B)` has no solution") and
+  invited a re-raise by naming the exact key that unlocks it ("re-raise only with a concrete
+  non-monotone rule") — which the ninth round then found in ten minutes. A ledger entry that
+  states a slightly-wrong reason is worse than one that states none, because it hands the next
+  reviewer a test to pass. §A2 now argues from stored data, and says outright that naming a
+  non-monotone rule is NOT new information.
+- **A test's fixture is not evidence of reachability.** §4h's comment claimed "the collision is
+  REACHABLE without any injected failure", and the round-3 ledger row repeated it. True of the
+  FAILURE — the UPDATE really does hit the constraint — and false of the STATE: §4h plants a
+  `dedupe_key` on a Sigur Rós row that no fold could produce for it. Both now say PLANTED, and
+  say what 4h actually pins (the transaction).
+- **Check whether the tidy fix is safe before offering it, not after.** "A UNIQUE collision is
+  policy, not an error" is true of the permanent case and false of the transient one, and
+  `for my $g (values %group)` is HASH order — so the two are indistinguishable at the point of
+  failure. §4i's own comment already recorded this test passing and failing run to run on group
+  order; nobody connected it to the stamp policy. `_migrateRefold` now carries a DO NOT TIDY
+  note at the `return`.
+
+**Tenth round of 2026-09-03 — CLOSED, two findings: one HALF-WRONG and re-scoped into a real
+fix, one RE-RAISED and RE-DECLINED. The round's value is that BOTH verdicts came off the live
+server rather than off the code.** Run against the 0.1.122 tree. Tests 1150 → 1169 assertions,
+14 suites green.
+
+| # | finding | disposition |
+|---|---|---|
+| 1 | `_isReplayableSource('spotify')` is true for every Spotify favurl shape, so `spotify://show:` and `spotify://artist:` store as album rows with no album id | **SPLIT.** The ARTIST half is WRONG and unreachable (Material resolves an artist favurl to `online-artist`, which LL never defines — §A2). The SHOW half is REAL, reproduced live, and BIGGER than written: `deezer://podcast:` stores as a fail-open TRACK, which the Spotify-only framing missed entirely. **FIXED** — `Sources::unsupportedContainer` + a gate in `_addCtxCommand` (4 red without it) |
+| 2 | `foldLatin` gates the fold on `utf8::is_utf8`, a storage flag, not on content | **RE-DECLINED** — verbatim re-raise of the second round's #4; the three producers are now MEASURED in §A2 rather than asserted |
+
+**FINDING 1 WAS RIGHT ABOUT THE WRONG THING, AND THE REVIEW COULD NOT HAVE TOLD WHICH FROM THE
+CODE.** Both halves read identically in `Sources.pm` — one favurl shape, one per-service gate,
+no branch between them. What separates them lives in Material's `browse-resp.js` and in what
+each service actually emits, and the answers went opposite ways: an artist favurl resolves to a
+category LL deliberately never defines, so no button exists; a show favurl resolves to
+`online-album` and gets the full Add. **The rule: a finding about what a Material row can DO is
+not settled in this repo.** Read the served bundle for the category, and browse the service for
+the favurl — both were a five-minute HTTP call away, and doing them turned one speculative
+finding into one refutation and one reproduction.
+
+**AND THE FRAMING HID THE WORSE HALF.** Written as "the Spotify replay gate widened in 0.1.113",
+the finding pointed at a per-service test that has looked like that since 0.1.51 and is
+identical for Qobuz, TIDAL and Deezer. The actual defect is that NO gate asks whether a favurl
+names a container we can replay — `_serviceCan` asks about the service, `favurlIsTrack` asks
+album-vs-track — and the moment that was stated properly, Deezer fell out of it, worse (a
+kind='track' row pointing `type => 'audio'` at a series url) and years older than the Spotify
+adapter. **Before writing a finding as a regression, check whether the same question has a
+different answer at the OTHER services** — the sibling that never changed is the one nobody is
+looking at.
+
+**Carried forward, and the reason both rounds' fixes needed a live server:**
+
+- **Three test rows on the real box settled what nine rounds of reading had not.** The show
+  stored, the Deezer series stored, the podcast-app feed row did NOT — and that last one is
+  what turned "should we support shows?" into "the streaming side is inconsistent with the
+  Podcasts app", which is a fix rather than a feature. Adding a row and deleting it costs
+  nothing and answers reachability outright; both the finding and the ledger entry that came
+  out of it are stronger for it than any amount of tracing.
+- **An anti-test has to name the WRONG shape, not just the absence.** Disabling the gate turns
+  the three refusal rows red with `stored as album`, `stored as track`, `stored as album` — the
+  Deezer one is the whole reason the gate cannot live inside `favurlIsTrack`, and an anti-test
+  that only asserted "something stored" would have let that placement error through.
 
 ### D. ADDING TO THIS LEDGER
 
@@ -900,7 +1086,7 @@ Played albums are auto-removed after `played_retention_days` (default 7; **0 = k
 
 ## Streaming replay per service (Sources.pm) — the differences that bite
 
-**ADDING A NEW SERVICE — READ `docs/streaming-adapter-spec.md` FIRST.** It is the adapter contract across the released plugins (LBF, PFR, LL), carried verbatim in each repo: what a service's own plugin must expose (R1-R8), the leg semantics (`undef` = inconclusive vs `[]` = a real miss, and the TTL each picks), the item fields to stamp, the acceptance tests, and — per plugin — every site that still forces an edit OUTSIDE the adapter table, with the registry field that closes it. **This repo is the exception the spec's section 9 describes: it RECOGNISES a service from a url scheme rather than searching one, and its capability logic sits in per-source branches across `Sources.pm` and `Plugin.pm` rather than in an adapter table.** The claim that full support "wants those branches collected into a sources table of coderefs first" was **DISPROVEN by the Spotify build (0.1.113)** — full parity landed in ten branches with no refactor. The refactor is still worth doing; it is not a prerequisite, so do not let it block a service. The ten sites, so the next one is counted rather than guessed at: `_streamingAlbumNode`, `_streamingPlaylistNode`, `_searchService`, `_serviceCan`, `_serviceCanPlaylist`, `%SUPPORTED_CMD`, `classifyRelType` (only if the service states a type/count on its album object), `_backfillStreamingArtist` (only if its rows can arrive artist-less), `sourceFromSvc`/`%SVC_ALIAS` (only if the service's BROWSE COMMAND differs from its source tag — Spotty browses as `spotty` and plays `spotify://`), and `normaliseFavurl` (only if its favurl is not a `<scheme>://` url — Spotty sends the bare URI `spotify:album:<id>`). **The last two were MISSED by this very sentence when 0.1.113 wrote it**, which is exactly the failure the count exists to prevent: both are conditional, like the two before them, so a service that needs neither reads the list as complete and a service that needs one finds nothing telling it to look. A missed alias silently drops the native album id (the row falls back to fuzzy search, 0.1.96's class of bug); a missed normalisation misreads the favurl in all four readers at once. Edit the canonical copy in the ListenBrainz repo and re-copy, per the header.
+**ADDING A NEW SERVICE — READ `docs/streaming-adapter-spec.md` FIRST.** It is the adapter contract across the released plugins (LBF, PFR, LL), carried verbatim in each repo: what a service's own plugin must expose (R1-R8), the leg semantics (`undef` = inconclusive vs `[]` = a real miss, and the TTL each picks), the item fields to stamp, the acceptance tests, and — per plugin — every site that still forces an edit OUTSIDE the adapter table, with the registry field that closes it. **This repo is the exception the spec's section 9 describes: it RECOGNISES a service from a url scheme rather than searching one, and its capability logic sits in per-source branches across `Sources.pm` and `Plugin.pm` rather than in an adapter table.** The claim that full support "wants those branches collected into a sources table of coderefs first" was **DISPROVEN by the Spotify build (0.1.113)** — full parity landed in ten branches with no refactor. The refactor is still worth doing; it is not a prerequisite, so do not let it block a service. The ELEVEN sites, so the next one is counted rather than guessed at: `_streamingAlbumNode`, `_streamingPlaylistNode`, `_searchService`, `_serviceCan`, `_serviceCanPlaylist`, `%SUPPORTED_CMD`, `classifyRelType` (only if the service states a type/count on its album object), `_backfillStreamingArtist` (only if its rows can arrive artist-less), `sourceFromSvc`/`%SVC_ALIAS` (only if the service's BROWSE COMMAND differs from its source tag — Spotty browses as `spotty` and plays `spotify://`), `normaliseFavurl` (only if its favurl is not a `<scheme>://` url — Spotty sends the bare URI `spotify:album:<id>`), and `unsupportedContainer` (only if the service browses CONTAINERS we cannot replay — a podcast series, a mix; added 0.1.123 after Spotify shows and Deezer podcasts were found storing as albums and tracks respectively). **The last two were MISSED by this very sentence when 0.1.113 wrote it**, which is exactly the failure the count exists to prevent: both are conditional, like the two before them, so a service that needs neither reads the list as complete and a service that needs one finds nothing telling it to look. A missed alias silently drops the native album id (the row falls back to fuzzy search, 0.1.96's class of bug); a missed normalisation misreads the favurl in all four readers at once; a missed container type stores a row that can never replay, which is the one thing `_isReplayableSource` exists to prevent. Edit the canonical copy in the ListenBrainz repo and re-copy, per the header.
 
 **AN ELEVENTH SITE, added 0.1.120: `_searchService`'s QUERY ENCODING.** It is inside a site already
 on the list, which is exactly why it went unnoticed for two months — a new service's branch is written
@@ -3039,8 +3225,9 @@ The "Add to Listen Later"/"Add to Wish List" custom actions appear on streaming 
 
   **Three DB findings withdrawn, all recorded in the Review Ledger §A2** so the next round
   starts from the reasoning rather than re-deriving it: the refold "permanent retry loop"
-  (grouping by `(source, _new)` means an outside collision needs a NON-MONOTONE fold rule,
-  and every fold change LL has made is a strict collapse), the missing schema-6 rung for
+  (said here to need a NON-MONOTONE fold rule that LL does not have — **wrong, and corrected
+  in the ninth round: one exists, and the real barrier is that no service emits the title it
+  needs**), the missing schema-6 rung for
   0.1.116's `lc` fix (real mechanism, empty population — **`main` is 0.1.93**, so 0.1.112–
   0.1.116 never shipped), and the rung-5 failure warn printing the entry `$schemaVer` rather
   than the stamped one (true, cosmetic, accepted). Podcast `CACHE_VER` bumped 22 → 23 with
@@ -3277,6 +3464,65 @@ The "Add to Listen Later"/"Add to Wish List" custom actions appear on streaming 
   parses a feed either — it is the same hygiene 0.1.121 did, and it is per BUILD, not per
   feed-parsing change.
 
+- **0.1.123 — a container with no adapter is REFUSED instead of stored (the tenth 2026-09-03
+  review round; see that round's ledger entry above).** One new gate, `Sources::unsupported-
+  Container`, called from `_addCtxCommand` ahead of every branch that stores.
+
+  **What was actually wrong.** The add path had two gates and they answer different questions:
+  `_isReplayableSource` → `_serviceCan` asks about the SERVICE (Spotty is installed, so
+  `spotify` says yes whatever the favurl points at), and `favurlIsTrack` asks album-vs-TRACK,
+  which presumes the row is one of the two. A podcast SERIES is neither, so nothing refused it.
+  **Both halves were reproduced on the test server against 0.1.122 and then removed:**
+  `spotify://show:5wMPFS9B5V7gg6hZ3UZ7hf` (Serial, from a Spotty search) stored as an ALBUM row
+  with no album id — replay would be a fuzzy search for an album named after the show, with the
+  show's *blurb* as the artist — and `deezer://podcast:19887` (The Minimalists, Deezer →
+  Podcasts → Top 100) took `favurlIsTrack`'s FAIL-OPEN branch and stored as a `kind='track'` row
+  pointing `type => 'audio'` at a series url, logging the "assuming TRACK for an unrecognised
+  favurl shape" warning that exists to name exactly this.
+
+  **It is a consistency repair, not a step toward series support.** The built-in Podcasts app
+  has always refused a series — a feed row resolves no episode and `_rejectAdd` says so (verified
+  live on "Darko.Audio podcast"). Episodes are unaffected and still store:
+  `spotify://episode:…` remains a track, and `podcast://<enclosure>` is untouched.
+
+  **The type list, and why each is in it.** `show`/`podcast` are the series shapes. `mix` is
+  TIDAL's — refused rather than routed to the playlist path because TIDAL's own plugin keeps
+  them apart (`getPlaylist` takes a `{uuid}` → `$api->playlist`, `getMix` takes an `{id}` →
+  `$api->mix`), so replaying one needs a getMix adapter. **Spotify's "mixes" are not this** —
+  Daily Mix / Popular Playlists are plain `spotify:playlist:` URIs, reach `playlistFromRow`, and
+  store as playlists exactly as before. `artist` is defence in depth: Material resolves an
+  artist favurl to `online-artist`, which this plugin deliberately never defines, so no Add
+  renders on an artist row — but since 0.1.51 the COMMAND is the gate precisely because it does
+  not depend on Material's button.
+
+  **The scheme split is load-bearing, and live data proved it.** `podcast` is both a Deezer type
+  name and OUR OWN scheme — `Podcast.pm` stores an episode as `podcast://<enclosure url>`, which
+  matches `^podcast:` at position 0. Matching the whole url unanchored would have refused every
+  episode add in the plugin. The false-positive sweep below caught the real row
+  (`podcast://https://feeds.soundcloud.com/stream/…`, already saved in the list) and it is now a
+  fixture; removing the guard turns three assertions red.
+
+  **A FALSE-POSITIVE SWEEP AGAINST REAL DATA, not just fixtures.** 286 distinct favurls
+  harvested by crawling every installed service on the test server (Qobuz, Bandcamp, TIDAL,
+  Deezer, Spotty, Podcasts, Radio Paradise, LastMix, Favourites) and run through the new sub:
+  **8 refused, all of them TIDAL mixes** — the intended target, no false positive. It also
+  surfaced the two Deezer Flow shapes (`deezer://user/…/flow.dzr`, `deezer://user.flow`), which
+  say `user` with a SLASH rather than the `:` the legacy Spotify playlist form uses; both are
+  now fixtures, because a widened type list would take them first. **Coverage limit, stated
+  rather than glossed:** Qobuz and Bandcamp contributed ZERO favurls (their browse rows carry
+  none — Qobuz's album id comes off the cover url), so they cannot be affected by a favurl gate,
+  but the sweep says nothing about them. The crawl went two levels deep, which is why the show
+  and Deezer-series rows were confirmed by hand instead.
+
+  **All 14 suites green, 1,173 assertions** (up from 1,150): `t_favurl.pl` 133 → 156,
+  `t_addpath.pl` 133 → 142. Anti-tests: stub the sub → 4 red in `t_favurl.pl`; remove the gate →
+  4 red in `t_addpath.pl`, each naming the wrong shape it stored as (`album`, `track`, `album`)
+  — which is why the Deezer row is asserted alongside the Spotify one. **Move the gate inside
+  `favurlIsTrack` and the Deezer row merely becomes an album instead of a track, still stored,
+  and a Spotify-only assertion stays green.** That is what the placement test exists for.
+
+  Podcast `CACHE_VER` bumped 27 → 28 with the build per the dev-build cache rule.
+
 ## Regression tests — RUN THESE BEFORE ANY BUILD (added 2026-07-29)
 
     sh tools/t_all.sh          # one line per suite, non-zero exit on any failure
@@ -3310,7 +3556,7 @@ session scratchpads and are gone — so nothing carried forward. Anything worth 
 | `t_addpath.pl` (Spotify section) | 0.1.113's Spotify support end to end: a bare `spotify:album:<id>` URI storing as an album with source `spotify` and its id captured, a track URI storing a playable `spotify://track:<id>`, both playlist spellings landing the same short id, `svc:'spotty'` resolving to source `spotify` with no cover to sniff — and **the rebuild test**, replaying each stored row and asserting Spotty received a full URI rather than a bare id (a bare id matches nothing in `API::album` and returns an empty tracklist, i.e. a row that plays once and is then gone). The Spotty stubs are declared at the END of the file on purpose, so every test above it runs with Spotty ABSENT and the `->can` refusal is covered by the same file |
 | `t_favurl.pl` (Spotify sections) | `normaliseFavurl` itself, and then the four readers that consume it — including that none of them reaches `favurlIsTrack`'s fail-open branch, which the file's no-warnings check enforces. Plus `sourceFromSvc`: `spotty` → `spotify`, while a home-shelf id still answers `''` so the cover sniff keeps its turn. Plus 0.1.115's `spottyArtistName`, the ONE reader of a Spotty album object's artist: both legitimate shapes (the cache's plain `artist` string and the raw API's `artists` array), the string winning when both are present, and seven miss cases — including a hash in `artist`, which is the TIDAL/DEEZER shape and must NOT be read here, so a fold of the two extractions fails rather than quietly losing a Tidal row's artist. Calls are `eval`'d because a shape the sub fails to guard DIES rather than returning, and a dying assertion aborts the run instead of reporting it. Plus source checks that both modules ask through the sub and neither open-codes the `artists[0]{name}` read outside its body (`LL_SOURCES_SRC=`/`LL_PLUGIN_SRC=` point those at mutated copies) |
 | `t_reltype.pl` (Spotify section) | That a Spotify EP — `album_type: 'single'` with `total_tracks: 5` — is NOT stored as a single, that it resolved a real tracklist to prove it, and that a 9-track "single" demotes to `album` rather than `ep`. Also that the album is requested by full URI, and that no album object at all falls through to the tracklist instead of dying or inventing |
-| `t_refold.pl` | 0.1.112's fleet fold and the migration it owes: apostrophe elision (and the `'n'` guard) plus `%FOLD` in ALL THREE normalisers, that the three punctuation passes still differ where they must (the key keeps "(Deluxe)", the gate strips it, the ranker keeps "(LP4)"), that the lenient empty-artist gates are untouched, and `_migrateRefold` end to end against real SQLite — a stale key rewritten, same-status duplicates collapsed into the earliest save with the loser's `ref` carried across, MIXED-status rows left alone on their old keys, track `|t:` and playlist `|p:<svc>:<id>` identity segments preserved, and idempotence. Plus, at source level, that the fold lives in `DB.pm` and that `DB::_norm` calls it DIRECTLY while `Sources` goes through `->can` — the failure that guards is a permanent wrong key in a UNIQUE column, which no passing call can show. Plus §4i (0.1.119): a rollback that ITSELF fails must not poison the handle — `AutoCommit` restored, a later transaction still openable, the failed pass still withholding the ladder stamp, and the assertion that actually matters, that an ordinary write made AFTER the failure is durable rather than discarded at shutdown. DBD::SQLite will not fail a rollback on demand, so only the rollback is injected (a `RootClass` subclass); the failing GROUP is 4h's reachable collision. Its squatter pair differs by an apostrophe rather than reusing 4h's accented one — that is fixture history, not a hazard in accents |
+| `t_refold.pl` | 0.1.112's fleet fold and the migration it owes: apostrophe elision (and the `'n'` guard) plus `%FOLD` in ALL THREE normalisers, that the three punctuation passes still differ where they must (the key keeps "(Deluxe)", the gate strips it, the ranker keeps "(LP4)"), that the lenient empty-artist gates are untouched, and `_migrateRefold` end to end against real SQLite — a stale key rewritten, same-status duplicates collapsed into the earliest save with the loser's `ref` carried across, MIXED-status rows left alone on their old keys, track `|t:` and playlist `|p:<svc>:<id>` identity segments preserved, and idempotence. Plus, at source level, that the fold lives in `DB.pm` and that `DB::_norm` calls it DIRECTLY while `Sources` goes through `->can` — the failure that guards is a permanent wrong key in a UNIQUE column, which no passing call can show. Plus §4i (0.1.119): a rollback that ITSELF fails must not poison the handle — `AutoCommit` restored, a later transaction still openable, the failed pass still withholding the ladder stamp, and the assertion that actually matters, that an ordinary write made AFTER the failure is durable rather than discarded at shutdown. DBD::SQLite will not fail a rollback on demand, so only the rollback is injected (a `RootClass` subclass); the failing GROUP is 4h's planted collision. Its squatter pair differs by an apostrophe rather than reusing 4h's accented one — that is fixture history, not a hazard in accents |
 | `t_query_enc.pl` | 0.1.120's per-branch query encoding in `_searchService`: that Qobuz, Tidal and Spotty (0.1.121) are handed CHARACTERS and Deezer OCTETS, and the CONSEQUENCE rather than just the flag — the URL `uri_escape_utf8` actually builds (called for real) and the name Unidecode actually transliterates to (modelled, since Text::Unidecode is not a dependency here). Plus the fail-safe cases in both directions, since a raw-CLI add arrives as octets and must not be corrupted on the way out. **Its fixture is the fragile part and is asserted rather than assumed:** a `"\x{f3}"` literal is stored latin-1 with `utf8::is_utf8` FALSE, so the encode never fires and every branch looks correct — `utf8::upgrade` models what `sqlite_unicode`/JSON::XS really hand back, and the first assertion fails loudly if it is ever dropped. The ASCII positive control is what stops the suite being satisfied by a change that mangles every query equally. **Bandcamp (0.1.122) is in NEITHER camp and is tested for exactly that**, because "exempt by an invariant" and "nobody checked" look identical from outside: its branch sends the combined `_norm("$artist $album")`, which `s/[^a-z0-9]+/ /g` makes ASCII-only, so the two encodings are byte-identical there and no conversion applies. The assertions pin that INVARIANT — ASCII out for character, octet and latin-1 in, the two encodings identical, and the album half still in the query — so a refactor that sends a raw artist or title down that branch goes red and has to pick a camp (5 red without them) |
 | `t_load.pl` | every shipped module compiles AND loads, plus a called-vs-defined sweep — `perl -c` passes on a call to a sub that doesn't exist, which nearly shipped a runtime crash in 0.1.83 |
 

@@ -258,9 +258,12 @@ section('4h. A MERGE THAT CANNOT LAND TAKES NOTHING WITH IT');
     # The deletes have to precede the survivor's UPDATE (the new key would otherwise collide
     # with a row about to go), so on an AutoCommit handle a failed UPDATE used to leave the
     # losers committed away and the survivor on its stale key: a saved album and its play
-    # history gone, silently. The collision is REACHABLE without any injected failure — a
-    # mixed-status group is left on its OLD keys, and one of those can be exactly the key
-    # another group's survivor is moving to. That is the case built here.
+    # history gone, silently. The collision needs no injected FAILURE — the UPDATE really does
+    # hit UNIQUE(source, dedupe_key) — but the STATE is PLANTED: the squatter below is seeded
+    # with a dedupe_key no fold could ever produce for its own artist/album. That is deliberate,
+    # and it is what makes the test deterministic. Do not read it as evidence that stored data
+    # reaches this state; it does not (Review Ledger A2, raised and withdrawn twice). What 4h
+    # pins is the TRANSACTION — that a merge which cannot land takes nothing with it.
     my $h = $mig->(sub {
         my ($d) = @_;
         # The mixed-status pair: left alone, and one of them is squatting on the key the
@@ -305,8 +308,8 @@ section('4i. A ROLLBACK THAT FAILS MUST NOT POISON THE HANDLE');
     # that: every later begin_work dies "Already in a transaction" so the rest of the groups run
     # unwrapped, and every plugin write for the REST OF THE SERVER RUN joins a transaction
     # nothing ever commits — discarded at handle destruction, silently, hours later.
-    # The failing group is 4h's collision, which needs no injected failure; only the rollback is
-    # injected, because DBD::SQLite will not fail one on demand.
+    # The failing group is 4h's planted collision, which needs no injected failure of its own;
+    # only the rollback is injected, because DBD::SQLite will not fail one on demand.
     package RBFail;     our @ISA = ('DBI');
     package RBFail::st; our @ISA = ('DBI::st');
     package RBFail::db; our @ISA = ('DBI::db');

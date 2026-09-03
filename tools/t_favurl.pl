@@ -307,6 +307,60 @@ is('episode IS a track',        Plugins::ListenLater::Sources::favurlIsTrack(nor
     is('...and sets no field',           (@set ? join(',', @set) : 'none'), 'none');
 }
 
+section('containers with no adapter are REFUSED (Sources::unsupportedContainer)');
+
+# Both of these were VERIFIED STORED on the test server against 0.1.122 — the show as an
+# album row with no album id, the Deezer series as a kind='track' row out of favurlIsTrack's
+# fail-open branch. Neither _serviceCan (per SERVICE) nor favurlIsTrack (album-vs-track) can
+# refuse a series, which is why this third question exists.
+my $unsup = \&Plugins::ListenLater::Sources::unsupportedContainer;
+is('spotify show refused',      $unsup->(norm('spotify:show:5wMPFS9B5V7gg')), 'show');
+is('deezer podcast refused',    $unsup->('deezer://podcast:19887'),           'podcast');
+is('tidal mix refused',         $unsup->('tidal://mix:0022a937b6860d'),       'mix');
+is('spotify artist refused',    $unsup->(norm('spotify:artist:6VsiDFMZJlJ')), 'artist');
+
+# The addable shapes, each of which has a working replay path. A regression here silently
+# stops real adds, so they are pinned as hard as the refusals.
+is('album is addable',          $unsup->(norm('spotify:album:1DFixLWuPkv3')), undef);
+is('playlist is addable',       $unsup->(norm('spotify:playlist:37i9dQZ')),   undef);
+is('tidal playlist addable',    $unsup->('tidal://playlist:1e01cdb6-uuid'),   undef);
+is('track is addable',          $unsup->(norm('spotify:track:abc')),          undef);
+is('episode is addable',        $unsup->(norm('spotify:episode:0tQdtR5')),    undef);
+is('qobuz track url addable',   $unsup->('qobuz://12345.flac'),               undef);
+is('bandcamp page url addable', $unsup->('https://foo.bandcamp.com/album/x'), undef);
+
+# The LEGACY Spotify playlist form names 'user', which is NOT in the refusal list — it must
+# reach playlistFromRow, whose container match is unanchored and finds the 'playlist:' tail.
+is('legacy user playlist addable', $unsup->(norm('spotify:user:bob:playlist:37i9dQZ')), undef);
+
+# ANTI-TEST: 'podcast' is both a Deezer type name and OUR OWN scheme. Matching the whole url
+# unanchored would refuse every saved episode — Podcast.pm stores them 'podcast://'-wrapped.
+# NOT hypothetical: the first of these is a REAL row, harvested from the test server's
+# Podcasts app during the 2026-09-03 false-positive sweep and already saved in the list. It
+# matches '^podcast:' at position 0, so without the scheme split this sub would refuse every
+# episode add in the plugin.
+is('our own podcast:// wrapper survives',
+    $unsup->('podcast://https://feeds.soundcloud.com/stream/2232817295-johnhdarko-headphones.mp3'), undef);
+is('...including a feed url with colons in it',
+    $unsup->('podcast://https://feeds.soundcloud.com/users/soundcloud:users:5867803/sounds.rss'), undef);
+is('...and a bare enclosure',
+    $unsup->('podcast://https://example.com/e.mp3'), undef);
+
+# More real rows from the same sweep — 286 favurls across Qobuz, Bandcamp, TIDAL, Deezer,
+# Spotty, Podcasts, Radio Paradise and Favourites, of which exactly the 8 TIDAL mixes were
+# refused. These are the shapes nearest a false positive, kept as fixtures because a widened
+# type list would take them first: Deezer Flow says 'user' with a SLASH (not the ':' the
+# legacy Spotify playlist form uses), and TIDAL's tracks carry no type token at all.
+is('deezer flow addable',       $unsup->('deezer://user/6874174781/flow.dzr'), undef);
+is('deezer bare flow addable',  $unsup->('deezer://user.flow'),                undef);
+is('tidal .flc track addable',  $unsup->('tidal://550214964.flc'),             undef);
+
+# A favurl that is not a scheme url names no container at all — say nothing rather than
+# guessing, and leave it to the gates that already judge those.
+is('non-url says nothing',      $unsup->('spotify:show:notnormalised'), undef);
+is('undef says nothing',        $unsup->(undef),                       undef);
+is('empty says nothing',        $unsup->(''),                          undef);
+
 section('the browse command -> source alias (Sources::sourceFromSvc)');
 
 # Spotty registers its menu under `tag => 'spotty'`, so Material's $SERVICE says 'spotty'

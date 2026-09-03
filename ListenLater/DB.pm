@@ -330,9 +330,13 @@ sub _migrateRefold {
         # row that is about to be removed. The handle is AutoCommit, so without a transaction
         # that ordering is a trap: a failed UPDATE leaves the losers already COMMITTED AWAY
         # and the survivor still on its stale key — a saved album and its play history gone,
-        # silently, with nothing left to retry from. A failed rekey is not hypothetical: a
-        # MIXED-STATUS group (skipped just above, left on its OLD keys) can hold the very key
-        # this survivor is moving to, and UNIQUE(source, dedupe_key) then refuses the UPDATE.
+        # silently, with nothing left to retry from. The rekey CAN fail: a MIXED-STATUS group
+        # (skipped just above, left on its OLD keys) can hold the very key this survivor is
+        # moving to, and UNIQUE(source, dedupe_key) then refuses the UPDATE. No SERVICE-
+        # supplied pair of titles reaches that state (Review Ledger A2 works through why, and
+        # it has been raised twice) — so this transaction is a guard, not a hot path. Keep it
+        # anyway: it costs one begin_work per changed group, and the alternative is silent,
+        # permanent data loss on a path with no retry.
         #
         # Rolled back, the group is exactly as it was — on the old keys, which is what
         # $skipped already means for the mixed-status case and what the ladder's unstamped
@@ -426,6 +430,15 @@ sub _migrateRefold {
     # a rolled-back group is in exactly the state a retry wants. A MIXED-STATUS skip does not:
     # that is a deliberate policy decision, not an error, and re-running could never change it
     # — it would just re-log the same warn at every boot for ever.
+    #
+    # DO NOT "TIDY" A UNIQUE COLLISION INTO $skipped. It reads like the same policy case — the
+    # squatter is a mixed-status row left alone on purpose — and it is not, because the loop
+    # above runs `values %group`, i.e. HASH order, randomised per process. A collision against
+    # a row that a LATER group would have vacated is TRANSIENT and the retry is what heals it
+    # (measured at ~40% of runs on a seeded pair). Counting it as a skip would stamp the ladder
+    # and strand those rows on the OLD fold for ever — invisible to add() and to Played, the
+    # exact state this migration exists to prevent. Raised and withdrawn twice; Review Ledger
+    # A2 has the worked case.
     return $failed ? 0 : 1;
 }
 

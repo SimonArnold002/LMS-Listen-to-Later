@@ -917,8 +917,17 @@ install_api();
 set_material_version(undef);
 is('API present but the version unreadable falls back to tier 1 (the safe API tier)',
     Plugins::ListenLater::Plugin::_actionTier(), 1);
+# The SUFFIXED rows are the ones a reviewer trips over, and 6.4.7-beta1 is the case that
+# matters: materialAtLeast's regex is UNANCHORED at the end, so the leading triple still
+# parses and a real 6.4.7 stays on tier 1 no matter what trails it. Only a string that does
+# not START N.N.N reaches the dev-build branch below. Without this row, "every 6.4.6/6.4.7
+# is safe" rests on the bare-version rows alone — and the one-arg registerCustomAction($section)
+# that tier 2 unlocks is FATAL on those builds: it pushes undef and takes out every plugin's
+# custom actions in that section, not just ours. Raised as a finding and withdrawn on these
+# rows (Review Ledger A2, ninth round).
 for my $c (['6.4.5', 1], ['6.4.6', 1], ['6.4.7', 1], ['6.4.8', 2], ['6.4.9', 2],
-           ['6.5.0', 2], ['7.0.0', 2], ['6.4.10', 2]) {
+           ['6.5.0', 2], ['7.0.0', 2], ['6.4.10', 2],
+           ['6.4.7-beta1', 1], ['6.4.6.1', 1], ['6.4.8-rc2', 2]) {
     set_material_version($c->[0]);
     is("Material $c->[0] is tier $c->[1]", Plugins::ListenLater::Plugin::_actionTier(), $c->[1]);
 }

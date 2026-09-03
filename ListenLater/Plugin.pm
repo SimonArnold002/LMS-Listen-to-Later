@@ -2700,6 +2700,25 @@ sub _addCtxCommand {
         return _rejectAdd($request, '', $p{name}, 'row is already in Listen Later');
     }
 
+    # A CONTAINER with no adapter — a podcast series ('spotify://show:…',
+    # 'deezer://podcast:…'), a TIDAL mix, an artist. See Sources::unsupportedContainer for
+    # why neither gate below catches these and what each type is doing in the list.
+    #
+    # Position: ahead of EVERY branch that stores something, which is why it sits here and
+    # not inside favurlIsTrack. Putting it there would only move a Deezer series off the
+    # track path and onto the album path — still stored, just wrong differently.
+    #
+    # Ahead of kind:podcast costs that path nothing and is checked, not assumed: $podcastCmd
+    # passes name/artist/svc/image and no favurl at all, so an episode add reaches this with
+    # $p{favurl} undef and returns immediately. (A feed row in the Podcasts app carries an
+    # https:// RSS url, which names no container ref either — and that add is already
+    # refused one layer down, by resolveEpisode finding no episode.)
+    if (my $kind = Plugins::ListenLater::Sources::unsupportedContainer($p{favurl})) {
+        return _rejectAdd($request,
+            Plugins::ListenLater::Sources::sourceFromUrl($p{favurl}),
+            $p{name}, "'$kind' is a container this plugin has no adapter for");
+    }
+
     # Track save. Two signals decide album-vs-track:
     #  (1) an explicit kind:track category — library album-track / playlist-track /
     #      queue-track / online-track / the Now Playing `track`; and

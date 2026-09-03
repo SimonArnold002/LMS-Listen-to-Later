@@ -859,5 +859,52 @@ my $lgRec = add(name => 'Weekly Legacy', svc => 'spotty', favurl => 'spotify:use
 Plugins::ListenLater::Sources::resolveTracks(undef, $lgRec, sub { });
 is('...and a legacy row rebuilds short too', $SPOTTY_PLAYLIST_ARG->{uri}, 'spotify:playlist:37i9dQZLEG');
 
+
+section('a podcast SERIES is refused, wherever it comes from');
+#
+# Both of these were REPRODUCED ON THE TEST SERVER against 0.1.122 before the gate existed,
+# from real browse rows, and both stored. They are the reason unsupportedContainer is a
+# THIRD question and not a widening of one of the two gates that already ran here:
+#   • the Spotify show passed _serviceCan (Spotty IS installed — the stubs above make that
+#     true here too) and passed favurlIsTrack as a "container", i.e. an ALBUM, so it stored
+#     as an album row with no album id, replayed by a fuzzy search on the show's blurb;
+#   • the Deezer series never reached a container test at all — 'podcast:' is not in
+#     favurlIsTrack's list, so it took the FAIL-OPEN branch and stored as a kind='track' row
+#     pointing type => 'audio' at a series url.
+# The Deezer half is what pins the PLACEMENT: move this gate inside favurlIsTrack and that
+# row stops being a track and becomes an album instead — still stored, so the show assertion
+# alone would stay green. Only asserting on both shapes catches that.
+$r = add(name => 'Serial', artist => 'Serial Productions makes narrative podcasts.',
+         svc => 'spotty', favurl => 'spotify:show:5wMPFS9B5V7gg6hZ3UZ7hf');
+is('a Spotify show stores nothing',   (defined $r ? "stored as $r->{kind}" : 'rejected'), 'rejected');
+$r = add(name => 'The Minimalists', artist => 'The Minimalists are Emmy-nominated',
+         svc => 'deezer', favurl => 'deezer://podcast:19887');
+is('a Deezer series stores nothing',  (defined $r ? "stored as $r->{kind}" : 'rejected'), 'rejected');
+like('...and the reject names the container, not the service',
+     reject_line(name => 'The Minimalists', svc => 'deezer', favurl => 'deezer://podcast:19888'),
+     qr/'podcast' is a container this plugin has no adapter for \(source 'deezer'\)/);
+
+# The EPISODE is the whole point of the distinction: we save podcast episodes, and only the
+# series is out of scope. This is the row that must NOT move.
+$r = add(kind => 'track', trackname => 'Mission Killer', artist => 'Serial', svc => 'spotty',
+         favurl => 'spotify:episode:0tQdtR5srOLPVaevOrLyhR');
+is('a Spotify EPISODE still stores',  $r->{kind},     'track');
+is('...with source spotify',          $r->{source},   'spotify');
+is('...and a playable episode url',   $r->{ref}{url}, 'spotify://episode:0tQdtR5srOLPVaevOrLyhR');
+
+# TIDAL mixes ride the same gate, for a reason that is NOT "a mix is unaddable": TIDAL's own
+# plugin routes them to getMix($params->{id}) and playlists to getPlaylist($params->{uuid}),
+# two different API calls, so a mix id handed to the playlist path would fail. Refusing is
+# the honest answer until a getMix adapter exists.
+$r = add(name => 'My Mix 1', artist => 'Brent Faiyaz', svc => 'tidal',
+         favurl => 'tidal://mix:0022a937b6860d3fec2d18d46be318');
+is('a TIDAL mix stores nothing',      (defined $r ? "stored as $r->{kind}" : 'rejected'), 'rejected');
+
+# ANTI-TEST for the type list: Spotify's own "mixes" are plain playlist URIs and are NOT
+# affected by any of the above. If this ever goes red, the gate has widened onto real rows.
+$r = add(name => 'Daily Mix 1', svc => 'spotty', favurl => 'spotify:playlist:37i9dQZF1E3DAILY');
+is('a Spotify daily mix still stores', $r->{kind},             'playlist');
+is('...as a playlist, with its id',    $r->{ref}{playlist_id}, '37i9dQZF1E3DAILY');
+
 printf "\n%d passed, %d failed\n", $pass, $fail;
 exit($fail ? 1 : 0);

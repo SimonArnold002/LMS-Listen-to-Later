@@ -149,6 +149,51 @@ sub favurlIsTrack {
     return 1;
 }
 
+# Is this favurl a CONTAINER we have no adapter for? Answers the type name so the caller
+# can say what it refused; undef for anything addable.
+#
+# This is a THIRD question, and neither of the two above it answers it. `_serviceCan` asks
+# about the SERVICE — Spotty is installed, so 'spotify' says yes whatever the favurl points
+# at — and `favurlIsTrack` asks album-vs-TRACK, which presumes the row is one or the other.
+# A podcast SERIES is neither, and both gates waved it through: verified stored on the test
+# server (0.1.122), 'spotify://show:…' as an ALBUM row with no album id (replayed by a fuzzy
+# title search against the show's description as the artist), and 'deezer://podcast:…' out of
+# favurlIsTrack's fail-open branch as a kind='track' row pointing type => 'audio' at a
+# container url. The built-in Podcasts app already refuses the same add — a feed row there
+# resolves no episode and is rejected (Podcast::resolveEpisode) — so this is the streaming
+# side catching up. It is NOT a step toward series support: we save podcast EPISODES only,
+# and 'spotify://episode:…' still stores as a track exactly as before.
+#
+# 'mix' is TIDAL's shape ('tidal://mix:<id>'). Spotify's mixes are plain 'spotify:playlist:'
+# URIs — they reach playlistFromRow and store as playlists, and nothing here touches them.
+# A TIDAL mix is refused rather than routed to the playlist path because TIDAL's own plugin
+# keeps the two apart: getPlaylist takes a {uuid} and calls $api->playlist, getMix takes an
+# {id} and calls $api->mix. Handing a mix id to the playlist endpoint would fail, so
+# replaying one needs a getMix adapter — service work, not a gate fix.
+#
+# 'artist' cannot reach this from Material today: it maps a 'spotify:artist:' favurl to
+# STD_ITEM_ONLINE_ARTIST, whose category is 'online-artist', which Plugin.pm deliberately
+# never defines, so no Add renders on an artist row. Closed here anyway — since 0.1.51 the
+# add COMMAND is the gate precisely because it does not depend on Material's button, and
+# favurlIsTrack already names the type one sub above.
+sub unsupportedContainer {
+    my ($u) = @_;
+    return undef unless defined $u && length $u;
+    # Split the scheme off rather than matching the whole url unanchored, for ONE reason:
+    # 'podcast' is both a type name (Deezer) and OUR OWN scheme — Podcast.pm stores an
+    # episode as 'podcast://<enclosure url>'. Matching unanchored would refuse every saved
+    # episode, and would additionally be reading type names out of a third party's feed url.
+    return undef unless $u =~ m{^(\w+)://(.*)$}s;
+    my ($scheme, $rest) = (lc $1, $2);
+    return undef if $scheme eq 'podcast';
+    # Unanchored within the remainder, like favurlIsTrack's container test and
+    # playlistFromRow's — the ref sits at the front for Spotify/Deezer/Tidal but the legacy
+    # 'user:<name>:playlist:<id>' form proves it cannot be assumed. 'user' and 'playlist' are
+    # deliberately absent: both ARE addable, via playlistFromRow.
+    return $1 if $rest =~ m{(?:^|[:/])(show|podcast|artist|mix):};
+    return undef;
+}
+
 # Metadata for a currently-playing REMOTE track, from its protocol handler's
 # getMetadataFor — the same source LMS's status query / Material's Now Playing use.
 # Streaming services (Qobuz/Tidal/Deezer) DON'T store album/artist/cover on the LMS
