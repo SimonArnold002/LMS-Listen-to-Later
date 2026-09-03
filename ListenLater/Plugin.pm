@@ -336,32 +336,6 @@ sub postinitPlugin {
         # actions.json is fully rewritten each call.
         Slim::Utils::Timers::killTimers(undef, \&_writeMaterialActionsDeferred);
         Slim::Utils::Timers::setTimer(undef, time() + 60, \&_writeMaterialActionsDeferred);
-
-        # The podcasts-* override is the one part of the set that is not fixed for the run:
-        # _materialActionSet emits it only while Podcast::hasFeeds() is true, so a user who
-        # subscribes to their first feed GROWS a category after both passes above have run. On
-        # tier 0/1 the next file write picks it up, but on tier 2 it is registered, and nothing
-        # re-registers on its own — the prune writes back only what registration REFUSED, so the
-        # pair reached NEITHER half and podcast rows had no "Add" until a server restart.
-        # Watching the Podcast plugin's own pref is what closes that; the deferred pass is
-        # exactly the right callback, since it re-registers what is new and rewrites the file.
-        # UNSUBSCRIBING the last feed is NOT the mirror case on tier 2, and the same call
-        # does NOT handle it: `registerCustomAction` PUSHES with no unregister (see the
-        # note above %REGISTERED_POS), so once `podcasts-*` is registered it stays live for
-        # the rest of the run with our "Add" on it — which `_savePodcastEpisode` can no
-        # longer honour, since it resolves an episode against the subscribed feeds. Tier
-        # 0/1 DO mirror it: the pair leaves %fileCats and the next file write drops it.
-        # The tier-2 residue is bounded — with no feeds there are few podcast rows left to
-        # press Add on, and it clears at the next restart — so it is accepted rather than
-        # worked around. If it ever needs closing, the fix is a hasFeeds() check inside the
-        # add handler at invocation time, not more registration bookkeeping.
-        # NB a Material tab already open took its snapshot at app start, so the new entry
-        # appears on the next app load — the standing late-registration caveat, not a new one.
-        eval {
-            Slim::Utils::Prefs::preferences('plugin.podcast')
-                ->setChange(\&_writeMaterialActionsDeferred, 'feeds');
-            1;
-        } or $log->error("LL: could not watch the podcast subscription list: $@");
     }
     elsif ( Slim::Utils::PluginManager->isEnabled('Plugins::MaterialSkin::Plugin') ) {
         # Pref is OFF but a previous (enabled) run may have written our actions. Strip
@@ -369,6 +343,45 @@ sub postinitPlugin {
         # leaving them until the pref is re-enabled.
         eval { _clearMaterialActions(); 1 }
             or $log->error("LL: failed to clear Material custom actions: $@");
+    }
+
+    # The podcasts-* override is the one part of the set that is not fixed for the run:
+    # _materialActionSet emits it only while Podcast::hasFeeds() is true, so a user who
+    # subscribes to their first feed GROWS a category after both passes above have run. On
+    # tier 0/1 the next file write picks it up, but on tier 2 it is registered, and nothing
+    # re-registers on its own — the prune writes back only what registration REFUSED, so the
+    # pair reached NEITHER half and podcast rows had no "Add" until a server restart.
+    # Watching the Podcast plugin's own pref is what closes that; the deferred pass is
+    # exactly the right callback, since it re-registers what is new and rewrites the file.
+    #
+    # OUTSIDE the branch above, and gated only on Material being present, because the pref
+    # is not the only way in. Ticking the box on the Settings page mid-run registers and
+    # writes (Settings.pm) but installs nothing — so had this stayed in the ON arm, a server
+    # that started with the box UNTICKED would run the rest of its life with no watcher, and
+    # a first feed subscribed after the box was ticked would reach neither half. The callback
+    # self-gates on the pref (see _writeMaterialActionsDeferred), so installing it here while
+    # the box is off costs nothing and does nothing until the box is ticked. Installing it
+    # from Settings.pm instead would be wrong: setChange STACKS callbacks, so it would add
+    # one per save.
+    #
+    # UNSUBSCRIBING the last feed is NOT the mirror case on tier 2, and the same call
+    # does NOT handle it: `registerCustomAction` PUSHES with no unregister (see the
+    # note above %REGISTERED_POS), so once `podcasts-*` is registered it stays live for
+    # the rest of the run with our "Add" on it — which `_savePodcastEpisode` can no
+    # longer honour, since it resolves an episode against the subscribed feeds. Tier
+    # 0/1 DO mirror it: the pair leaves %fileCats and the next file write drops it.
+    # The tier-2 residue is bounded — with no feeds there are few podcast rows left to
+    # press Add on, and it clears at the next restart — so it is accepted rather than
+    # worked around. If it ever needs closing, the fix is a hasFeeds() check inside the
+    # add handler at invocation time, not more registration bookkeeping.
+    # NB a Material tab already open took its snapshot at app start, so the new entry
+    # appears on the next app load — the standing late-registration caveat, not a new one.
+    if ( Slim::Utils::PluginManager->isEnabled('Plugins::MaterialSkin::Plugin') ) {
+        eval {
+            Slim::Utils::Prefs::preferences('plugin.podcast')
+                ->setChange(\&_writeMaterialActionsDeferred, 'feeds');
+            1;
+        } or $log->error("LL: could not watch the podcast subscription list: $@");
     }
 
     # Material Skin home-page shelf for the Listen Later list (guarded on the

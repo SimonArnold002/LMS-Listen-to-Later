@@ -1580,15 +1580,55 @@ my $after = scalar @REG;
 Plugins::ListenLater::Plugin::_writeMaterialActionsDeferred();
 is('...and a repeat pass registers nothing further', scalar @REG, $after);
 
-# The other half: postinit must actually ASK to be told. No return value shows this, and the
-# test harness's setChange is a no-op, so it is pinned at source.
-my $psrc = do {
-    open my $fh, '<', ($ENV{LL_PLUGIN_SRC} || "$FindBin::Bin/../ListenLater/Plugin.pm") or die $!;
-    local $/; <$fh>;
+# The other half: postinit must actually ASK to be told, and it must do so on BOTH of its
+# arms. This was pinned at SOURCE while the harness's setChange was a no-op, which is why the
+# check below is the one that matters: the source grep passed happily with the watcher sitting
+# inside the pref-ON branch, where a server that booted with the box UNTICKED installed none.
+# Ticking the box on the Settings page registers and writes (Settings.pm) but installs no
+# watcher, so that run went to its end unable to notice a first subscription — the podcasts-*
+# pair then reached neither half on tier 2. The callback self-gates on the pref, so installing
+# it while the box is off is free; asking for it from Settings.pm instead would be wrong,
+# because setChange STACKS callbacks and would add one per save.
+section('the podcast watcher is installed on BOTH postinit arms');
+my $watched = sub {
+    return scalar grep { $_->{ns} eq 'plugin.podcast' && $_->{pref} eq 'feeds'
+                      && $_->{cb} == \&Plugins::ListenLater::Plugin::_writeMaterialActionsDeferred }
+        @Slim::Utils::Prefs::Obj::CHANGES;
 };
-is('postinit watches the podcast plugin\'s subscription list',
-    ($psrc =~ /preferences\('plugin\.podcast'\)\s*->setChange\(\s*\\&_writeMaterialActionsDeferred\s*,\s*'feeds'\)/s)
-        ? 'watched' : 'NOT watched', 'watched');
+
+@Slim::Utils::Prefs::Obj::CHANGES = ();
+Slim::Utils::Prefs::preferences('plugin.listenlater')->set('material_action', 0);
+Plugins::ListenLater::Plugin->postinitPlugin();      # the box was UNTICKED at server start
+is('postinit with the box unticked still watches the subscription list',
+    $watched->() ? 'watched' : 'NOT watched', 'watched');
+
+@Slim::Utils::Prefs::Obj::CHANGES = ();
+Slim::Utils::Prefs::preferences('plugin.listenlater')->set('material_action', 1);
+Plugins::ListenLater::Plugin->postinitPlugin();      # ...and the ordinary ticked boot
+is('postinit with the box ticked watches it too',
+    $watched->() ? 'watched' : 'NOT watched', 'watched');
+is('...exactly once per boot, not once per arm', $watched->(), 1);
+
+# ---------------------------------------------------------------------------
+# The remaining ordering, and the reason the fix above did NOT also need a setChange in
+# Settings.pm: subscribe FIRST, tick the box SECOND. The watcher fires while the box is off
+# and self-gates to nothing, but the save that follows reads hasFeeds() live — the action set
+# is rebuilt per call, never cached — so the pair is registered by the save itself. Pinned so
+# that nobody "completes" the fix by adding a second watcher in Settings.pm, which would stack
+# a callback per save.
+section('subscribe first, tick the box second');
+reset_all();
+install_api();
+set_material_version('6.4.9');
+Slim::Utils::Prefs::preferences('plugin.listenlater')->set('material_action', 0);
+Slim::Utils::Prefs::set_test_pref_ns('plugin.podcast', 'feeds',
+    [ { name => 'Darko.Audio', value => 'https://darko.audio/feed' } ]);
+Plugins::ListenLater::Plugin::_writeMaterialActionsDeferred();
+is('a feeds change while the box is off registers nothing', n_actions(), 0);
+save_settings(sort => 'added', material_action => 1);
+is('...and ticking the box afterwards registers the podcasts override',
+    (grep { $_->[0] eq 'podcasts-album' } @REG) ? 'registered' : 'MISSING', 'registered');
+Slim::Utils::Prefs::set_test_pref_ns('plugin.podcast', 'feeds', []);
 
 printf "\n%d passed, %d failed\n", $pass, $fail;
 exit($fail ? 1 : 0);

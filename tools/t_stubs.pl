@@ -80,7 +80,14 @@ use warnings;
     sub get  { return $_[0]->_s->{ $_[1] } }
     sub set  { return if $_[1] =~ /^_/; $_[0]->_s->{ $_[1] } = $_[2] }
     sub init { my ($self,$h) = @_; my $s = $self->_s; $s->{$_} //= $h->{$_} for keys %$h; }
-    sub setValidate {} sub setChange {} sub migrateClient {} sub AUTOLOAD {} sub DESTROY {}
+    sub setValidate {}
+    # setChange RECORDS rather than no-ops: the podcast-subscription watcher is installed
+    # by postinitPlugin and is invisible any other way — a suite can only tell it was
+    # installed by seeing the registration. Entries are { ns, pref, cb }, in call order.
+    our @CHANGES;
+    sub setChange { my ($self,$cb,@prefs) = @_;
+        push @CHANGES, { ns => $self->{ns}, pref => $_, cb => $cb } for @prefs; }
+    sub migrateClient {} sub AUTOLOAD {} sub DESTROY {}
     $INC{'Slim/Utils/Prefs.pm'} = __FILE__;
 }
 

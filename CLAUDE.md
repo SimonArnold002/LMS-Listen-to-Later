@@ -452,6 +452,132 @@ are almost no podcast rows left to press Add on, so the cost is a stale entry ra
 If it ever needs closing the fix is a `hasFeeds()` check inside the add handler at invocation time, NOT
 more registration bookkeeping — that is the direction every husk bug in this file came from.
 
+**Seventh round of 2026-09-03 — CLOSED, four findings, all four fixed.** Run against the
+0.1.120 tree. **The carry-forward is about the TEST that let finding 1 through, not the finding.**
+
+| # | finding | disposition |
+|---|---|---|
+| 1 | the `plugin.podcast:feeds` watcher is installed only inside postinit's pref-ON arm, so a server that boots with the box unticked runs watcher-less — ticking it on the Settings page registers and writes but installs nothing | **FIXED** — the `setChange` block hoisted out of the `if/elsif` and gated only on Material being present; the callback already self-gates on the pref |
+| 2 | `PLUGIN_LL_MATERIAL_ACTION_DESC` describes the pre-tier-2 model — claims Now Playing/queue go through actions.json, and that the registered half "only changes at the next server restart, in both directions" | **FIXED** — rewritten per tier, and the ON/OFF asymmetry stated correctly |
+| 3 | Spotify absent from every user-facing service list, and the release-year note files it under "no year" | **FIXED** — `README.md` (3 sites) + `README.html` regenerated; the WHICH SOURCES CAN SUPPLY A YEAR table below gains its Spotify row |
+| 4 | the Spotify search branch passes the raw `$artist` where Qobuz/Tidal pass `$artistChars` | **FIXED** — `$artistChars`, and `t_query_enc.pl` grew the Spotty branch it never had |
+
+**FINDING 1 WAS OVERSTATED WHEN FIRST WRITTEN, and the correction is the useful half.** It went out
+as "the exact hole the watcher was added to close, left open on one path". It is not: `material_action`
+**defaults to 1**, so every ordinary boot takes the ON arm and installs the watcher. Reaching the gap
+needs five things at once — box unticked *at server start*, re-ticked from Settings mid-run, **zero**
+feeds at that moment, a first feed subscribed later in the same run, and Material ≥ 6.4.8 — and the
+damage is a fallback `online-*` pair on podcast rows (a spurious Wish List entry, and the add taking
+`_addCtxCommand`'s last-resort resolve instead of `kind:podcast`), cleared at the next restart. Fixed
+because the hoist is two lines and strictly safe, **not** because it was reachable in practice.
+**Before writing up a state-machine finding, check the pref's DEFAULT** — a repro that silently
+begins "with the default inverted" is a dead branch, and saying so up front is the difference between
+a finding and a false alarm.
+
+**THE REAL LESSON: a source-grep test pins that a call EXISTS, never WHERE it lives.**
+`t_material_actions.pl` already asserted the watcher, with an explicit note that "the test harness's
+setChange is a no-op, so it is pinned at source" — and that regex matched just as happily with the call
+in the wrong branch. The suite was green across every round while the hole was open. The stub now
+RECORDS `setChange` (`@Slim::Utils::Prefs::Obj::CHANGES`) and the suite calls `postinitPlugin` on both
+arms; 1 red without the hoist. **When a behaviour can only be pinned at source, that is a signal the
+stub is too thin — fix the stub instead.** The same applies to `t_query_enc.pl`: its header named
+Spotty in the characters camp from the day it was written, but the suite had no Spotty stub, so
+finding 4 sat under a test that appeared to cover it. A camp named in a comment and not in a fixture
+is not covered.
+
+**README was edited on `dev`, deliberately.** Section A says the README is written at the merge to
+main; finding 3 is a user-facing factual error (Spotify is shipped and undocumented), so it was fixed
+now rather than banked. `README.html`/`index.html` were regenerated with `tools/make_readme_html.py`.
+Not a precedent for routine README churn on dev.
+
+**THE WATCHER'S TARGET IS VERIFIED LIVE, over HTTP, and this is the check to repeat if it is ever
+doubted.** The `setChange` hangs off another plugin's pref, so a wrong namespace or key would fail
+SILENTLY — no error, just a watcher that never fires. Read on the LAN 2026-09-03:
+`["","pref","plugin.podcast:feeds","?"]` → `[ { name => 'Darko.Audio podcast', value => '<rss url>' } ]`,
+i.e. exactly the namespace, key and `{name,value}` shape `Podcast::feeds()` reads. Two supporting
+probes from the same session: a BOGUS namespace (`plugin.notarealplugin:feeds`) returns `null` cleanly
+rather than dying, so `preferences('plugin.podcast')` on a server WITHOUT the Podcast plugin is
+harmless and `feeds()`'s `ref $f eq 'ARRAY'` guard covers it; and `["","apps","0","200"]` lists the
+browse command as `podcasts`, which is what makes the resolved category `podcasts-album`. **`pref`
+reads are LAN-ONLY** — off-network they return empty and the log says "Access to settings is
+restricted to the local network" — so this check cannot be run over Tailscale.
+
+**A FIFTH gap, found by asking the same question about the OTHER kinds: PLAYLISTS (0.1.107) were
+undocumented in full.** The README's only occurrence of the word was the simile "browse it like a
+playlist"; the intro, the features table, the "Albums, tracks and podcasts" heading, the type list and
+the glyph legend all predate playlist support and none had been revisited. Now documented — including
+the ≡ glyph, the four services with a playlist call (`Sources::_serviceCanPlaylist`), the two rules a
+playlist shares with a podcast episode (no Wish List either direction, never auto-Played) and the
+Qobuz personal-playlist limitation from section A2. **The lesson generalises: when a new KIND ships,
+the README has five separate places that name the kinds, and finding one of them is not finding them
+all.** Both this and finding 3 were missed by every prior round for the same reason — a review that
+diffs code against code never asks whether the prose still describes the product.
+
+**Eighth round of 2026-09-03 — CLOSED, three findings: two fixed, one WITHDRAWN.** Run against the
+0.1.121 tree (the seventh round's four fixes, still uncommitted and unshipped). **Shipped as 0.1.122**
+— a version of its own, not a fold, because 0.1.121's zip was already built and a rebuild always
+takes a new version. **The withdrawal is the round's whole value, and it is the round-6 scoping error
+in a new disguise.**
+
+| # | finding | disposition |
+|---|---|---|
+| 1 | the Settings tick path arms no deferred radio re-pass, so a box-OFF boot + mid-run tick leaves TuneIn rows unsuppressed for the run | **WITHDRAWN** — no reachable damage; `@KNOWN_RADIO_CMDS` covers it statically, below |
+| 2 | Bandcamp is named in the encoding comment's OCTETS camp but its branch applies no conversion, and `t_query_enc.pl` has no Bandcamp fixture | **FIXED** — comment states the exemption and its reason; suite pins the INVARIANT (5 red without it) |
+| 3 | `README.md` claims playlists have "No *Add to Wish List*" — the entry IS shown on `playlist` and `online-album` rows and redirects | **FIXED** — README + regenerated `README.html` |
+
+**FINDING 1 WAS WRONG, AND THE PROBE THAT "CONFIRMED" IT USED A COMMAND NAME THE PRODUCT NEVER
+EMITS.** The write-up asserted that `tunein-album`/`-track` go unsuppressed, and a probe run inside
+the real `t_material_actions.pl` harness agreed — because the probe seeded the fake `radios` menu with
+`cmd => 'tunein'` and then checked for `tunein-album`. **There is no `tunein` browse command.** TuneIn
+appears as its top-level categories — `music news sports talk location language podcast search presets
+local` — and those are exactly `@KNOWN_RADIO_CMDS`, a compile-time constant seeded at init *because*
+the directory arrives async. They are therefore suppressed identically whether the set is built at
+postinit, at the Settings save, or in the +60s pass. Re-probed with the real names: with the `radios`
+menu completely empty at tick time all five still register, and `bbcsounds` — the sync-registered
+case — is visible there too. The live enumeration is *more* complete at Settings-save time than at
+postinit, so the missing timer costs nothing.
+
+**The rule this adds, which `git blame` did not cover.** Round 6's lesson was "check `git blame`
+before writing up a finding" — a scope test. This one passed that test and still failed, because the
+error was upstream of scope: **the entity in the reproduction was fabricated.** A probe proves only
+that the code does what you asked; it cannot tell you that you asked about something real. So:
+**before trusting a repro, verify every identifier in it is one the product actually produces** — a
+command name, a category, a pref key, a source tag — by finding it in the source or on the live
+server, not by assuming the obvious spelling. The obvious spelling for TuneIn is `tunein`; the real
+one is ten category names in a list twenty lines above the comment the finding was built on. Related,
+and now twice over: the seventh round's own carry-forward said "a camp named in a comment and not in
+a fixture is not covered" — the same shape, one level down.
+
+**Finding 2 is that lesson applied to the one branch the seventh round did not reach.** Bandcamp sat
+under OCTETS in the encoding comment while its branch sends `$query` — `_norm("$artist $album")` —
+and no conversion at all. **Not a defect**: `_norm`'s `s/[^a-z0-9]+/ /g` leaves ASCII and nothing
+else, so characters and octets are byte-identical there and applying a conversion would be theatre.
+But "exempt by an invariant" and "nobody checked" are indistinguishable from outside, and the comment
+read as a decision the code does not make — the same class as the "right for the other three" line
+0.1.120 deleted. The suite now asserts the INVARIANT (ASCII-only out for character, octet and latin-1
+input; the two encodings byte-identical; the album half still present) rather than a camp, so a
+refactor that sends a raw artist or title down that branch goes red and has to pick one. **Pin the
+reason a branch is exempt, never the fact that it is.**
+
+**Also corrected in passing: LL's own copy of the "returns NOTHING" wording.** Round 6 measured the
+double-encode as junk rather than empty (Qobuz 1 real hit of 88, TIDAL 8 of 74) and recorded that the
+description must say wrong/incomplete results — then left `Sources.pm`'s own comment and
+`t_query_enc.pl`'s header still saying the search "returns NOTHING". Both now match the measurement.
+**The canonical `docs/streaming-adapter-spec.md` R6 row still says "accented names return nothing" and
+is deliberately NOT touched here** — it is the shared copy, so per its header it is edited in the
+ListenBrainz repo and re-copied byte-identical to PFR and LL (`shasum` across the three). That fleet
+pass remains open, exactly as round 6 left it.
+
+**Finding 3, and why a doc finding keeps coming out of these rounds.** `_savePlaylistRecord` redirects
+a Wish List add to Listen Later and `_listItemMenu` suppresses *Move to Wish List*, so the OUTCOME
+matches the README — but the menu entry itself is built per Material SURFACE, and both `playlist` and
+`online-album` carry the plain role, whose pair includes "Add to Wish List". Verified by reading the
+set back out of `_materialActionSet`, not from the prose. A podcast episode really does have no such
+entry (the `podcasts-*` override replaces the pair), which is where the README's "same two rules as
+podcast episodes" came from; playlists reach the same place by a different mechanism, and the README
+now says so. Third round running that the prose was wrong where the code was right — a review that
+diffs code against code never asks whether the product still matches its description.
+
 ### D. ADDING TO THIS LEDGER
 
 When a finding is declined, or accepted-but-deferred, add it here in the same
@@ -3087,6 +3213,70 @@ The "Add to Listen Later"/"Add to Wish List" custom actions appear on streaming 
   (nothing here touches a matcher). Podcast `CACHE_VER` bumped with the build per the dev-build
   cache rule; nothing here parses a feed, so it is hygiene, not a fix.
 
+- **0.1.121 — ships the seventh 2026-09-03 review round's four fixes (dev build; see that
+  round's ledger entry above for the full write-up).**
+
+  1. **The `plugin.podcast:feeds` `setChange` watcher is now installed regardless of the
+     Material-action pref at boot.** It was wired only inside postinit's pref-ON arm, so a
+     server that starts with "Add to Material context menus" unticked ran watcher-less — ticking
+     it on later from Settings registers and writes, but nothing was listening for a
+     subsequently-subscribed podcast feed. The `setChange` block is hoisted out of the
+     `if/elsif` to after it, gated only on Material being present; the callback itself already
+     self-gates on the pref, so no behaviour changes on the ON-at-boot path (the overwhelmingly
+     common one, since the pref defaults to 1).
+  2. **`PLUGIN_LL_MATERIAL_ACTION_DESC` rewritten per delivery tier.** The old copy described the
+     pre-tier-2 model — claimed Now Playing/queue actions go through `actions.json` and that the
+     registered half "only changes at the next server restart, in both directions" — which
+     stopped being true the moment the Settings save started registering on ON (0.1.111).
+  3. **Spotify added to every user-facing service list in `README.md`**, and moved into the
+     "carries a release year" camp — `Sources.pm` reads `release_date` off the same `$api->album`
+     call that answers type and count, so it was already free. Playlist support (0.1.107)
+     documented for the first time: the ≡ glyph, the four services with a playlist call, the
+     no-Wish-List / never-auto-Played rules shared with a podcast episode, and the Qobuz
+     personal-playlist limitation. `README.html`/`index.html` regenerated via
+     `tools/make_readme_html.py`; CLAUDE.md's "WHICH SOURCES CAN SUPPLY A YEAR" table gained its
+     Spotify row.
+  4. **The Spotify search branch in `Sources.pm` now sends `$artistChars`** instead of the raw
+     `$artist`, matching Qobuz and Tidal — the other two services in the characters camp
+     (0.1.120 fixed those two; Spotify's own branch had the same shape and was missed until this
+     round).
+
+  **Test coverage added this session — all 14 suites green, 1,125 assertions** (up from 1,118):
+  `t_stubs.pl`'s `setChange` now RECORDS into `@Slim::Utils::Prefs::Obj::CHANGES` instead of
+  being a no-op — the earlier no-op stub is exactly what let finding 1 through six review rounds
+  unnoticed (`t_material_actions.pl` already asserted the watcher, but only by grepping source,
+  which matches just as happily with the call in the wrong branch). `t_material_actions.pl` now
+  drives `postinitPlugin` on both the pref-ON and pref-OFF arms and adds the
+  subscribe-first/tick-second ordering (1 red without the hoist). `t_query_enc.pl` gained the
+  Spotty branch it never had (a camp named in a comment with no fixture is not covered).
+
+  Podcast `CACHE_VER` bumped 25 → 26 with the build per the dev-build cache rule; nothing in
+  this build parses a feed, so it is hygiene, not a fix.
+
+- **0.1.122 — the eighth 2026-09-03 review round's two fixes (dev build; see that round's ledger
+  entry above).** A version of its own rather than a fold into 0.1.121, because 0.1.121's zip had
+  already been built: **a rebuilt zip always gets a new version**, or the installed copy and the
+  built one are indistinguishable to both the server and its caches.
+  1. **The Bandcamp search branch's encoding exemption is now stated, and tested.** It was
+     listed under OCTETS in the `_searchService` comment while applying no conversion at all —
+     harmless, because `_norm` makes that query ASCII-only by construction, but indistinguishable
+     from an oversight. `t_query_enc.pl` gained the Bandcamp fixture it never had and asserts the
+     invariant rather than the camp (5 red without it). LL's own "the search returns NOTHING"
+     wording in `Sources.pm` and that suite's header corrected to the junk/degraded results round
+     6 actually measured; the canonical `docs/streaming-adapter-spec.md` R6 row is deliberately
+     left for the fleet pass.
+  2. **`README.md`'s playlist Wish List claim corrected.** It said playlists have no *Add to Wish
+     List*; the entry is shown on `playlist` and `online-album` rows and redirects to Listen
+     Later. *Move to Wish List* genuinely is absent. `README.html`/`index.html` regenerated.
+     README on `dev` again, for finding 3's reason and section A's exception: a user-facing
+     factual error, not routine churn.
+
+  **All 14 suites green, 1,130 assertions** (up from 1,125): `t_query_enc.pl` 15 → 20.
+
+  Podcast `CACHE_VER` bumped 26 → 27 with the build per the dev-build cache rule. Nothing here
+  parses a feed either — it is the same hygiene 0.1.121 did, and it is per BUILD, not per
+  feed-parsing change.
+
 ## Regression tests — RUN THESE BEFORE ANY BUILD (added 2026-07-29)
 
     sh tools/t_all.sh          # one line per suite, non-zero exit on any failure
@@ -3115,13 +3305,13 @@ session scratchpads and are gone — so nothing carried forward. Anything worth 
 | `t_addpath.pl` | the ADD PATH end to end — a Material action into `_addCtxCommand`, out as a row in SQLite. Also 0.1.92's `ref.svc_title`: that the service label is kept when it differs and not when it doesn't, that a play of the QUALIFIED title finds the row while a different artist's doesn't, and that the dedupe key still ignores the label. What the handshake params become on the stored row, that `&tc=` settles the type but never fills `track_count`, that the cross-kind single dedupe eats a REAL single but not a disproved one, that an UNKNOWN type defers instead of inserting a guess, and that unreplayable/unidentifiable adds are refused. Plus the NOW-PLAYING FALLBACK's gate on BOTH paths (0.1.98): on the album path, that a browse row with a non-service container verb does NOT adopt the playing track, while a genuine Now Playing add (no `svc` at all) still recovers its source; on the TRACK path, that a tapped row whose `trackid` resolves to NOTHING (no svc — it shares `$trackCmd` with Now Playing) and an online-track row with a container verb are both refused, while a real Now Playing track add still recovers the playing song and its url. In both cases both directions are needed, or "doesn't adopt" passes with the fallback simply switched off. And the other side of that gate: a REMOTE queue row (negative `trackid`, no favurl) is resolved by its id and stored as the row that was TAPPED — its own title, its own play url, its source read off that url and not hardcoded `library` — while the library row on the same branch still takes its album/year from the Album row — and, since the RemoteTrack that row resolves to is normally BARE, that a `''` title/artist off the object never overwrites what Material sent (the stub answers `''` for a negative id, so this cannot pass by the test having supplied the metadata itself). Also what a REJECTED add logs (0.1.98): that an empty source reads `(none identified)` rather than `''`, that the container verb is named, and that the clause which actually failed is named — a missing play url and an empty title each say so instead of blaming the service, while a genuinely unsupported source still reads exactly as it did. The reject is silent to the user, so that one line is the whole trace. Needs no service: the whole path asks only `client`/`getParam`/`setStatusDone`/`setStatusProcessing`/`addResult`/`addResultLoop`, and `client => undef` makes the background jobs no-op (pass `_client` for the Now Playing cases — it is pulled out of the params, not passed as one). **The service plugins must be declared** (`_serviceCan`) or the gate rejects everything and every assertion passes against an empty DB |
 | `t_resolve_count.pl` | what a resolve writes BACK to the row (`Browse::_albumTracks`): a FAILED resolve records nothing and never clobbers a real `track_count`/`rel_type`, Bandcamp helper-only rows count as a failure too, and 0.1.88's successful-resolve refresh + forced single-correction still work. Plus `Sources::hasDirectAlbumRef` — whether a row's tracklist costs one album call or a whole service SEARCH (the Bandcamp page-url case), which is what gates background work |
 | `t_prefs_migration.pl` | 0.1.94's pref migrations and the rule that makes them one-shot: that a leading-underscore pref cannot be stored at all (pinning the stub against `Slim::Utils::Prefs::Base::set` — if that assertion ever passes with a value, every other one here stops meaning anything), that the rebrand copy runs once and never reverts a later choice, that an install which already ran the broken copy isn't copied over again, and that the threshold bump re-applies exactly once. Runs the two migrations in the real startup order — the ordering IS the bug — for both an install that carries a pre-rebrand namespace and one that doesn't. **A real user's box is the second shape**: the rebrand landed in 0.1.25 and the first release was tagged v0.1.69, so no installed copy ever wrote a `plugin.listentolater` pref and the copy has nothing to import. `reset_prefs` seeds that namespace (Simon's dev box, the only one that ran the pre-rebrand code); `reset_prefs_no_legacy` doesn't — pick the one that matches the install you mean, or an assertion proves the wrong thing |
-| `t_material_actions.pl` | 0.1.95's delivery split: that the six SERVER-resolved positive categories are REGISTERED with Material (6.4.6+) and no longer written to actions.json while `track`/`queue-track` stay in the file (0.1.97), that nothing registered is also left in the file (the merge is additive — a leftover means every "Add" shows twice), that registration happens exactly ONCE across a re-register, a Settings save and the deferred radio write, that the suppressors and `podcasts-*` stay in the file where Material can actually see them, that an older Material still gets the byte-identical file it always did, and that a third party's entries in a category we vacated survive. Plus the FAILURE path: a `registerCustomAction` that dies falls back to the file (all of it, or exactly the refused sections on a partial failure — never both places), and a file write with no registration behind it (the pref switched on mid-run) writes the full set. Plus the SETTINGS save itself, driven through `Settings::handler` with `debug_log` OFF (0.1.97): turning `material_action` off clears the file half on the save and warns about the registered half, turning it back on restores `track`/`queue-track` without re-writing anything Material already took, and turning it on when nothing registered writes everything. And the 0.1.98 rule that the OFF save must obey: while entries are still registered, the empty suppressors (ours and the radio ones) STAY and stay EMPTY — deleting them while the `online-*` pair cannot be withdrawn ADDS "Add" to our own rows instead of removing it — including on the path that rule was written for and originally missed, **the file being GONE**, where all three families have to be RE-CREATED rather than preserved. And the same rule from the other side for the one category that is ours, file-only AND per-app: with nothing registered, `podcasts-*` is DELETED rather than left as an empty husk — including for a user who has since unsubscribed from every feed, the state `_materialActionSet` can no longer name — because an empty per-app override hides Add on the Podcasts app for good; with entries still live it stays, and stays empty, for exactly the reason the radio empties do. Plus the 0.1.110 DELIVERY TIER, which needed `set_material_version()` because without a `getPluginVersion` stub every one of the previous 746 checks ran at tier 1 and could not reach the new code at all: the tier table (capability alone is never enough — the one-argument empty-section call pushes a null on 6.4.6/6.4.7), the folded action set, an upgrade from a file install ending with the file UNLINKED, a hand-written actions.json surviving verbatim — populated category, their own empty suppressor, and an entry titled like ours that is not ours — both refusal fallbacks (a refused positive and a refused empty section each reach the user through the file, and the file is created for them if it has gone), the deferred pass registering a late-discovered radio command without re-pushing anything, the pref off at STARTUP vs mid-run (only the latter has anything registered to suppress), the uninstall stranding nothing, and both downgrade steps rebuilding the file. Plus 0.1.114's `Sources::materialAtLeast`, the ONE version comparator the three gates now share: the comparison table, all THREE return values with `undef` (cannot tell) pinned as distinct from `0` (too old) even though both are falsy today, and the LIST-CONTEXT trap that shipped during the refactor — `_materialVersion` is `return eval {...}`, so inlining it into the argument list collapses `(undef,6,4,8)` to `(6,4,8)` and every Material-less install silently reaches the NEWEST tier. That last one is reproduced directly AND pinned as a source check on both callers (`LL_PLUGIN_SRC=`/`LL_BROWSE_SRC=` point those at mutated copies), since no return value shows which spelling a caller used. Plus 0.1.119's two Material fixes: that the PRUNE's diagnostics do not claim the API delivered anything when registration never ran (the pref off at STARTUP — the dump must not say "plugin API"/"streaming Add active"/"registered sections" under "material_action pref = OFF"), with the mirror case pinned so the gate cannot be widened into never reporting the API half at all; and that a category appearing MID-RUN still reaches Material — subscribing to a first podcast registers `podcasts-*` while pushing nothing already registered a second time (a duplicate push is how every "Add" comes to show twice), is not ALSO written to the file, and a repeat pass adds nothing. The `setChange` wiring that triggers it is a source check, because the harness's `setChange` is a no-op and no return value shows it |
+| `t_material_actions.pl` | 0.1.95's delivery split: that the six SERVER-resolved positive categories are REGISTERED with Material (6.4.6+) and no longer written to actions.json while `track`/`queue-track` stay in the file (0.1.97), that nothing registered is also left in the file (the merge is additive — a leftover means every "Add" shows twice), that registration happens exactly ONCE across a re-register, a Settings save and the deferred radio write, that the suppressors and `podcasts-*` stay in the file where Material can actually see them, that an older Material still gets the byte-identical file it always did, and that a third party's entries in a category we vacated survive. Plus the FAILURE path: a `registerCustomAction` that dies falls back to the file (all of it, or exactly the refused sections on a partial failure — never both places), and a file write with no registration behind it (the pref switched on mid-run) writes the full set. Plus the SETTINGS save itself, driven through `Settings::handler` with `debug_log` OFF (0.1.97): turning `material_action` off clears the file half on the save and warns about the registered half, turning it back on restores `track`/`queue-track` without re-writing anything Material already took, and turning it on when nothing registered writes everything. And the 0.1.98 rule that the OFF save must obey: while entries are still registered, the empty suppressors (ours and the radio ones) STAY and stay EMPTY — deleting them while the `online-*` pair cannot be withdrawn ADDS "Add" to our own rows instead of removing it — including on the path that rule was written for and originally missed, **the file being GONE**, where all three families have to be RE-CREATED rather than preserved. And the same rule from the other side for the one category that is ours, file-only AND per-app: with nothing registered, `podcasts-*` is DELETED rather than left as an empty husk — including for a user who has since unsubscribed from every feed, the state `_materialActionSet` can no longer name — because an empty per-app override hides Add on the Podcasts app for good; with entries still live it stays, and stays empty, for exactly the reason the radio empties do. Plus the 0.1.110 DELIVERY TIER, which needed `set_material_version()` because without a `getPluginVersion` stub every one of the previous 746 checks ran at tier 1 and could not reach the new code at all: the tier table (capability alone is never enough — the one-argument empty-section call pushes a null on 6.4.6/6.4.7), the folded action set, an upgrade from a file install ending with the file UNLINKED, a hand-written actions.json surviving verbatim — populated category, their own empty suppressor, and an entry titled like ours that is not ours — both refusal fallbacks (a refused positive and a refused empty section each reach the user through the file, and the file is created for them if it has gone), the deferred pass registering a late-discovered radio command without re-pushing anything, the pref off at STARTUP vs mid-run (only the latter has anything registered to suppress), the uninstall stranding nothing, and both downgrade steps rebuilding the file. Plus 0.1.114's `Sources::materialAtLeast`, the ONE version comparator the three gates now share: the comparison table, all THREE return values with `undef` (cannot tell) pinned as distinct from `0` (too old) even though both are falsy today, and the LIST-CONTEXT trap that shipped during the refactor — `_materialVersion` is `return eval {...}`, so inlining it into the argument list collapses `(undef,6,4,8)` to `(6,4,8)` and every Material-less install silently reaches the NEWEST tier. That last one is reproduced directly AND pinned as a source check on both callers (`LL_PLUGIN_SRC=`/`LL_BROWSE_SRC=` point those at mutated copies), since no return value shows which spelling a caller used. Plus 0.1.119's two Material fixes: that the PRUNE's diagnostics do not claim the API delivered anything when registration never ran (the pref off at STARTUP — the dump must not say "plugin API"/"streaming Add active"/"registered sections" under "material_action pref = OFF"), with the mirror case pinned so the gate cannot be widened into never reporting the API half at all; and that a category appearing MID-RUN still reaches Material — subscribing to a first podcast registers `podcasts-*` while pushing nothing already registered a second time (a duplicate push is how every "Add" comes to show twice), is not ALSO written to the file, and a repeat pass adds nothing. The `setChange` wiring that triggers it WAS a source check, because the harness's `setChange` was a no-op — and that is exactly how 0.1.121's finding 1 hid for six rounds: a source grep pins that a call EXISTS, never WHERE it lives, so it matched just as happily with the watcher inside the pref-ON arm, where a box-unticked boot installed none. The stub now RECORDS into `@Slim::Utils::Prefs::Obj::CHANGES` and the suite drives `postinitPlugin` on BOTH arms, plus the subscribe-first/tick-second ordering that shows why no second watcher belongs in `Settings.pm` (`setChange` STACKS). When a behaviour can only be pinned at source, the stub is too thin |
 | `t_material_matrix.pl` | the actions.json STATE MACHINE, as invariants rather than scenarios. Enumerates starting file x Material version x podcast subscriptions x user journey and drives real op SEQUENCES (boot on/off, Settings on/off, restarts), checking after EVERY step: **I1** a pref-OFF terminal leaves none of our entries, and with nothing registered none of our categories either; **I2** a foreign category — entries AND deliberate empty suppressors — is byte-identical before and after every operation; **I3** no EMPTY `<cmd>-album/-track` exists for a command we can replay (the 0.1.51 regression as a property); **I4** any journey ending pref-ON converges on the clean baseline, whatever route it took. Exists because the scenario suite is structurally blind to both halves of these bugs: they are TWO-TRANSITION (the clear pass writing `podcasts-*` empty is correct — it goes wrong at the next WRITE) and they live in the one untested cell of a 2x2, since every `$live` case in `t_material_actions.pl`'s podcast block subscribes a feed first. The invariants deliberately carry almost no vocabulary of "which categories are ours" — that list is the bug generator, so a test restating it would inherit the fault; the reference is a BASELINE from a clean run of the same config. I4 compares the MERGED file+registered view, not the file, or a Settings-save enable (which cannot register, so it delivers through the file by design) reads as drift. **A world must reset `%Slim::Utils::Prefs::VALUES`** — a pref written by one journey turns the next journey's "upgrade from an older build" case into an already-migrated one, silently hiding this exact bug class. **And it must reset every registration fact, including BOTH per-category ledgers**, or a "restart" carries this process's registrations into the next one. Since 0.1.119 the configs carry a Material-VERSION axis and the matrix covers all three DELIVERY TIERS (2 / 1 / 0) x subscriptions x 9 journeys x 4 invariants; before that it pinned at tier 1 and every assertion ran against a mode that prunes nothing and never unlinks the file. Two things that only make sense once tier 2 is reachable: `merged_view` must treat a ONE-ARGUMENT registration as declaring an EMPTY section (reading `$_->[1]` puts a literal undef in and makes the suppressor look populated), and I3 must take the MERGED view — on tier 2 suppressors arrive by registration, so reading the file alone makes it unfalsifiable exactly where the prune runs |
 | `t_addpath.pl` (Spotify section) | 0.1.113's Spotify support end to end: a bare `spotify:album:<id>` URI storing as an album with source `spotify` and its id captured, a track URI storing a playable `spotify://track:<id>`, both playlist spellings landing the same short id, `svc:'spotty'` resolving to source `spotify` with no cover to sniff — and **the rebuild test**, replaying each stored row and asserting Spotty received a full URI rather than a bare id (a bare id matches nothing in `API::album` and returns an empty tracklist, i.e. a row that plays once and is then gone). The Spotty stubs are declared at the END of the file on purpose, so every test above it runs with Spotty ABSENT and the `->can` refusal is covered by the same file |
 | `t_favurl.pl` (Spotify sections) | `normaliseFavurl` itself, and then the four readers that consume it — including that none of them reaches `favurlIsTrack`'s fail-open branch, which the file's no-warnings check enforces. Plus `sourceFromSvc`: `spotty` → `spotify`, while a home-shelf id still answers `''` so the cover sniff keeps its turn. Plus 0.1.115's `spottyArtistName`, the ONE reader of a Spotty album object's artist: both legitimate shapes (the cache's plain `artist` string and the raw API's `artists` array), the string winning when both are present, and seven miss cases — including a hash in `artist`, which is the TIDAL/DEEZER shape and must NOT be read here, so a fold of the two extractions fails rather than quietly losing a Tidal row's artist. Calls are `eval`'d because a shape the sub fails to guard DIES rather than returning, and a dying assertion aborts the run instead of reporting it. Plus source checks that both modules ask through the sub and neither open-codes the `artists[0]{name}` read outside its body (`LL_SOURCES_SRC=`/`LL_PLUGIN_SRC=` point those at mutated copies) |
 | `t_reltype.pl` (Spotify section) | That a Spotify EP — `album_type: 'single'` with `total_tracks: 5` — is NOT stored as a single, that it resolved a real tracklist to prove it, and that a 9-track "single" demotes to `album` rather than `ep`. Also that the album is requested by full URI, and that no album object at all falls through to the tracklist instead of dying or inventing |
 | `t_refold.pl` | 0.1.112's fleet fold and the migration it owes: apostrophe elision (and the `'n'` guard) plus `%FOLD` in ALL THREE normalisers, that the three punctuation passes still differ where they must (the key keeps "(Deluxe)", the gate strips it, the ranker keeps "(LP4)"), that the lenient empty-artist gates are untouched, and `_migrateRefold` end to end against real SQLite — a stale key rewritten, same-status duplicates collapsed into the earliest save with the loser's `ref` carried across, MIXED-status rows left alone on their old keys, track `|t:` and playlist `|p:<svc>:<id>` identity segments preserved, and idempotence. Plus, at source level, that the fold lives in `DB.pm` and that `DB::_norm` calls it DIRECTLY while `Sources` goes through `->can` — the failure that guards is a permanent wrong key in a UNIQUE column, which no passing call can show. Plus §4i (0.1.119): a rollback that ITSELF fails must not poison the handle — `AutoCommit` restored, a later transaction still openable, the failed pass still withholding the ladder stamp, and the assertion that actually matters, that an ordinary write made AFTER the failure is durable rather than discarded at shutdown. DBD::SQLite will not fail a rollback on demand, so only the rollback is injected (a `RootClass` subclass); the failing GROUP is 4h's reachable collision. Its squatter pair differs by an apostrophe rather than reusing 4h's accented one — that is fixture history, not a hazard in accents |
-| `t_query_enc.pl` | 0.1.120's per-branch query encoding in `_searchService`: that Qobuz and Tidal are handed CHARACTERS and Deezer OCTETS, and the CONSEQUENCE rather than just the flag — the URL `uri_escape_utf8` actually builds (called for real) and the name Unidecode actually transliterates to (modelled, since Text::Unidecode is not a dependency here). Plus the fail-safe cases in both directions, since a raw-CLI add arrives as octets and must not be corrupted on the way out. **Its fixture is the fragile part and is asserted rather than assumed:** a `"\x{f3}"` literal is stored latin-1 with `utf8::is_utf8` FALSE, so the encode never fires and every branch looks correct — `utf8::upgrade` models what `sqlite_unicode`/JSON::XS really hand back, and the first assertion fails loudly if it is ever dropped. The ASCII positive control is what stops the suite being satisfied by a change that mangles every query equally |
+| `t_query_enc.pl` | 0.1.120's per-branch query encoding in `_searchService`: that Qobuz, Tidal and Spotty (0.1.121) are handed CHARACTERS and Deezer OCTETS, and the CONSEQUENCE rather than just the flag — the URL `uri_escape_utf8` actually builds (called for real) and the name Unidecode actually transliterates to (modelled, since Text::Unidecode is not a dependency here). Plus the fail-safe cases in both directions, since a raw-CLI add arrives as octets and must not be corrupted on the way out. **Its fixture is the fragile part and is asserted rather than assumed:** a `"\x{f3}"` literal is stored latin-1 with `utf8::is_utf8` FALSE, so the encode never fires and every branch looks correct — `utf8::upgrade` models what `sqlite_unicode`/JSON::XS really hand back, and the first assertion fails loudly if it is ever dropped. The ASCII positive control is what stops the suite being satisfied by a change that mangles every query equally. **Bandcamp (0.1.122) is in NEITHER camp and is tested for exactly that**, because "exempt by an invariant" and "nobody checked" look identical from outside: its branch sends the combined `_norm("$artist $album")`, which `s/[^a-z0-9]+/ /g` makes ASCII-only, so the two encodings are byte-identical there and no conversion applies. The assertions pin that INVARIANT — ASCII out for character, octet and latin-1 in, the two encodings identical, and the album half still in the query — so a refactor that sends a raw artist or title down that branch goes red and has to pick a camp (5 red without them) |
 | `t_load.pl` | every shipped module compiles AND loads, plus a called-vs-defined sweep — `perl -c` passes on a call to a sub that doesn't exist, which nearly shipped a runtime crash in 0.1.83 |
 
 Two rules that follow from how this suite is built:
@@ -3328,6 +3518,7 @@ the resolve-fallback paths.
 |---|---|---|
 | **library** | ✅ always | `Sources::libraryAlbumYear` — the local DB, free |
 | **Qobuz** (native or sibling) | ✅ | the album object, via `Sources::serviceYear` |
+| **Spotify** (Spotty) | ✅ | the album object (`release_date`), via `Sources::serviceYear` — the same single `$api->album` call that answers `album_type` and `total_tracks`, so it costs nothing extra |
 | **LBF / PFR** (any service) | ✅ when they have one | the `&y=` handshake |
 | **Now Playing** | ✅ only if the label reads `"Album (YYYY)"` | Material's label, stripped by `_addCtxCommand` |
 | **Tidal native** | ❌ | `getAlbum` returns a TRACKLIST, no album hash to read |

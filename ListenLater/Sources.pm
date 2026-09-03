@@ -1080,8 +1080,23 @@ sub _searchService {
     #   * CHARACTERS for Qobuz (escapes with uri_escape_utf8), Tidal (transliterates with
     #     Text::Unidecode) and Spotty (uri_escape_utf8 in _prepareCall) — handing those
     #     octets double-encodes, so "Sigur Rós" goes out as "Sigur RÃ³s"/"Sigur RA3s" and
-    #     the search returns NOTHING for any non-ASCII artist.
-    #   * OCTETS for Deezer (complex_to_query) and Bandcamp.
+    #     the search returns JUNK for any non-ASCII artist. Not empty: MEASURED live
+    #     2026-09-03, Qobuz returned 1 real hit of 88 (the rest things like "Sigue
+    #     Caminando") and TIDAL 8 of 74, which _albumMatches then rejects — so the user
+    #     sees "Could not find this album to play" either way, but the mechanism is
+    #     wrong/incomplete results, and on TIDAL the album may still be found by luck.
+    #     Never describe this as "returns nothing" — that is what stopped it being
+    #     recognised for two months.
+    #   * OCTETS for Deezer (complex_to_query).
+    #   * BANDCAMP IS IN NEITHER CAMP, and this is the exemption to state rather than
+    #     leave as a silence: its branch sends $query, not $artist — _norm("$artist
+    #     $album"), whose `s/[^a-z0-9]+/ /g` leaves ASCII and nothing else. Characters and
+    #     octets are byte-identical there, so neither conversion applies and applying one
+    #     would be theatre. If that branch is ever changed to send a RAW artist or title,
+    #     it acquires a camp and must pick one — Bandcamp's own layer wants octets.
+    #     (Recorded because the earlier wording listed Bandcamp under OCTETS while the
+    #     code applied none, which reads as a decision the code does not make — the same
+    #     class of untrue comment as the "right for the other three" line 0.1.120 removed.)
     # Both conversions fail safe: decode leaves a non-UTF-8 byte string untouched, and
     # encode is a no-op on a string that is already octets. Only the outgoing QUERY is
     # affected — every branch matches candidates with _norm($artist) on the raw value, so
@@ -1202,9 +1217,12 @@ sub _searchService {
     #    nothing. It is in the SAME camp as Qobuz and Tidal — only Deezer and Bandcamp
     #    want octets; see the encoding note above `$artistChars`. (An earlier version of
     #    this comment claimed octets were "right for the other three", which was wrong
-    #    for two of them and documented a real bug as intended behaviour.) The raw
-    #    $artist is passed rather than $artistChars only because it is already the
-    #    character form on every path that reaches here.
+    #    for two of them and documented a real bug as intended behaviour.) This branch
+    #    passed the raw $artist for a while, on the grounds that it is already the
+    #    character form on every path reaching here — true today, but nothing enforces
+    #    it, and the decode is a no-op on a string that is already characters. So send
+    #    $artistChars like the other two in this camp: identical output on every current
+    #    path, and correct rather than lucky if a byte-form producer is ever added.
     #  • the album TITLE is `name` (the others say `title`), and `artist` is a plain string
     #    holding the first credit, alongside the full `artists` list.
     #  • the renderer lives in OPML, not Plugin, and yields url => \&OPML::album with the
@@ -1239,7 +1257,7 @@ sub _searchService {
                 push @cand, [ $item, $a->{name}, $cy ];
             }
             $cb->(_bestMatches(\@cand, $album, $recYear) || _noMatch($client));
-        }, { query => $artist, type => 'album', limit => 50 });
+        }, { query => $artistChars, type => 'album', limit => 50 });
         return;
     }
 
