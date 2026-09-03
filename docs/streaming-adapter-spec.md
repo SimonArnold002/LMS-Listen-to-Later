@@ -177,13 +177,30 @@ target.
 | Call | Meaning | Cache TTL |
 |---|---|---|
 | `$collect->([$item, …])` | Matches found | 7 days |
-| `$collect->([])` | Queried successfully, nothing matched | 24 hours |
-| `$collect->(undef)` | Could not query: no handler, unexpected response shape, renderer failed | 1 hour |
+| `$collect->([])` | Queried successfully, nothing matched | 24 hours (album) / 7 days (track) |
+| `$collect->(undef)` | Could not query: no handler, unexpected response shape, renderer failed | Retried on a bounded schedule, then accepted |
 
 `undef` means "ask again soon". Use it only for states that can clear on their own. A
 **permanent** condition — for example, the service plugin is installed but has no account
-configured at all — **MUST** report `[]`, because reporting it as inconclusive makes every
-genuine miss re-search hourly for as long as that state lasts.
+configured at all — **MUST** report `[]`, because a permanent state reported as inconclusive
+spends the whole retry budget on a question that cannot change.
+
+**The retry is bounded (LBF 0.9.195, `MISS_RETRY_SCHEDULE`).** An inconclusive miss is
+re-searched at 1h, 6h and 24h and is then accepted as an ordinary durable no-match. Earlier
+builds retried on a flat 1-hour TTL, which never ended: a track genuinely on no service answers
+inconclusively every time, so it re-searched for ever and the resolved-list cache stayed short
+on the same clock. **An adapter author does not schedule anything — report `undef` and the
+caller owns the budget. Never add an internal retry loop.**
+
+**ZERO RAW RESULTS IS AN ERROR SIGNAL, NOT AN EMPTY CATALOGUE — and it is the caller's rule, not
+yours.** These searches hit fuzzy indexes that answer with up to 20-200 rows; even a release the
+service never carried returns near-misses. So a leg that matched nothing out of a completely
+empty raw list is settled as inconclusive rather than as a confirmed miss, at the call site, via
+`_emptyResultIsError`. This matters most for a plugin whose transport **swallows errors**: Spotty's
+Pipeline hands an error hash to its extractor, which extracts to nothing, so a failed search is
+byte-identical to a clean zero-hit and `undef` can never reach us from it. **If your service's
+index is genuinely sparse — Bandcamp — say so and stay out of the rule**, or a permanently absent
+album retries on every cycle for ever.
 
 **MUST**
 
@@ -298,7 +315,7 @@ the registry, not work for an adapter author; close them as they come up.
 |---|---|---|---|
 | **LBF** | Qobuz, Bandcamp, TIDAL, Deezer, Spotify | About 200 lines: two legs, one pref default, one settings entry, one rebuild branch | Ready |
 | **PFR** | Qobuz, TIDAL, Deezer | About 100 lines (album leg only), plus a rebuild branch, plus the memo-key fix | Ready once the memo key is table-driven |
-| **LL** | qobuz, bandcamp, tidal, deezer, spotify, via a url-scheme map (`Sources.pm:26`) | About 150 lines across eight per-source branches in `Sources.pm` and `Plugin.pm`, plus a normalisation if the favurl is not a scheme url | Works; refactor still owed |
+| **LL** | qobuz, bandcamp, tidal, deezer, spotify, via a url-scheme map (`Sources.pm:26`) | About 150 lines across ten per-source branches in `Sources.pm` and `Plugin.pm` | Works; refactor still owed |
 
 LL works differently by design: it does not search a service, it **recognises** one from the
 url scheme of a row the user acted on, then replays it. Its contract is "recognise and
@@ -308,18 +325,30 @@ replay" rather than "search and render".
 required collecting the branches into a sources table of coderefs *first*. That turned out
 to be wrong, and the estimate of "roughly fifteen" branches with it: Spotify was added with
 full parity — album replay, track saves, playlists, search fallback, release-type
-classification and artist backfill — in eight branches and no refactor, because the
+classification and artist backfill — in ten branches and no refactor, because the
 branches are each two or three lines selecting a coderef and a passthrough shape, and they
 are all named after the same source tag. The refactor is still worth doing and is still not
 a prerequisite; do not let it block the next service.
 
-What the branches are, so the next one can be counted rather than guessed at:
-`_streamingAlbumNode`, `_streamingPlaylistNode`, `_searchService`, `_serviceCan`,
-`_serviceCanPlaylist`, `classifyRelType` (only if the service states a type or count on its
-album object), `_backfillStreamingArtist` (only if its rows can arrive artist-less), and
-`%SUPPORTED_CMD` in `Plugin.pm`. Add `%SVC_ALIAS` if the service plugin's browse command is
-not its service's name — Spotty registers `tag => 'spotty'` for the source LL calls
-`spotify`.
+What the branches are, so the next one can be counted rather than guessed at. Six are
+unconditional: `_streamingAlbumNode`, `_streamingPlaylistNode`, `_searchService`,
+`_serviceCan`, `_serviceCanPlaylist`, and `%SUPPORTED_CMD` in `Plugin.pm`. Four depend on
+what the service is like:
+
+- `classifyRelType` — only if the service states a type or count on its album object.
+- `_backfillStreamingArtist` — only if its rows can arrive artist-less.
+- `sourceFromSvc` / `%SVC_ALIAS` — only if the service plugin's browse command is not its
+  service's name. Spotty registers `tag => 'spotty'` for the source LL calls `spotify`.
+- `normaliseFavurl` — only if its favurl is not a `<scheme>://` url. Spotty sends the bare
+  URI `spotify:album:<id>`; see §2's note on checking the favurl's shape.
+
+**The last two were MISSED by this list when the Spotify build first wrote it**, which is
+exactly the failure the count exists to prevent: both are conditional, like the two above
+them, so a service needing neither reads the list as complete and a service needing one
+finds nothing telling it to look. The cost is silent — a missed alias drops the native
+album id and the row falls back to fuzzy search; a missed normalisation misreads the favurl
+in all four of LL's readers at once. **When you add a branch for a new service, add it here
+in the same session, and say what makes it conditional.**
 
 ---
 
