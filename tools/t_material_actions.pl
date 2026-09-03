@@ -1175,5 +1175,84 @@ is('dropping to a Material with no API at all restores the full legacy file',
 
 set_material_version(undef);
 
+# ===========================================================================
+# Sources::materialAtLeast — the ONE version comparator (0.1.114)
+#
+# Three gates used to parse and compare inline (the 6.4.8 tier gate, the 6.4.4
+# diagnostics line, Browse::_headerType's 6.4.3). They now share this sub, so its
+# three-way answer is pinned here rather than implied by whichever gate a later
+# test happens to drive.
+# ===========================================================================
+section('Sources::materialAtLeast — the one version comparator');
+
+my $mal = \&Plugins::ListenLater::Sources::materialAtLeast;
+
+is('exact match is "at least"',            $mal->('6.4.8', 6,4,8), 1);
+is('a later patch',                        $mal->('6.4.9', 6,4,8), 1);
+is('an earlier patch',                     $mal->('6.4.7', 6,4,8), 0);
+is('minor outranks patch',                 $mal->('6.5.0', 6,4,8), 1);
+is('...in both directions',                $mal->('6.3.9', 6,4,8), 0);
+is('major outranks minor',                 $mal->('7.0.0', 6,4,8), 1);
+is('...in both directions',                $mal->('5.9.9', 6,4,8), 0);
+is('trailing text after the triple still parses', $mal->('6.4.8-beta1', 6,4,8), 1);
+is('multi-digit parts compare NUMERICALLY, not as strings',
+                                           $mal->('6.10.0', 6,4,8), 1);
+
+# The three-way answer. undef and 0 are both falsy so every current caller treats
+# them alike, but they are DIFFERENT answers and a caller may one day need to tell
+# "cannot tell" from "too old" — so the shape is pinned, not just the truthiness.
+is('undef version answers undef (cannot tell), not 0',
+                                           $mal->(undef, 6,4,8), undef);
+is('a non-numeric dev/test build answers 1 (treated as newest)',
+                                           $mal->('test', 6,4,8), 1);
+is('...and so does the empty string, which matches no triple',
+                                           $mal->('', 6,4,8), 1);
+is('cannot-tell is FALSY, so `? A : B` gives every caller its safe answer',
+                                           ($mal->(undef, 6,4,8) ? 'true' : 'false'), 'false');
+
+# THE TRAP THIS SUB IS EASIEST TO BREAK BY, and it is not hypothetical: it shipped
+# during the 0.1.114 refactor and this suite is what caught it. _materialVersion is
+# `return eval { ... }`, and a failed eval BLOCK yields an EMPTY LIST in list context.
+# Inlined into the argument list the args collapse from (undef,6,4,8) to (6,4,8), so
+# $ver becomes 6, fails the numeric match, and takes the dev-build branch — every
+# install without Material silently reaching the NEWEST tier instead of the safest.
+my @collapsed = (6, 4, 8);                 # what an inlined empty-list call really passes
+is('the arg-collapse shape answers 1 — which is why the call site must use a scalar',
+                                           $mal->(@collapsed), 1);
+is('...whereas the correct call answers undef',
+                                           $mal->(undef, @collapsed), undef);
+
+# Pin the call sites themselves. There is no return value that shows WHICH spelling a
+# caller used, so this is a source check — the same reason 0.1.145's handshake test
+# added one. A caller that inlines the eval-returning sub reintroduces the trap above.
+{
+    my $src = do {
+        local $/;
+        open my $fh, '<', $ENV{LL_PLUGIN_SRC} || "$FindBin::Bin/../ListenLater/Plugin.pm"
+            or die "cannot read Plugin.pm: $!";
+        <$fh>;
+    };
+    is('no call site inlines _materialVersion() into materialAtLeast(...)',
+        ($src =~ /materialAtLeast\(\s*_materialVersion\(\)/ ? 'inlined' : 'scalar first'),
+        'scalar first');
+    my $n = () = $src =~ /materialAtLeast\(/g;
+    is('Plugin.pm asks through the shared comparator twice (tier gate + diagnostics)',
+        $n, 2);
+    is('...and parses no version triple of its own any more',
+        ($src =~ /\$1\s*<=>\s*\d+\s*\|\|/ ? 'inline compare left' : 'none'), 'none');
+}
+{
+    my $src = do {
+        local $/;
+        open my $fh, '<', $ENV{LL_BROWSE_SRC} || "$FindBin::Bin/../ListenLater/Browse.pm"
+            or die "cannot read Browse.pm: $!";
+        <$fh>;
+    };
+    is('Browse::_headerType asks through the shared comparator too',
+        ($src =~ /materialAtLeast\(/ ? 'yes' : 'no'), 'yes');
+    is('...and parses no version triple of its own any more',
+        ($src =~ /\$1\s*<=>\s*\d+\s*\|\|/ ? 'inline compare left' : 'none'), 'none');
+}
+
 printf "\n%d passed, %d failed\n", $pass, $fail;
 exit($fail ? 1 : 0);

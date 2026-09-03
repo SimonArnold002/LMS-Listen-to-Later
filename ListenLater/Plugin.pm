@@ -149,15 +149,16 @@ sub _materialVersion {
 sub _materialActionTier {
     my $register = Plugins::MaterialSkin::Plugin->can('registerCustomAction')
         or return (0, undef);
-    my $ver = _materialVersion();
-    my $tier;
-    if (!defined $ver) {
-        $tier = 1;                                          # can't tell -> the safe API tier
-    } elsif ($ver =~ /^(\d+)\.(\d+)\.(\d+)/) {
-        $tier = ( $1 <=> 6 || $2 <=> 4 || $3 <=> 8 ) >= 0 ? 2 : 1;
-    } else {
-        $tier = 2;                                          # dev/test build -> newest
-    }
+    # undef (can't tell) falls to tier 1 with the false case — the safe API tier, which is
+    # what the unknown case wanted anyway. A dev/test build answers 1, so it reaches tier 2.
+    #
+    # ASSIGN TO A SCALAR FIRST — do not inline _materialVersion() into the argument list.
+    # It is `return eval { ... }`, and a failed eval BLOCK yields an EMPTY LIST in list
+    # context, not undef. Inlined, the args collapse from (undef, 6, 4, 8) to (6, 4, 8),
+    # so $ver becomes 6, fails the numeric match, and takes the dev-build branch — every
+    # install without Material silently reaching tier 2. Caught by t_material_actions.pl.
+    my $ver  = _materialVersion();
+    my $tier = Plugins::ListenLater::Sources::materialAtLeast($ver, 6, 4, 8) ? 2 : 1;
     return ($tier, $register);
 }
 
@@ -1307,15 +1308,10 @@ sub _dumpMaterialState {
     my @lines;
     my $emit = sub { my $m = shift; push @lines, $m; _dbg($m); };
 
+    # Unknown version reads as "not confirmed" (the false case), exactly as before; a
+    # dev/test build is assumed to carry the feature.
     my $ver = _materialVersion();
-    my $online_ok = 0;
-    if (!defined $ver) {
-        # unknown — can't confirm either way
-    } elsif ($ver =~ /^(\d+)\.(\d+)\.(\d+)/) {
-        $online_ok = ( $1 <=> 6 || $2 <=> 4 || $3 <=> 4 ) >= 0 ? 1 : 0;
-    } else {
-        $online_ok = 1;   # dev/test build — assume it carries the feature
-    }
+    my $online_ok = Plugins::ListenLater::Sources::materialAtLeast($ver, 6, 4, 4) ? 1 : 0;
 
     my $llver = eval {
         Slim::Utils::PluginManager->dataForPlugin(__PACKAGE__)->{version};

@@ -22,6 +22,34 @@ use Slim::Utils::Strings qw(cstring);
 
 my $log = logger('plugin.listenlater');
 
+# Is the running Material at least <maj>.<min>.<patch>?
+#
+#   undef  we cannot tell (Material absent, or getPluginVersion answered undef)
+#   1      yes — INCLUDING a non-numeric dev/test build, which is treated as newest
+#   0      no
+#
+# Three gates ask this and each used to parse and compare inline: the tier-2 gate (6.4.8),
+# the diagnostics' "online Add supported" line (6.4.4), and Browse::_headerType (6.4.3).
+# Three copies of one comparison is three places to fix a parsing change — a pre-release
+# suffix ('6.4.8-beta1'), or a different reading of a dev build — and nothing ties them
+# together, so a fix lands in one and the other two keep their own answer.
+#
+# EVERY CALLER TREATS undef AS "NO", and that is deliberate rather than incidental: each of
+# the three already chose its safe answer for the unknown case, and in all three that answer
+# is the same one a plain false gives. So a caller reads `materialAtLeast(...) ? A : B` and
+# the undef case needs no separate branch. If a future caller wants to distinguish "cannot
+# tell" from "too old", test `defined` explicitly — do not change the return shape.
+#
+# Lives HERE because Sources.pm is the one leaf module both Plugin.pm and Browse.pm already
+# use, so no new dependency edge is created. It is not service logic, and it is the only
+# thing in this file that isn't.
+sub materialAtLeast {
+    my ($ver, $maj, $min, $patch) = @_;
+    return undef unless defined $ver;                   # can't tell
+    return 1 unless $ver =~ /^(\d+)\.(\d+)\.(\d+)/;     # dev/test build -> newest
+    return ( $1 <=> $maj || $2 <=> $min || $3 <=> $patch ) >= 0 ? 1 : 0;
+}
+
 # url scheme -> our source tag
 my %SCHEME = (
     qobuz    => 'qobuz',

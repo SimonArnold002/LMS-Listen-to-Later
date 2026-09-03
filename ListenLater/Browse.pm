@@ -394,15 +394,10 @@ sub _wantHeaders {
 my $_headerTypeCache;
 sub _headerType {
     return $_headerTypeCache if defined $_headerTypeCache;
+    # undef (can't tell) falls to the long-standing 'header' with the false case, which is
+    # the safe answer the unknown case already wanted; a dev/test build gets the new type.
     my $ver = eval { Plugins::MaterialSkin::Plugin->getPluginVersion() };
-    my $useBasic;
-    if (!defined $ver) {
-        $useBasic = 0;                                  # can't tell -> stay safe
-    } elsif ($ver =~ /^(\d+)\.(\d+)\.(\d+)/) {
-        $useBasic = ( $1 <=> 6 || $2 <=> 4 || $3 <=> 3 ) >= 0 ? 1 : 0;
-    } else {
-        $useBasic = 1;                                  # dev/test build -> new
-    }
+    my $useBasic = Plugins::ListenLater::Sources::materialAtLeast($ver, 6, 4, 3) ? 1 : 0;
     return $_headerTypeCache = $useBasic ? 'header-basic' : 'header';
 }
 
