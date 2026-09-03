@@ -128,6 +128,33 @@ Check it before reporting — the July `%counting`, `classifyRelType` and
 `_verifyRelease` findings are all fixed and verified (`COUNT_STALE_SECS` is the
 escape for the first).
 
+**Round of 2026-09-03 — CLOSED, all four findings dispositioned.** Run against
+the 0.1.113 tree (Spotify support). Recorded here as a round because the
+version history alone does not show that a finding was RAISED and declined.
+
+| # | finding | disposition |
+|---|---|---|
+| 1 | `_migrateRefold` sorts a NULL `added_at` LAST, contradicting "earliest save wins" | **DECLINED** — three reasons, section A2 above |
+| 2 | the "ADDING A NEW SERVICE" site count was wrong (eight, actually ten) | **FIXED** — docs only; canonical spec §9 restructured into 6 unconditional + 4 conditional, re-copied to all three repos |
+| 3 | the Material version parse was written out three times | **FIXED** — 0.1.114, `Sources::materialAtLeast` |
+| 4 | the Spotty artist extraction was written out twice | **FIXED** — 0.1.115, `Sources::spottyArtistName` |
+
+Two things from that round worth carrying forward, both larger than the
+findings that produced them:
+
+- **The #3 refactor SHIPPED A REAL BUG and the suite caught it, not review.**
+  `materialAtLeast(_materialVersion(), 6, 4, 8)` — `_materialVersion` is
+  `return eval { ... }`, whose EMPTY LIST on failure collapses the argument
+  list, so every Material-less install silently reached the newest delivery
+  tier. See the 0.1.114 entry and [[return-eval-empty-list-trap]]. **Never
+  inline a `return eval { ... }` sub into an argument list.**
+- **The spec had drifted before this round started.** Commit 41768bf edited
+  the canonical copy in the ListenBrainz repo without re-copying it to PFR and
+  LL, so the three were out of sync for reasons unrelated to any finding here.
+  The copies are byte-identical again and all three are committed. The header's
+  "edit the canonical copy and re-copy" instruction is not optional — check
+  `shasum` across the three repos when touching it.
+
 ### D. ADDING TO THIS LEDGER
 
 When a finding is declined, or accepted-but-deferred, add it here in the same
