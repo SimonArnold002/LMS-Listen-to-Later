@@ -422,15 +422,25 @@ my %FOLD = (
 # split, and elide apostrophes. Everything up to (not including) the punctuation
 # pass, which is where the three normalisers legitimately differ.
 sub foldLatin {
-    my $s = lc($_[0] // '');
+    my $s = $_[0] // '';
 
-    # Input arrives as OCTETS from SQLite and as characters from a live request.
-    # Fold only what is valid UTF-8, and only adopt the decode if it succeeds —
-    # a latin-1 byte string is left exactly as it was.
+    # Input arrives as OCTETS from a raw-CLI request (Plugin.pm's handlers take artist /
+    # album straight off `$request->getParam`) and as characters everywhere else — SQLite
+    # included, since the handle sets `sqlite_unicode`. Fold only what is valid UTF-8, and
+    # only adopt the decode if it succeeds — a latin-1 byte string is left exactly as it was.
     if (!utf8::is_utf8($s) && $s =~ /[^\x00-\x7f]/) {
         my $d = $s;
         $s = $d if utf8::decode($d);
     }
+
+    # LOWERCASE **AFTER** THE DECODE, not before. `lc` on a byte string is ASCII-only, so an
+    # uppercase accented letter survives the fold as bytes, decodes to an uppercase codepoint,
+    # and `_norm`'s `[^a-z0-9]` then DELETES it rather than folding it: 'SIGUR RÓS' keyed
+    # 'sigur r s' on the octet path against 'sigur ros' on the character path — the same album
+    # under two keys in a UNIQUE column, which is the invisible row _migrateRefold exists to
+    # prevent. Lowercasing here costs nothing on the character path (identical result) and
+    # must stay above the %FOLD pass, whose keys are all lowercase.
+    $s = lc($s);
     if ($HAVE_NFD && utf8::is_utf8($s)) {
         $s = Unicode::Normalize::NFC(
              Unicode::Normalize::NFD($s) =~ s/[\x{0300}-\x{036F}]+//gr );

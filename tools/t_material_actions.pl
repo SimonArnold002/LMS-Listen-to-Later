@@ -793,7 +793,7 @@ sub untick { # what the browser actually posts: the key is simply not there
 # A restart: Plugin.pm's $prefs->init runs again at module load with the same defaults.
 sub restart_init {
     Slim::Utils::Prefs::preferences('plugin.listenlater')
-        ->init({ material_action => 1, debug_log => 0, sort => 'added' });
+        ->init({ material_action => 1, debug_log => 0, watch_outside => 1, sort => 'added' });
 }
 
 reset_all();
@@ -812,12 +812,29 @@ restart_init();
 is('...and after another one',
     (Slim::Utils::Prefs::preferences('plugin.listenlater')->get('material_action') ? 1 : 0), 0);
 
-# The same for the other checkbox on that page — one bug, two fields.
+# The same for the other checkboxes on that page — one bug, THREE fields. watch_outside was
+# missed by the 0.1.108 fix: same prefs() list, same default of 1, same absent-key post.
 Slim::Utils::Prefs::preferences('plugin.listenlater')->set('debug_log', 1);
 untick();
 restart_init();
 is('debug_log unticks and stays unticked too',
     (Slim::Utils::Prefs::preferences('plugin.listenlater')->get('debug_log') ? 1 : 0), 0);
+
+Slim::Utils::Prefs::preferences('plugin.listenlater')->set('watch_outside', 1);
+untick();
+is('watch_outside is a real 0 right after the save, not undef',
+    (defined Slim::Utils::Prefs::preferences('plugin.listenlater')->get('watch_outside')
+        ? 'defined' : 'undef'), 'defined');
+restart_init();
+is('watch_outside unticks and stays unticked across a restart',
+    (Slim::Utils::Prefs::preferences('plugin.listenlater')->get('watch_outside') ? 1 : 0), 0);
+Slim::Utils::Log::clear();
+Plugins::ListenLater::Settings->handler(undef, {
+    saveSettings => 1, pref_sort => 'added', pref_watch_outside => 1,
+});
+restart_init();
+is('...and ticking watch_outside still turns it back ON',
+    Slim::Utils::Prefs::preferences('plugin.listenlater')->get('watch_outside'), 1);
 
 # Ticking must still work, or the fix has just broken the box the other way.
 Slim::Utils::Log::clear();

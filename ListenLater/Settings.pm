@@ -64,6 +64,10 @@ sub handler {
         # to see the chosen value live, in this same request.
         $params->{pref_material_action} = $params->{pref_material_action} ? 1 : 0;
         $params->{pref_debug_log}       = $params->{pref_debug_log}       ? 1 : 0;
+        # `watch_outside` is the third checkbox on this page and fails the SAME way. It needs
+        # no direct set: nothing in this request reads it — Played.pm does, at play time,
+        # after SUPER has stored the materialised value.
+        $params->{pref_watch_outside}   = $params->{pref_watch_outside}   ? 1 : 0;
         $prefs->set('material_action', $params->{pref_material_action});
         $prefs->set('debug_log',       $params->{pref_debug_log});
 

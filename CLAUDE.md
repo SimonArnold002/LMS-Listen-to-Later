@@ -98,6 +98,30 @@ does not cover. Say which ledger entry you are challenging and what changed.
   id, which IS the earliest save — so the stated rule holds in every reachable case.
   Don't "fix" the sentinel; if that fold is ever made to carry `added_at`, revisit
   reason (2) first, because it is the only one that would change.
+- **`_pruneMaterialActions`'s `%ours` legitimately claims `favorites-album`/
+  `favorites-track` — DECLINED 2026-09-03.** The finding was that `git log -S` shows
+  the string first appearing in 0.1.110 in that very list, so no LL build can have
+  written it and the prune deletes a THIRD PARTY's empty suppressor. The git evidence
+  is an artefact of this repo's release convention: versions ship as zips and are
+  committed in batches (0.1.73–0.1.85 all landed in the `0.1.86` commit), so **a
+  shipped build's code need not exist as a commit**. 0.1.85 DID ship the category —
+  the comment that removed it (`Plugin.pm`, "deliberately NO 'favorites-*'") says so
+  in the same breath as why the strip-then-delete-empties pass has to clean it up,
+  and CHANGELOG 0.1.85 is the release it belongs to. The residual — an empty
+  third-party `favorites-*` is deletable — is the accepted trade-off `%ours` carries
+  for every legacy name, bounded by the only-empty / only-ours rules. **Do not use
+  `git log -S` alone to prove this repo never shipped something.**
+- **`foldLatin`'s `utf8::is_utf8` gate is sound HERE — DECLINED 2026-09-03.** The
+  finding was that gating the NFD/`%FOLD` pass on a STORAGE flag skips folding for a
+  downgraded Latin-1-range character string (`Björk` → `bj rk`), which is not a
+  semantic test for a permanent UNIQUE key. True in the abstract, unreachable here:
+  LL has three input producers and none downgrades — JSON::XS and DBD::SQLite
+  (`sqlite_unicode => 1`, `DB.pm`) both hand back UPGRADED strings, and the raw CLI
+  hands back UTF-8 OCTETS, which the decode above the gate adopts. LL calls no
+  `Slim::Utils::Unicode` and never calls `utf8::downgrade`. Revisit only if a
+  producer that downgrades is added — the fix then is to upgrade a failed decode as
+  Latin-1, and it changes a stored key, so it owes a migration.
+
 
 ### B. KNOWN-OPEN AND ACCEPTED — do not re-report as new
 
@@ -139,6 +163,22 @@ version history alone does not show that a finding was RAISED and declined.
 | 3 | the Material version parse was written out three times | **FIXED** — 0.1.114, `Sources::materialAtLeast` |
 | 4 | the Spotty artist extraction was written out twice | **FIXED** — 0.1.115, `Sources::spottyArtistName` |
 
+**Second round of 2026-09-03 — CLOSED, all four findings dispositioned.** Run
+against the 0.1.115 tree (`main...dev`: playlist kind, Spotify/Spotty adapter,
+Material registration tiers, dedupe-key refold).
+
+| # | finding | disposition |
+|---|---|---|
+| 1 | `Settings::handler` materialises `pref_material_action`/`pref_debug_log` but NOT `pref_watch_outside`, so unticking it never sticks | **FIXED** — 0.1.116; the 0.1.108 checkbox fix missed the third field; `t_material_actions.pl` now covers all three (2 red without it) |
+| 2 | `foldLatin` lowercases BEFORE the decode, so an uppercase accented letter on the octet path keys `sigur r s` against `sigur ros` | **FIXED** — 0.1.116; `lc` moved below the decode, which RESTORES fleet alignment (LBF/PFR/DSC all decode first); `t_refold.pl` §4f pins octets == characters (6 red without it) |
+| 3 | `%ours` claims `favorites-*` that no LL build wrote | **DECLINED** — 0.1.85 did ship it; section A2 above |
+| 4 | the `utf8::is_utf8` fold gate is a storage test, not a semantic one | **DECLINED** — no producer downgrades; section A2 above |
+
+Carried forward from it: **only an UPPERCASE accented letter exposed #2**, because
+the fold's output is lowercase, so `Sigur Rós` agreed on both paths and a live add
+looked correct. A fold test that only feeds lowercase fixtures cannot see a
+`lc`-ordering bug — `t_refold.pl` §4f now feeds both cases through both encodings.
+
 Two things from that round worth carrying forward, both larger than the
 findings that produced them:
 
@@ -154,6 +194,11 @@ findings that produced them:
   The copies are byte-identical again and all three are committed. The header's
   "edit the canonical copy and re-copy" instruction is not optional — check
   `shasum` across the three repos when touching it.
+
+Also carried forward: **`matcher_sync_check.py` could not have caught #2.** It compares
+`_norm` and `%FOLD`; LL's fold sits in `DB::foldLatin`, a separately-named sub, so an
+ordering slip INSIDE it is outside the gate's view and the check exits 0 on both trees.
+The sync gate proves the tables agree, not that the code around them does.
 
 ### D. ADDING TO THIS LEDGER
 
@@ -2507,6 +2552,54 @@ The "Add to Listen Later"/"Add to Wish List" custom actions appear on streaming 
   Podcast `CACHE_VER` bumped 19 → 20 with the build per the dev-build cache rule; nothing here
   parses a feed, so it is hygiene, not a fix.
 
+
+- **0.1.116 — the third checkbox, and the fold's `lc` in the wrong place.** Two review
+  findings, both bugs that a green suite and a working live test hid for the same reason:
+  each is invisible unless you feed it the one input shape nobody feeds it by hand.
+
+  **`watch_outside` could not be turned off.** 0.1.108 fixed the unticked-checkbox chain
+  (an absent `pref_*` → `SUPER::handler` writes undef → `Prefs::Base::init` re-seeds the
+  default at the next module load) and materialised `pref_material_action` and
+  `pref_debug_log` into `$params` to break it — but `settings.html` has THREE checkboxes,
+  and the third, defaulting to 1, was left on the broken path. Unticking "mark Played from
+  plays started outside the plugin" therefore came back ticked at every restart. The fix is
+  the third line of the same shape; no direct `$prefs->set` beside it, because nothing in
+  that request reads the value — `Played.pm` reads it at play time, after SUPER has stored
+  it. `t_material_actions.pl` 192 → **195 assertions**: the pref is a real 0 (not undef)
+  after the save, survives two restarts, and still re-ticks. **Anti-tested** — removing the
+  one line turns 2 of the 3 red.
+
+  **`DB::foldLatin` lowercased BEFORE decoding, so the octet path keyed differently from the
+  character path.** `lc` on a byte string is ASCII-only, so an uppercase accented letter
+  survived the fold as bytes, decoded to an uppercase codepoint, and `_norm`'s `[^a-z0-9]`
+  then DELETED it rather than folding it: `SIGUR RÓS` keyed `sigur r s` from the raw CLI
+  against `sigur ros` from everywhere else — two keys for one album in a UNIQUE column,
+  the invisible row `_migrateRefold` exists to prevent. Both callers are real: `Plugin.pm`'s
+  handlers take `artist`/`album` straight off `$request->getParam` (octets over the raw CLI),
+  while service JSON and SQLite (`sqlite_unicode => 1`) are characters.
+
+  **Only an UPPERCASE accented letter exposes it**, because the fold's output is lowercase —
+  `Sigur Rós` and `Björk` agree on both paths, which is why a live add looked correct and
+  why `t_refold.pl`'s all-lowercase fixtures could not see it. §4f now feeds both cases
+  through both encodings: 52 → **61 assertions**, 6 red on the pre-fix tree.
+
+  **This restores FLEET ALIGNMENT rather than diverging from it.** LBF, PFR and DSC all
+  decode first and `lc` after; the 0.1.112 port into `DB.pm` reordered the two. Checked
+  before the fix landed — `matcher_sync_check.py` exits 0 either way, because it compares
+  `_norm` and `%FOLD` and LL's fold lives in a separately-named sub, so the ordering slip was
+  outside what the gate can see. No sibling repo needed a change.
+
+  **No migration owed, and that is worth stating** — the rule above `DB::_norm` says a fold
+  change rewrites a stored key. Here it does not: `sqlite_unicode` means `_migrateRefold`
+  already rekeyed every row on the CHARACTER path, so this makes CLI input agree with what
+  is stored rather than changing it. Also corrected a stale comment claiming SQLite hands
+  back octets — the handle has set `sqlite_unicode` since it was written.
+
+  Two findings from the same round were DECLINED — see the Review Ledger, section A2: the
+  prune's `favorites-*` claim (0.1.85 DID ship that category; `git log -S` cannot prove
+  otherwise in a repo that commits versions in batches) and the `utf8::is_utf8` fold gate
+  (no LL input producer downgrades). Podcast `CACHE_VER` bumped 20 → 21 with the build per
+  the dev-build cache rule; nothing here parses a feed, so it is hygiene, not a fix.
 
 ## Regression tests — RUN THESE BEFORE ANY BUILD (added 2026-07-29)
 

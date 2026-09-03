@@ -250,6 +250,31 @@ section('4e. IDEMPOTENT — a second pass changes nothing');
 }
 
 # ---------------------------------------------------------------------------
+section('4f. THE OCTET PATH KEYS THE SAME AS THE CHARACTER PATH');
+# foldLatin accepts both, because Plugin.pm's request handlers take `artist` / `album`
+# straight off `$request->getParam` and the raw CLI hands those over as OCTETS, while
+# everything else (service JSON, SQLite with sqlite_unicode) is characters. Two callers,
+# one UNIQUE column, so the two paths MUST agree.
+#
+# They did not. `lc` ran BEFORE the decode, and on a byte string `lc` is ASCII-only: an
+# uppercase accented letter survived as bytes, decoded to an uppercase codepoint, and the
+# `[^a-z0-9]` pass then DELETED it — 'SIGUR ROS' with the accent keyed 'sigur r s' from the
+# CLI against 'sigur ros' from everywhere else. LOWERCASE input hid it completely (the fold
+# is already lowercase, so both paths agreed), which is why a live Sigur Ros add looked fine.
+sub oct_ { my $s = shift; utf8::encode($s); return $s }   # what the raw CLI delivers
+sub dbo  { Plugins::ListenLater::DB::_norm(oct_($_[0])) }
+
+for my $t ("Sigur R\x{f3}s", "SIGUR R\x{d3}S", "Bj\x{f6}rk", "BJ\x{d6}RK",
+           "M\x{f6}tley Cr\x{fc}e", "M\x{d6}TLEY CR\x{dc}E") {
+    is("octets key as characters do: $t", dbo($t), dbn($t));
+}
+is('and the uppercase octet form still folds to the plain key',
+   dbo("SIGUR R\x{d3}S"), 'sigur ros');
+is('...as does the uppercase ligature',  dbo("\x{c6}THER"),  'aether');
+ok('the fold is not merely lowercasing the bytes',
+   dbo("BJ\x{d6}RK") eq 'bjork');
+
+# ---------------------------------------------------------------------------
 section('5. THE FOLD LIVES IN DB.pm, AND THAT IS LOAD-BEARING');
 # Sources reaches it through ->can and falls back to lc; DB calls it directly. So a
 # missing fold degrades the LIVE match (discarded at end of request) and can never
