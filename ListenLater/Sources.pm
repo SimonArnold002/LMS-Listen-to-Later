@@ -1205,9 +1205,7 @@ sub _searchService {
             my @cand;
             for my $a (@{ (ref $albums eq 'ARRAY') ? $albums : [] }) {
                 next unless ref $a eq 'HASH';
-                my $candArtist = (defined $a->{artist} && !ref $a->{artist}) ? $a->{artist}
-                    : (ref $a->{artists} eq 'ARRAY' && ref $a->{artists}[0] eq 'HASH')
-                        ? $a->{artists}[0]{name} : '';
+                my $candArtist = spottyArtistName($a);
                 next unless _albumMatches(_norm($artist), _norm($album), $candArtist, $a->{name});
                 # Guard the foreign renderer: we are inside an async callback, so a die
                 # here is caught by nothing — skip the bad candidate instead (the same
@@ -1463,6 +1461,34 @@ sub serviceYear {
         }
         return $1 if defined $h->{year} && !ref $h->{year} && $h->{year} =~ /^((?:19|20)\d{2})/;
     }
+    return '';
+}
+
+# The artist name off a SPOTTY album object. Two shapes reach us and both are legitimate:
+# Spotty's cache normalises the album to a plain `artist` STRING (API/Cache.pm), while the raw
+# Spotify API shape keeps `artists` as an array of hashes. Prefer the string, fall back to the
+# first entry of the array.
+#
+# ONE sub because two call sites ask the same question of the same object — _searchService's
+# Spotify branch (is this candidate the right artist?) and Plugin::_backfillStreamingArtist
+# (what artist does this row lack?). They were written out separately, so a change to Spotty's
+# response shape had to be found in two places with nothing connecting them; missing one leaves
+# saved rows artist-less, and an artist-less row silently never moves to Played.
+#
+# NOT to be folded together with the Tidal and Deezer extractions in _searchService, which look
+# similar and are a DIFFERENT shape: there `artist` is a HASH you read ->{name} from, where
+# Spotty gives a string.
+#
+# Returns '' rather than undef when nothing is found, so a caller can test length alone.
+sub spottyArtistName {
+    my ($h) = @_;
+    return '' unless ref $h eq 'HASH';
+    return $h->{artist} if defined $h->{artist} && !ref $h->{artist};
+    return $h->{artists}[0]{name}
+        if ref $h->{artists} eq 'ARRAY'
+        && ref $h->{artists}[0] eq 'HASH'
+        && defined $h->{artists}[0]{name}
+        && !ref $h->{artists}[0]{name};
     return '';
 }
 

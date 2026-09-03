@@ -322,6 +322,69 @@ is("'QobuzExtrasqobuz' -> ''",  Plugins::ListenLater::Sources::sourceFromSvc('Qo
 is("'spottyfoo' -> ''",         Plugins::ListenLater::Sources::sourceFromSvc('spottyfoo'), '');
 is("undef -> ''",               Plugins::ListenLater::Sources::sourceFromSvc(undef), '');
 
+section('the artist off a Spotty album object (Sources::spottyArtistName)');
+
+# Two shapes are legitimate and both arrive: Spotty's cache normalises the album to a plain
+# `artist` STRING, the raw Spotify API keeps `artists` as an array of hashes. This sub is the
+# single owner of that knowledge — two call sites had it written out separately, so a change to
+# Spotty's response shape had to be found twice with nothing connecting them.
+# eval'd: a shape the sub fails to guard dies rather than returning ('Blondie' used as a HASH
+# ref), and an assertion that DIES aborts the run instead of reporting — which is how a whole
+# suite goes quiet. Report the death as the failure it is.
+sub sart {
+    my $r = eval { Plugins::ListenLater::Sources::spottyArtistName($_[0]) };
+    return "DIED: $@" if $@;
+    return $r;
+}
+
+is('normalised cache shape (plain string)', sart({ artist => 'Blondie' }), 'Blondie');
+is('raw API shape (artists array)',
+    sart({ artists => [ { name => 'Blondie' }, { name => 'Debbie Harry' } ] }), 'Blondie');
+# The string wins when both are present — it is what Spotty itself hands to its renderers.
+is('string preferred over the array',
+    sart({ artist => 'Blondie', artists => [ { name => 'Wrong' } ] }), 'Blondie');
+
+# Every miss answers '', never undef, so a caller can test length alone. Plugin.pm's backfill
+# does exactly that, and an artist-less row silently never moves to Played.
+is('no artist at all -> empty',   sart({ name => 'Parallel Lines' }), '');
+is('not a hash -> empty',         sart('Blondie'), '');
+is('undef -> empty',              sart(undef), '');
+is('empty artists array -> empty', sart({ artists => [] }), '');
+# The array can hold something that is not the hash we expect; fail closed rather than warn.
+is('artists holding a string -> empty', sart({ artists => ['Blondie'] }), '');
+is('artists[0] with no name -> empty',  sart({ artists => [ { id => 'x' } ] }), '');
+# A HASH in `artist` is the TIDAL/DEEZER shape, not Spotty's. It must not be read here, or a
+# fold of the two extractions would look harmless in testing and be wrong in the field.
+is('a hash in `artist` is not this shape',
+    sart({ artist => { name => 'Blondie' } }), '');
+
+# Source checks: no return value shows which SPELLING a call site used, and the whole point of
+# the sub is that there is one place to change. LL_SOURCES_SRC/LL_PLUGIN_SRC point these at
+# mutated copies for anti-testing.
+{
+    my %src;
+    for my $mod (qw(Sources Plugin)) {
+        my $env = 'LL_' . uc($mod) . '_SRC';
+        local $/;
+        open my $fh, '<', $ENV{$env} || "$FindBin::Bin/../ListenLater/$mod.pm"
+            or die "cannot read $mod.pm: $!";
+        $src{$mod} = <$fh>;
+    }
+    for my $mod (qw(Sources Plugin)) {
+        is("$mod.pm asks through spottyArtistName",
+            ($src{$mod} =~ /spottyArtistName\(/ ? 'yes' : 'no'), 'yes');
+        # One definition in Sources, none in Plugin; every other mention is a call.
+        my $defs = () = $src{$mod} =~ /sub\s+spottyArtistName\b/g;
+        is("...and defines it " . ($mod eq 'Sources' ? 'once' : 'not at all'),
+            $defs, ($mod eq 'Sources' ? 1 : 0));
+        # The open-coded extraction ANYWHERE outside the sub body means the duplication is
+        # back. Cut the body out first, or Sources.pm fails on its own definition.
+        (my $rest = $src{$mod}) =~ s/^sub\s+spottyArtistName\b.*?^\}$//ms;
+        my $inline = () = $rest =~ /\{artists\}\[0\]\{name\}/g;
+        is("...and open-codes the artists[0]{name} read nowhere else", $inline, 0);
+    }
+}
+
 # ---------------------------------------------------------------------------
 section('no warnings emitted');
 is('warning count', scalar(@warnings), 0);

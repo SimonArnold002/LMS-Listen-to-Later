@@ -3173,11 +3173,10 @@ sub _backfillStreamingArtist {
             $api->album(sub {
                 my $album = shift;
                 return unless ref $album eq 'HASH';
-                my $artist = (defined $album->{artist} && !ref $album->{artist})
-                    ? $album->{artist}
-                    : (ref $album->{artists} eq 'ARRAY' && ref $album->{artists}[0] eq 'HASH')
-                        ? $album->{artists}[0]{name} : undef;
-                return unless defined $artist && length $artist;
+                # Shared with _searchService's Spotify branch — see Sources::spottyArtistName
+                # for the two shapes and why this is NOT the Tidal/Deezer extraction.
+                my $artist = Plugins::ListenLater::Sources::spottyArtistName($album);
+                return unless length $artist;
                 Plugins::ListenLater::DB::updateArtist($recId, $artist);
                 $log->info("LL: backfilled spotify artist '$artist' onto rec $recId");
             }, { uri => "spotify:album:$albumId" });
