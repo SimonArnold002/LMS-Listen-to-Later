@@ -137,6 +137,11 @@ sub favurlIsTrack {
     # Placed AFTER the container test above, which must keep winning: an album drilled
     # from Spotify carries 'album:' and is not a track, whatever else the url holds.
     return 1 if $u =~ m{(?:[:/])(?:track|episode):};
+    # Deezer names the episode in the SCHEME, not in a container ref: 'deezerpodcast://<id>'
+    # (verified live). Stated explicitly for the same reason the Spotify line above is — the
+    # fail-open branch below has to stay a real signal, and without this every Deezer episode
+    # add would answer correctly and log itself as a suspect.
+    return 1 if $u =~ m{^deezerpodcast://};
     # Otherwise: for every service we support, an ALBUM favurl is either EMPTY or carries
     # 'album:' — so a remaining non-empty scheme url with neither is a track (e.g. an
     # extension-less tidal://<id>). This is a fail-OPEN default and nothing enforces the
@@ -1373,6 +1378,15 @@ sub _serviceCan {
     # Podcast plugin's own protocol handler (which also keeps its resume-position
     # tracking). So the only question is whether that handler exists on this server.
     return 1 if $source eq 'podcast'  && _hasPodcastHandler();
+    # Deezer's podcast episodes are the SAME shape under a different scheme: Deezer browses
+    # them as 'deezerpodcast://<id>' (verified live — NOT 'deezer://', which is why they were
+    # refused as an unknown source until 0.1.124). A saved episode is kind='track', and a
+    # track row replays straight from its stored url (Sources::_trackPlayableItems — no album
+    # node, no matcher, no search), so the question here is the same one 'podcast' asks: does
+    # a handler for that scheme exist. Deliberately NOT folded onto 'deezer' in %SCHEME: the
+    # album adapter has nothing to do with it, and a distinct source tag is what lets Browse
+    # mark the row as a podcast rather than as a Deezer track.
+    return 1 if $source eq 'deezerpodcast' && _hasSchemeHandler('deezerpodcast://1');
     return 0;
 }
 
@@ -1395,9 +1409,40 @@ sub _serviceCanPlaylist {
 # representative url because handlerForURL parses the scheme off one (the same call
 # trackAlbumId already relies on).
 sub _hasPodcastHandler {
-    return eval {
-        Slim::Player::ProtocolHandlers->handlerForURL('podcast://https://example.com/e.mp3')
-    } ? 1 : 0;
+    return _hasSchemeHandler('podcast://https://example.com/e.mp3');
+}
+
+# Is this source a podcast EPISODE source? Two of them now: the built-in Podcasts app
+# ('podcast') and Deezer's own podcast scheme ('deezerpodcast'). ONE predicate rather than
+# four `eq 'podcast'` tests, because Browse asks the question three times (glyph, type word,
+# whether to print the source) and a fourth site would otherwise be added without them —
+# which is exactly how 'podcast' came to be spelled out at each. Spotify episodes are NOT
+# here: Spotty plays them through 'spotify://episode:<id>', so they are stored under source
+# 'spotify' and read as a Spotify track, which is what they are.
+sub isPodcastSource {
+    my ($source) = @_;
+    return 0 unless defined $source && length $source;
+    return ($source eq 'podcast' || $source eq 'deezerpodcast') ? 1 : 0;
+}
+
+# How a source is written in a row's subtitle. `ucfirst` was the whole rule until a source
+# tag stopped being a service name: 'deezerpodcast' would render "Deezerpodcast". Only the
+# exceptions are listed; everything else keeps ucfirst, so adding a service needs no entry.
+my %SOURCE_LABEL = (
+    deezerpodcast => 'Deezer',
+);
+sub sourceLabel {
+    my ($source) = @_;
+    return '' unless defined $source && length $source;
+    return $SOURCE_LABEL{$source} || ucfirst($source);
+}
+
+# Is a protocol handler registered for this url's scheme? The one question a self-contained
+# play url has to answer, asked with a SAMPLE url rather than a bare scheme because that is
+# the interface LMS exposes. Guarded: handlerForURL dies on some malformed input.
+sub _hasSchemeHandler {
+    my ($sample) = @_;
+    return eval { Slim::Player::ProtocolHandlers->handlerForURL($sample) } ? 1 : 0;
 }
 
 # Latin folding + apostrophe elision, shared with DB::_norm and _normStrict so all

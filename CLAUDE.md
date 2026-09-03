@@ -83,7 +83,12 @@ does not cover. Say which ledger entry you are challenging and what changed.
   release semantics. `Browse::_albumTracks`'s write-back guard is therefore
   `kind eq 'album'` and NOT `ne 'track'` — that is the fix, not a typo.
 - **PODCASTS ARE EPISODE-LEVEL ONLY. A SERIES/SHOW IS OUT OF SCOPE EVERYWHERE, and the
-  streaming side now refuses one (uncommitted, unbuilt — the next version bump carries it).** The Podcasts app has always refused a series:
+  streaming side refuses one (0.1.123). THREE sources supply episodes** — the built-in Podcasts
+  app (`podcast://`, matched against subscribed feeds), Deezer (`deezerpodcast://<id>`, 0.1.124)
+  and Spotify (`spotify://episode:<id>`, stored under source `spotify`). Qobuz, TIDAL and
+  Bandcamp have no podcasts at all. Ask `Sources::isPodcastSource`, never `eq 'podcast'` — it is
+  the predicate Browse's glyph, type word and source-segment all share, and Spotify is
+  deliberately NOT in it (Spotty plays an episode as a Spotify track, which is what it is). The Podcasts app has always refused a series:
   a feed row arrives as `kind:podcast` with the FEED name as `$TITLE`, `Podcast::resolveEpisode`
   finds no episode containing it, and `_rejectAdd` says so (verified live 2026-09-03 on
   "Darko.Audio podcast" — nothing stored). The STREAMING side did not, because the two gates it
@@ -3522,6 +3527,68 @@ The "Add to Listen Later"/"Add to Wish List" custom actions appear on streaming 
   and a Spotify-only assertion stays green.** That is what the placement test exists for.
 
   Podcast `CACHE_VER` bumped 27 → 28 with the build per the dev-build cache rule.
+
+- **0.1.124 — Deezer podcast EPISODES are supported, and the podcast docs now cover all three
+  sources.** Not a review round; asked for directly after 0.1.123's series gate made the state of
+  podcast support worth stating properly.
+
+  **The gap, measured.** Deezer browses its episodes as `deezerpodcast://<id>` — a scheme of its
+  OWN, not `deezer://` (verified live). `deezerpodcast` was in neither `%SCHEME` nor
+  `_serviceCan`, so every episode was refused: `rejected add — unsupported source
+  'deezerpodcast' via container 'deezer'`, confirmed against the live list (49 rows before, 49
+  after). **0.1.123's gate was NOT the cause** — `unsupportedContainer` splits the scheme off,
+  so `deezerpodcast://` names no container and passes; the refusal was years older.
+
+  **Why it needed no adapter.** A saved episode is `kind='track'`, and a track row replays
+  straight from its stored url (`_trackPlayableItems` — no album node, no matcher, no search).
+  So the only question is the one `podcast` has always asked: does a protocol handler for that
+  scheme exist. `_hasPodcastHandler` generalised to `_hasSchemeHandler($sample)` and
+  `_serviceCan` gained one clause. Played needs nothing: `_markPlayedTrack` derives the source
+  from the PLAYING url via `sourceFromUrl`, which answers `deezerpodcast` for both the stored
+  row and the stream, so `findTrackByUrl` matches exactly.
+
+  **The source tag is deliberately NOT folded onto `deezer`.** The album adapter has nothing to
+  do with an episode, and a tag of its own is what lets Browse mark the row as a podcast. That
+  cost two small pieces of shared vocabulary rather than more `eq` tests:
+  - `Sources::isPodcastSource` — Browse asked "is this a podcast" in THREE places (glyph, type
+    word, whether to print the source), each spelled `eq 'podcast'`. A fourth source would have
+    been added to some and not others; that is how the three drifted apart in the first place.
+  - `Sources::sourceLabel` — `ucfirst` was the whole rule until a source tag stopped being a
+    service name. `deezerpodcast` would have read "Deezerpodcast" in every row; only exceptions
+    are listed, so adding a service still needs no entry.
+
+  `favurlIsTrack` also names the scheme explicitly. It would have answered TRACK anyway via the
+  fail-open branch — but that branch LOGS, and its warning has to stay a real signal rather than
+  firing on every Deezer episode add. Same reasoning as the Spotify `episode:` line above it.
+
+  **Spotify episodes were already working and are deliberately NOT podcast sources.** Spotty
+  plays them as `spotify://episode:<id>`, so they store under source `spotify` and read as a
+  Spotify track — which is what they are. Verified stored live; PLAYBACK unverified, because
+  Spotify audio is blocked on this rig ([[spotify-playback-blocked-on-test-rig]]).
+
+  **README on `dev`, under section A's exception** — the same one 0.1.122 used. It was a
+  user-facing factual error, not churn: the podcast section described the built-in app as the
+  only source, and the Limits section said episodes "must belong to a show you subscribe to",
+  which is true of that app and false of a Deezer or Spotify episode. It now carries a
+  three-source table, states that a whole SHOW is never savable on any source, and scopes the
+  subscription rule to the app it belongs to.
+
+  **A pre-existing docs bug fixed in passing:** `README.md` wrote the show placeholder as the
+  entity `&lt;show&gt;`, which `make_readme_html.py` escapes again — so the published page has
+  been rendering the literal text `Podcast · &lt;show&gt;` since the section was written. Angle
+  brackets cannot survive both renderers (GitHub eats a raw `<show>` as a tag), so the
+  placeholder is now italics. `grep -c 'amp;lt' README.html` = 0.
+
+  **All 14 suites green, 1,173 → 1,195 assertions**: `t_favurl.pl` 156 → 169, `t_addpath.pl`
+  142 → 149. The add-path section stubs `handlerForURL` for the one scheme — and note it is
+  called as a CLASS method, so the url is `$_[1]`; reading `$_[0]` silently answers "no handler"
+  for everything and the whole section fails as a rejected add. It also must NOT chain onto a
+  previous handler: `t_stubs.pl` defines none, so taking `\&...handlerForURL` first creates a
+  forward reference that resolves to the new sub itself — infinite recursion. Both mistakes were
+  made and are written into the test's comment. ANTI-TEST alongside it: the Deezer SERIES stays
+  refused, so episode support cannot quietly reopen the container.
+
+  Podcast `CACHE_VER` bumped 28 → 29 with the build per the dev-build cache rule.
 
 ## Regression tests — RUN THESE BEFORE ANY BUILD (added 2026-07-29)
 

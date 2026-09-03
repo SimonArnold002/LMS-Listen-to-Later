@@ -355,6 +355,42 @@ is('deezer flow addable',       $unsup->('deezer://user/6874174781/flow.dzr'), u
 is('deezer bare flow addable',  $unsup->('deezer://user.flow'),                undef);
 is('tidal .flc track addable',  $unsup->('tidal://550214964.flc'),             undef);
 
+# A Deezer EPISODE is 'deezerpodcast://<id>' — the word 'podcast' is the SCHEME here too, so
+# the same split that protects our own wrapper protects Deezer's episodes. This is the row
+# 0.1.124 added support for; refusing it would undo that feature from the other end.
+is('deezer episode addable',    $unsup->('deezerpodcast://927648401'),         undef);
+
+section('podcast EPISODE sources — the three of them (0.1.124)');
+
+# Deezer browses its episodes as 'deezerpodcast://<id>', NOT 'deezer://' (verified live), so
+# favurlIsTrack has to name the scheme or every episode add takes the fail-open branch and
+# logs itself as a suspect. The no-warnings check at the foot of this file is what enforces
+# that these say so WITHOUT warning.
+is('deezer episode IS a track',
+    Plugins::ListenLater::Sources::favurlIsTrack('deezerpodcast://927648401'), 1);
+is('...and so is a spotify episode',
+    Plugins::ListenLater::Sources::favurlIsTrack(norm('spotify:episode:0tQdtR5')), 1);
+
+# ONE predicate, because Browse asks the question three times (glyph, type word, whether to
+# print the source). Spotify episodes are deliberately NOT podcast sources: Spotty plays them
+# as 'spotify://episode:<id>', so they are stored under source 'spotify' and read as what
+# they are — a Spotify track.
+my $isPod = \&Plugins::ListenLater::Sources::isPodcastSource;
+is('built-in podcast source',   $isPod->('podcast'),       1);
+is('deezer podcast source',     $isPod->('deezerpodcast'), 1);
+is('spotify is NOT one',        $isPod->('spotify'),       0);
+is('deezer itself is NOT one',  $isPod->('deezer'),        0);
+is('library is NOT one',        $isPod->('library'),       0);
+is('undef is NOT one',          $isPod->(undef),           0);
+
+# The subtitle label. `ucfirst` was the whole rule until a source tag stopped being a service
+# name — 'deezerpodcast' would read "Deezerpodcast" in every row.
+my $label = \&Plugins::ListenLater::Sources::sourceLabel;
+is('deezerpodcast reads Deezer', $label->('deezerpodcast'), 'Deezer');
+is('qobuz still ucfirsts',       $label->('qobuz'),         'Qobuz');
+is('spotify still ucfirsts',     $label->('spotify'),       'Spotify');
+is('empty stays empty',          $label->(''),              '');
+
 # A favurl that is not a scheme url names no container at all — say nothing rather than
 # guessing, and leave it to the gates that already judge those.
 is('non-url says nothing',      $unsup->('spotify:show:notnormalised'), undef);

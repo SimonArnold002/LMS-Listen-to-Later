@@ -906,5 +906,50 @@ $r = add(name => 'Daily Mix 1', svc => 'spotty', favurl => 'spotify:playlist:37i
 is('a Spotify daily mix still stores', $r->{kind},             'playlist');
 is('...as a playlist, with its id',    $r->{ref}{playlist_id}, '37i9dQZF1E3DAILY');
 
+
+section('a Deezer podcast EPISODE stores (0.1.124)');
+#
+# Deezer browses episodes as 'deezerpodcast://<id>' — a scheme of its own, not 'deezer://'
+# (verified live). Until 0.1.124 that was an unknown source and every one was refused:
+#   LL: rejected add — unsupported source 'deezerpodcast' via container 'deezer'
+# Nothing about it needed an adapter. A saved episode is kind='track' and a track row replays
+# straight from its stored url, so the only question was whether a handler for the scheme
+# exists — the same question 'podcast' has always asked. The stub below is that handler.
+# NOT a chain onto the previous handlerForURL — there ISN'T one. `t_stubs.pl` never defines
+# it, so every earlier `_hasPodcastHandler` in this file answered 0 (the eval fails), which
+# is why the built-in podcast adds above are refused here. Taking `\&...handlerForURL` before
+# assigning the glob would therefore create a FORWARD reference that resolves to this very
+# sub at call time — infinite recursion, which is exactly what the first draft did. Answer
+# for the one scheme this section is about and undef for everything else, i.e. leave the
+# no-handler world every test above ran in exactly as it was.
+{
+    no strict 'refs';
+    # Called as a CLASS method (`Slim::Player::ProtocolHandlers->handlerForURL($url)`), so the
+    # url is $_[1] and $_[0] is the package name. Reading $_[0] here silently answers "no
+    # handler" for every url and the whole section fails as a rejected add.
+    *{'Slim::Player::ProtocolHandlers::handlerForURL'} = sub {
+        return ($_[1] // '') =~ m{^deezerpodcast://} ? 'Plugins::Deezer::ProtocolHandler' : undef;
+    };
+}
+$r = add(kind => 'track', trackname => 'The Floor', artist => 'The Minimalists',
+         svc => 'deezer', favurl => 'deezerpodcast://927648401');
+is('a Deezer episode stores',        (defined $r ? $r->{kind} : 'rejected'), 'track');
+is('...under its own source tag',    $r->{source},   'deezerpodcast');
+is('...keeping the play url intact', $r->{ref}{url}, 'deezerpodcast://927648401');
+
+# The source tag is deliberately NOT folded onto 'deezer': the album adapter has nothing to
+# do with an episode, and a tag of its own is what lets Browse mark the row as a podcast.
+# These three are what Browse asks of it.
+is('...and reads as a podcast source',
+    Plugins::ListenLater::Sources::isPodcastSource($r->{source}), 1);
+is('...labelled Deezer, not Deezerpodcast',
+    Plugins::ListenLater::Sources::sourceLabel($r->{source}), 'Deezer');
+is('...while plain deezer is not a podcast source',
+    Plugins::ListenLater::Sources::isPodcastSource('deezer'), 0);
+
+# ANTI-TEST: the SERIES stays refused. Supporting episodes must not open the container.
+$r = add(name => 'The Minimalists', svc => 'deezer', favurl => 'deezer://podcast:19887');
+is('the Deezer SERIES is still refused', (defined $r ? "stored as $r->{kind}" : 'rejected'), 'rejected');
+
 printf "\n%d passed, %d failed\n", $pass, $fail;
 exit($fail ? 1 : 0);

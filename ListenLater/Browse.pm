@@ -149,7 +149,7 @@ use constant SEP           => " \x{00b7} ";   # " · " subtitle separator
 # their type was classified from the real library count at add time, so it is already sound.
 sub _glyphFor {
     my ($rec) = @_;
-    return GLYPH_PODCAST  if ($rec->{source} || '') eq 'podcast';
+    return GLYPH_PODCAST  if Plugins::ListenLater::Sources::isPodcastSource($rec->{source});
     return GLYPH_PLAYLIST if ($rec->{kind}   || '') eq 'playlist';
     return GLYPH_SINGLE   if ($rec->{kind}   || '') eq 'track';
 
@@ -177,7 +177,7 @@ sub _row {
 # relTypeFor).
 sub _typeLabel {
     my ($client, $rec) = @_;
-    return cstring($client, 'PLUGIN_LL_TYPE_PODCAST') if ($rec->{source} || '') eq 'podcast';
+    return cstring($client, 'PLUGIN_LL_TYPE_PODCAST') if Plugins::ListenLater::Sources::isPodcastSource($rec->{source});
     return cstring($client, 'PLUGIN_LL_TYPE_PLAYLIST') if ($rec->{kind} || '') eq 'playlist';
     return cstring($client, 'PLUGIN_LL_TYPE_TRACK') if ($rec->{kind} || '') eq 'track';
     my $rt = $rec->{rel_type} || 'album';
@@ -209,7 +209,7 @@ sub _albumRow {
     return {
         name        => $name,
         line2       => _glyphFor($rec) . ' ' . _typeLabel($client, $rec)
-                       . SEP . ucfirst($rec->{source} || ''),
+                       . SEP . Plugins::ListenLater::Sources::sourceLabel($rec->{source}),
         image       => $rec->{artwork} || _iconFor($rec->{status}),
         type        => 'playlist',
         url         => \&_albumTracks,
@@ -272,9 +272,11 @@ sub _trackRow {
 
     my $sub = _glyphFor($rec) . ' ' . _typeLabel($client, $rec);
     $sub .= SEP . $rec->{album_title} if defined $rec->{album_title} && length $rec->{album_title};
-    # The source segment is dropped for a podcast: the type word already reads "Podcast",
-    # so appending it again would give "Podcast · <show> · Podcast".
-    $sub .= SEP . ucfirst($rec->{source} || '')
+    # The source segment is dropped for the BUILT-IN podcast source only: its type word
+    # already reads "Podcast", so appending it again would give "Podcast · <show> · Podcast".
+    # A SERVICE's episode keeps it — "Podcast · <show> · Deezer" says something the type word
+    # does not, namely which service you will be streaming it from (0.1.124).
+    $sub .= SEP . Plugins::ListenLater::Sources::sourceLabel($rec->{source})
         if $rec->{source} && $rec->{source} ne 'podcast';
 
     return {
