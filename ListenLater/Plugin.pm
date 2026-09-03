@@ -196,6 +196,16 @@ our %UNREGISTERED;       # cat => [ actions registerCustomAction refused ] — f
 # only ever ask for sections we have not asked for.
 our %REGISTERED_EMPTY;
 
+# Which POSITIVE sections have already been handed to Material. `$REGISTERED` alone was enough
+# while the positive set was fixed at startup, which is what its comment above claims — and on
+# tier 2 that stopped being true: the `podcasts-*` override is gated on
+# Podcast::hasFeeds() and FOLDS INTO %positive there, so a user who subscribes to their first
+# podcast mid-session grows a section the latch then refuses to ever offer. It reached neither
+# half — the prune only writes back what registration REFUSED — so podcast rows had no "Add"
+# until a server restart. Per category, latched on the ATTEMPT exactly as the single flag was,
+# so a section present at startup behaves precisely as before and only a NEW one is offered.
+our %REGISTERED_POS;
+
 # How many entries per category the API half actually DELIVERED: what we built, minus what
 # registerCustomAction refused. ONE carrier, because "delivered" was written out three times and
 # two of the copies subtracted the caller's %fallback instead of %UNREGISTERED. That reads
@@ -326,6 +336,23 @@ sub postinitPlugin {
         # actions.json is fully rewritten each call.
         Slim::Utils::Timers::killTimers(undef, \&_writeMaterialActionsDeferred);
         Slim::Utils::Timers::setTimer(undef, time() + 60, \&_writeMaterialActionsDeferred);
+
+        # The podcasts-* override is the one part of the set that is not fixed for the run:
+        # _materialActionSet emits it only while Podcast::hasFeeds() is true, so a user who
+        # subscribes to their first feed GROWS a category after both passes above have run. On
+        # tier 0/1 the next file write picks it up, but on tier 2 it is registered, and nothing
+        # re-registers on its own — the prune writes back only what registration REFUSED, so the
+        # pair reached NEITHER half and podcast rows had no "Add" until a server restart.
+        # Watching the Podcast plugin's own pref is what closes that; the deferred pass is
+        # exactly the right callback, since it re-registers what is new and rewrites the file.
+        # Unsubscribing the last feed is the mirror case and the same call handles it.
+        # NB a Material tab already open took its snapshot at app start, so the new entry
+        # appears on the next app load — the standing late-registration caveat, not a new one.
+        eval {
+            Slim::Utils::Prefs::preferences('plugin.podcast')
+                ->setChange(\&_writeMaterialActionsDeferred, 'feeds');
+            1;
+        } or $log->error("LL: could not watch the podcast subscription list: $@");
     }
     elsif ( Slim::Utils::PluginManager->isEnabled('Plugins::MaterialSkin::Plugin') ) {
         # Pref is OFF but a previous (enabled) run may have written our actions. Strip
@@ -941,31 +968,40 @@ sub _registerMaterialActions {
 
     my ($positive, undef, $emptyCats) = _materialActionSet($tier);
 
-    # --- the POSITIVE entries: once per server run, latched on the ATTEMPT ---
+    # --- the POSITIVE entries: once per SECTION per server run, latched on the ATTEMPT ---
     my ($n, %failed) = (0);
-    unless ($REGISTERED) {
-        for my $cat (sort keys %$positive) {
-            for my $action (@{ $positive->{$cat} }) {
-                # NB a plain sub, not a method — Material's own signature is ($section,
-                # $action), so calling it with `->` would pass the class name as the section.
-                if ( eval { $register->($cat, $action); 1 } ) {
-                    $n++;
-                }
-                else {
-                    # Hand it back to the file write rather than losing it — see %UNREGISTERED.
-                    push @{ $failed{$cat} ||= [] }, $action;
-                    $log->error("LL: registerCustomAction('$cat') failed: $@");
-                }
+    my @fresh = grep { !$REGISTERED_POS{$_} } sort keys %$positive;
+    for my $cat (@fresh) {
+        # Latch before the actions, not after: a section half-taken must never be offered a
+        # second time, or Material appends the survivors and every "Add" in it shows twice.
+        $REGISTERED_POS{$cat} = 1;
+        for my $action (@{ $positive->{$cat} }) {
+            # NB a plain sub, not a method — Material's own signature is ($section,
+            # $action), so calling it with `->` would pass the class name as the section.
+            if ( eval { $register->($cat, $action); 1 } ) {
+                $n++;
+            }
+            else {
+                # Hand it back to the file write rather than losing it — see %UNREGISTERED.
+                push @{ $failed{$cat} ||= [] }, $action;
+                $log->error("LL: registerCustomAction('$cat') failed: $@");
             }
         }
-        %UNREGISTERED  = %failed;
-        $REGISTERED    = 1;
-        $REGISTERED_N  = $n;
+    }
+    if (@fresh) {
+        # MERGED, not assigned: a later pass that registers one new section must not drop the
+        # refusals an earlier pass recorded, or _writeMaterialActions stops writing their file
+        # fallback and those entries vanish from both halves at once.
+        %UNREGISTERED  = (%UNREGISTERED, %failed);
+        $REGISTERED_N += $n;
         $log->warn("LL: registered $n Material custom action(s) in "
-            . scalar(keys %$positive) . " section(s) via the plugin API (tier $tier)");
+            . scalar(@fresh) . " section(s) via the plugin API (tier $tier)");
         $log->error('LL: Material refused ' . scalar(map { @$_ } values %failed)
             . ' custom action(s) — writing those to actions.json instead') if %failed;
     }
+    # Set even when the set was empty: this is the flag that says the API half RAN, which is
+    # what the diagnostics read to tell "delivered nothing" from "never asked".
+    $REGISTERED = 1;
 
     # --- the EMPTY suppressor sections: tier 2 only, per category, re-runnable ---
     #
@@ -1263,6 +1299,16 @@ sub _pruneMaterialActions {
     # right answer on this path: what is still live is what REGISTERED, and only that needs
     # holding off our own rows.
     my %fallback      = ($departing || $prefOff) ? () : %UNREGISTERED;
+    # Whether the API half ran AT ALL, for the diagnostics below — the same question
+    # _writeMaterialActions asks, and asked the same way, so the two dumps cannot disagree.
+    # NOT implied by the tier: this sub is reached with the pref off at STARTUP, where the tier
+    # is 2 and registration has never run. Hardcoding it to 1 there made the dump answer
+    # "plugin API", "streaming Add active" and "registered sections = ..." two lines under
+    # "material_action pref = OFF" — with %UNREGISTERED empty because nothing was ever refused,
+    # _deliveredCounts has no way to tell "delivered everything" from "never asked", so it must
+    # not be consulted at all on that path. Same failure class as the %fallback substitution
+    # above it; this was the copy that kept it.
+    my $api           = $REGISTERED ? 1 : 0;
     my @radioCats     = _radioSuppressorCats();
     my @suppressors   = ( _ownSurfaceSuppressorCats(), @radioCats );
     my %emptyFallback = (!$departing && ($REGISTERED_N || %fallback))
@@ -1278,8 +1324,8 @@ sub _pruneMaterialActions {
     # to be made from, so it must not be the one state the dump cannot describe.
     if (!-e $file && !%fallback && !%emptyFallback) {
         my ($positive) = _materialActionSet(2);
-        my %regCount = _deliveredCounts($positive);
-        _dumpMaterialState($file, {}, \@radioCats, \%regCount, 1, 2)
+        my %regCount = $api ? _deliveredCounts($positive) : ();
+        _dumpMaterialState($file, {}, \@radioCats, \%regCount, $api, 2)
             if $prefs->get('debug_log');
         return;
     }
@@ -1333,7 +1379,7 @@ sub _pruneMaterialActions {
     # %UNREGISTERED. Here %fallback has been zeroed for a write-policy reason ($departing /
     # $prefOff), so the same expression counts every REFUSED entry as delivered.
     my ($positive) = _materialActionSet(2);
-    my %regCount = _deliveredCounts($positive);
+    my %regCount = $api ? _deliveredCounts($positive) : ();
 
     if (!keys %$data) {
         # Nothing of ours left and nothing of anyone else's. Remove the file rather than leave
@@ -1344,7 +1390,7 @@ sub _pruneMaterialActions {
         };
         _setOwnedCats($record);
         $log->warn("LL: Material custom actions are fully registered — removed the now-empty $file");
-        _dumpMaterialState($file, {}, \@radioCats, \%regCount, 1, 2) if $prefs->get('debug_log');
+        _dumpMaterialState($file, {}, \@radioCats, \%regCount, $api, 2) if $prefs->get('debug_log');
         return;
     }
 
@@ -1355,7 +1401,7 @@ sub _pruneMaterialActions {
     _setOwnedCats($record);
     $log->warn('LL: Material custom actions are registered — pruned ours from ' . $file
         . (%$record ? ' (' . scalar(keys %$record) . ' section(s) kept as a file fallback)' : ''));
-    _dumpMaterialState($file, $data, \@radioCats, \%regCount, 1, 2) if $prefs->get('debug_log');
+    _dumpMaterialState($file, $data, \@radioCats, \%regCount, $api, 2) if $prefs->get('debug_log');
     return;
 }
 

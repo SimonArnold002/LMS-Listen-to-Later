@@ -327,6 +327,47 @@ Carried forward, and the reason #1 and #2 existed at all:
   exactly when the file half gets written. The clause now recomputes the prune's own
   `%emptyFallback` set, so the two cannot drift.
 
+**Fifth round of 2026-09-03 — CLOSED, three findings, all three FIXED.** Run against the
+0.1.118 tree (`origin/dev..HEAD`: the dedupe-key refold migration, Material delivery tiers
+0/1/2, the Spotify/Spotty adapter, the Settings checkbox fix, the rebrand-migration removal).
+Shipped as **0.1.119**. Tests 1030 → 1052 assertions, 13 suites green.
+
+| # | finding | disposition |
+|---|---|---|
+| 1 | `_pruneMaterialActions` passes a hardcoded `$api = 1` and an ungated `_deliveredCounts`, so with the pref off at STARTUP the dump claims "plugin API", "streaming Add active" and "registered sections = …" under "material_action pref = OFF" | **FIXED** — one `$api` carrier gated on `$REGISTERED`, feeding both count sites and all three dump calls (3 red without it) |
+| 2 | `_migrateRefold`: a rollback that itself fails never restores `AutoCommit`, so later `begin_work`s die and every plugin write for the rest of the server run is discarded at handle destruction | **FIXED** — roll back by hand via raw SQL, THEN restore `AutoCommit`, THEN abandon the pass (3 red without it) |
+| 3 | on tier 2 the `hasFeeds()`-gated `podcasts-*` override folds into `%positive` behind the one-shot `$REGISTERED` latch, so a first podcast subscribed mid-session reaches neither half until a restart | **FIXED** — `%REGISTERED_POS` per-category ledger + a `setChange` watch on `plugin.podcast:feeds` (4 red + 1 source check) |
+
+Carried forward, and each bigger than the finding that produced it:
+
+- **A latch encodes a PREMISE, and the premise can be invalidated by a change that never
+  touches the latch.** `$REGISTERED`'s comment said "the positive entries are built once and
+  never change" — true when written, and made false by **0.1.110's own tier-2 fold**, three
+  paragraphs away in the same release. Nothing connected them: no test, no compile error, and
+  the comment kept asserting the old world. When a set that something is latched on becomes
+  CONDITIONAL, the latch is a bug from that moment, not from the moment someone hits it.
+- **"Restore the invariant" is not the same as "undo the damage", and doing them in the wrong
+  order made the fix worse than the bug.** Setting `AutoCommit = 1` restores the invariant and
+  COMMITS the half-applied transaction on the way. The test caught it; review had not. Any
+  handle-state repair has to ask what is still OPEN before it flips the flag.
+- **The third copy of a bug is found by asking what makes the input MEANINGFUL, not by
+  re-checking the arithmetic.** 0.1.118 routed all three delivery counts through
+  `_deliveredCounts` so no caller could pass a substitute — and the prune still lied, because
+  the refusal ledger is only honest once registration has RUN. One carrier fixed the inputs;
+  nobody checked the precondition. When a helper is introduced to make a formula unfakeable,
+  enumerate what has to be TRUE for its own inputs to mean anything.
+- **A standalone probe is not the suite, and a fixture is not "flaky" until you have watched
+  the REAL one flake.** While building §4i I saw it pass and fail run to run, reproduced the
+  grouping in a small script, and concluded §4h's `Sigur Rós`/`Sigur Ros` squatter pair had the
+  same latent fault. **That was wrong, and it briefly went into this file as guidance.** §4h
+  groups exactly as intended — dumping `%group` from the real suite shows `sigur ros|takk|2005`
+  holding BOTH ids — and it passes 40/40. The flakiness was a broken literal in the NEW fixture
+  (a single-quoted `'Sigur R\x{f3}s'`, i.e. a backslash, not an ó); the probe used to diagnose
+  it folded that string differently from the suite, and the probe was trusted over the thing
+  under test. Switching §4i to an ASCII pair was still right — it removed a real fault in a new
+  test — but there is no diacritic hazard in §4h and no rule against one in a fixture.
+  **Instrument the suite itself before believing a reproduction.**
+
 ### D. ADDING TO THIS LEDGER
 
 When a finding is declined, or accepted-but-deferred, add it here in the same
@@ -503,10 +544,16 @@ of `_materialActionSet` back to the 0.1.25 rebrand builds every action with an `
 (checked across the twelve commits that touched it) — so that branch could only ever delete a
 THIRD PARTY's `script`/`command`/`weblink` action that happened to share a title.
 
-**`registerCustomAction` PUSHES — no de-dupe, no unregister.** Positives register exactly once per
-server run (`$REGISTERED`). **Empty sections are tracked per category (`%REGISTERED_EMPTY`)**,
-because that set GROWS: TuneIn's radio directory arrives asynchronously, so the +60s deferred pass
-finds commands postinit could not (0.1.56) and must register those without re-pushing the rest.
+**`registerCustomAction` PUSHES — no de-dupe, no unregister.** So every section is handed over at
+most once per server run, and **BOTH halves are tracked PER CATEGORY** — `%REGISTERED_POS` for the
+positives (0.1.119), `%REGISTERED_EMPTY` for the empty suppressors — because both sets GROW.
+The suppressors grow because TuneIn's radio directory arrives asynchronously, so the +60s deferred
+pass finds commands postinit could not (0.1.56). The positives grow because on tier 2 the
+`podcasts-*` override folds into them and is gated on `Podcast::hasFeeds()`, so subscribing to a
+first feed mid-session adds a section — which the old single `$REGISTERED` latch then refused for
+the rest of the run (0.1.119). **`$REGISTERED` survives, but it now answers only "did the API half
+RUN"** — the flag the diagnostics read to tell "delivered nothing" from "never asked" — and it is
+no longer what decides whether a given section is offered.
 With no unregister, turning `material_action` OFF removes the registered entries **at the next
 restart** — and on tier 2 the suppressors are registered too, so until then "Add" still correctly
 does *not* appear inside our own list.
@@ -2352,7 +2399,9 @@ The "Add to Listen Later"/"Add to Wish List" custom actions appear on streaming 
   never have caught anything of ours. It could only ever delete a THIRD PARTY's
   `script`/`command`/`weblink` action that happened to share a title, on every startup.
 
-  **`%REGISTERED_EMPTY` makes the register guard per-category.** `$REGISTERED` is a single latch
+  **`%REGISTERED_EMPTY` makes the register guard per-category.** *(The premise below — "the
+  positives never grow" — was made FALSE by this very release's tier-2 fold, and 0.1.119 fixed
+  it; read that entry before quoting this one.)* `$REGISTERED` is a single latch
   because the positives never grow; the suppressors do — TuneIn's radio directory is fetched
   asynchronously, so the +60s deferred pass finds commands postinit could not (0.1.56) and must
   register those without re-pushing the rest. That pass now registers as well as writes.
@@ -2776,6 +2825,113 @@ The "Add to Listen Later"/"Add to Wish List" custom actions appear on streaming 
   than the stamped one (true, cosmetic, accepted). Podcast `CACHE_VER` bumped 22 → 23 with
   the build per the dev-build cache rule — hygiene, nothing here parses a feed.
 
+- **0.1.119 — a latch that outlived its premise, a rollback that poisoned the handle, and the
+  third copy of the delivery-honesty bug.** The fifth 2026-09-03 round. Three findings, all
+  fixed, none shipped. Suite 1030 → **1052 assertions across 13 suites**.
+
+  **1. The prune's dump credited an API half that never ran.** Third instance of the same
+  substitution 0.1.118 closed twice, in the copy 0.1.118 did not reach: `_pruneMaterialActions`
+  passed a hardcoded `$api = 1` and an ungated `_deliveredCounts($positive)`. The refusal
+  ledger is honest ONLY once registration has run — with `%UNREGISTERED` empty because nothing
+  was ever *asked*, subtracting it reports the whole built set as delivered. The reachable path
+  is ordinary: `material_action` off at STARTUP sends postinit to `_clearMaterialActions`, which
+  on tier 2 prunes with `$REGISTERED` false. The dump then printed `custom-action delivery =
+  plugin API`, `streaming Add active`, `registered sections = …` and per-service `Add shown (via
+  its own registered '<cmd>-album' section)` — two lines under `material_action pref = OFF`.
+  Fixed with one `$api` carrier gated on `$REGISTERED`, feeding both `_deliveredCounts` sites and
+  all three dump calls, exactly as `_writeMaterialActions` already does. *The lesson 0.1.118
+  recorded — "a formula is only as portable as what its inputs MEAN" — was right and still
+  under-applied: `_deliveredCounts` fixed the ARITHMETIC's inputs but nothing checked the
+  PRECONDITION that makes the ledger meaningful at all.*
+
+  **2. `_migrateRefold`: a rollback that itself fails left `AutoCommit` OFF for the rest of the
+  server run.** `begin_work` turns it off and only a COMPLETED commit/rollback turns it back on.
+  The failure branch logged the failed rollback and carried on, so every later `begin_work` died
+  `Already in a transaction` (remaining groups ran unwrapped) and — far worse — **every plugin DB
+  write for the rest of the run joined a transaction nothing ever commits**, which DBI discards at
+  handle destruction. Saves and play counts vanishing silently at shutdown, hours later, with
+  nothing in the log. Verified against real DBI 1.643 / DBD::SQLite 1.64, not reasoned about.
+  **The first fix was WRONG and the test is what caught it:** restoring `AutoCommit = 1` while the
+  transaction is still open **COMMITS** it, turning "the rollback failed" into "the half-applied
+  merge is permanent" — losers deleted for good, survivor on its stale key, precisely the loss the
+  transaction exists to prevent. Order is load-bearing: roll back by hand via raw SQL first (it is
+  `->rollback` that just failed), THEN restore `AutoCommit`, THEN abandon the pass — the
+  transactional state is the very thing we failed to settle, so nothing is safe to run against it.
+  `$failed` withholds the version stamp, so the whole pass retries at the next start.
+  *Caveat kept deliberately: DBD::SQLite would not fail a rollback on demand, so §4i injects one.
+  The realistic trigger is SQLite having already auto-rolled-back (full disk, I/O error) — which
+  is exactly what the branch's own retry comment names as the likely cause.*
+
+  **3. On tier 2, the first podcast subscribed mid-session got no "Add" until a restart.**
+  `$REGISTERED` was a single latch resting on "the positive entries are built once and never
+  change" — a premise **0.1.110 made false in the same release that wrote it down**, by folding
+  the `hasFeeds()`-gated `podcasts-*` override into `%positive` on tier 2. Subscribe to a first
+  feed after startup and the section reached NEITHER half: the latch refused to register it, and
+  the prune writes back only what registration REFUSED. Tier 0/1 were fine — the pair stays in
+  `%fileCats` and the next file write carries it.
+  Two halves, because the ledger alone would not have fixed the user-visible bug. `%REGISTERED_POS`
+  tracks the positives per category, latched on the ATTEMPT exactly as the flag was, so a section
+  present at startup behaves identically and only a NEW one is offered; `%UNREGISTERED` is MERGED
+  rather than assigned, or a later pass would drop an earlier pass's refusals and those entries
+  would disappear from both halves at once. And `postinitPlugin` now watches
+  `plugin.podcast:feeds` via `setChange`, firing `_writeMaterialActionsDeferred` — the right
+  callback, since it re-registers what is new and rewrites the file, and it covers unsubscribing
+  the last feed too. `$REGISTERED` survives with a narrowed job: "did the API half RUN", which is
+  what finding 1 reads.
+
+  **Harness gaps this exposed, worth more than the one-liners.** `reset_all()` and `new_process()`
+  did not clear the new ledger, so sections stayed latched ACROSS tests — 6 real failures until
+  added, and a reminder that any state a test resets has to be reset in full or the suite silently
+  tests a warmed-up process. And §4i passed and failed run to run while it was being written,
+  until its squatter pair was switched to an ASCII apostrophe difference — **the cause was a
+  broken literal in that new fixture** (a single-quoted `'Sigur R\x{f3}s'`, a backslash rather
+  than an ó), NOT any property of §4h, whose own pair groups correctly (`sigur ros|takk|2005`,
+  both ids) and which passes 40/40. An earlier draft of this entry said otherwise and warned
+  against diacritics in fixtures; that was wrong, and the ledger records how the wrong
+  conclusion was reached. The `%REGISTERED_EMPTY` gap noted here was closed straight after, by
+  giving `t_material_matrix.pl` a Material-version axis — see below.
+
+  Every fix anti-tested against the bug it claims to catch — finding 1: 3 red (`claimed the API` /
+  `claimed active` / `listed some`), with the mirror case pinned so the gate cannot be widened into
+  silence; finding 2: 3 red, the decisive one being *a write made after the failure is discarded at
+  shutdown*; finding 3: 4 red on the single-latch mutant plus 1 on an unhooked source (a source
+  check, because the harness's `setChange` is a no-op and no return value would show the wiring).
+  Podcast `CACHE_VER` bumped 23 → 24 with the build per the dev-build cache rule — hygiene,
+  nothing here parses a feed.
+
+  **AND THEN THE GAP UNDERNEATH ALL THREE: `t_material_matrix.pl` had never run at tier 2.**
+  That suite exists to catch husk bugs across restarts and pref toggles — the two-transition
+  class no single-call assertion can see — and it never stubbed `getPluginVersion`, so with the
+  API installed it pinned at tier 1 and **all 108 assertions drove a delivery mode that prunes
+  nothing, registers no suppressors and never unlinks the file.** Tier 2 is where the prune
+  lives, where two of this round's three findings live, and what Simon's own 6.4.9 box runs. Same
+  shape as 0.1.110's own confession ("without it, 746 checks passed against code they never
+  executed") — repeated one suite over, which is why it is recorded as its own lesson rather than
+  a footnote.
+  The configs gain a Material-VERSION axis, so the matrix is now 6 configs (tier 2 / tier 1 /
+  tier 0, each with and without podcast subscriptions) x 9 journeys x 4 invariants: **108 → 162
+  assertions.** Verified as executing rather than merely passing — at tier 2 the boot registers
+  18 actions plus 26 empty sections and leaves NO file at all, at tier 1 12 actions and no
+  empties with the file present, at tier 0 nothing registered. Three consequential edits fell
+  out, each of which the tier-2 axis made necessary:
+  - **`merged_view` had to learn what a ONE-ARGUMENT registration means.** It read `$_->[1]`
+    for every `@REG` entry, so an empty-section declaration contributed a literal `undef` and the
+    suppressor compared as POPULATED — the exact opposite of what it is. Harmless while no
+    config reached tier 2; wrong for every suppressor the moment one did.
+  - **I3 (no self-harm) now takes the merged view, not the file.** An empty suppressor suppresses
+    whichever half it arrives through, and on tier 2 it arrives by REGISTRATION — so reading the
+    file alone made that invariant *unfalsifiable* on the one tier where the prune runs.
+  - **`do_op('on')` now registers before writing**, mirroring `Settings::handler` since 0.1.111.
+    Its comment still said "a save can never register", which stopped being true a release
+    earlier — and on tier 2 there is no file write left, so write-only delivers nothing and the
+    journey could never converge.
+  `new_process()` also clears `%REGISTERED_EMPTY` — the fourth registration fact a real restart
+  drops. It could not bite before this, since the empty-section loop is gated on tier >= 2.
+  **Anti-tested, because a green matrix is exactly the thing to distrust:** making the prune
+  delete any empty category (the 0.1.101 bug) fails I2 with `otherplugin-track vanished`, and
+  making it keep our own husks fails I3 and I4 naming `qobuz-album`, `tidal-track`,
+  `deezer-album` — the 0.1.51 regression, caught by category name.
+
 ## Regression tests — RUN THESE BEFORE ANY BUILD (added 2026-07-29)
 
     sh tools/t_all.sh          # one line per suite, non-zero exit on any failure
@@ -2804,12 +2960,12 @@ session scratchpads and are gone — so nothing carried forward. Anything worth 
 | `t_addpath.pl` | the ADD PATH end to end — a Material action into `_addCtxCommand`, out as a row in SQLite. Also 0.1.92's `ref.svc_title`: that the service label is kept when it differs and not when it doesn't, that a play of the QUALIFIED title finds the row while a different artist's doesn't, and that the dedupe key still ignores the label. What the handshake params become on the stored row, that `&tc=` settles the type but never fills `track_count`, that the cross-kind single dedupe eats a REAL single but not a disproved one, that an UNKNOWN type defers instead of inserting a guess, and that unreplayable/unidentifiable adds are refused. Plus the NOW-PLAYING FALLBACK's gate on BOTH paths (0.1.98): on the album path, that a browse row with a non-service container verb does NOT adopt the playing track, while a genuine Now Playing add (no `svc` at all) still recovers its source; on the TRACK path, that a tapped row whose `trackid` resolves to NOTHING (no svc — it shares `$trackCmd` with Now Playing) and an online-track row with a container verb are both refused, while a real Now Playing track add still recovers the playing song and its url. In both cases both directions are needed, or "doesn't adopt" passes with the fallback simply switched off. And the other side of that gate: a REMOTE queue row (negative `trackid`, no favurl) is resolved by its id and stored as the row that was TAPPED — its own title, its own play url, its source read off that url and not hardcoded `library` — while the library row on the same branch still takes its album/year from the Album row — and, since the RemoteTrack that row resolves to is normally BARE, that a `''` title/artist off the object never overwrites what Material sent (the stub answers `''` for a negative id, so this cannot pass by the test having supplied the metadata itself). Also what a REJECTED add logs (0.1.98): that an empty source reads `(none identified)` rather than `''`, that the container verb is named, and that the clause which actually failed is named — a missing play url and an empty title each say so instead of blaming the service, while a genuinely unsupported source still reads exactly as it did. The reject is silent to the user, so that one line is the whole trace. Needs no service: the whole path asks only `client`/`getParam`/`setStatusDone`/`setStatusProcessing`/`addResult`/`addResultLoop`, and `client => undef` makes the background jobs no-op (pass `_client` for the Now Playing cases — it is pulled out of the params, not passed as one). **The service plugins must be declared** (`_serviceCan`) or the gate rejects everything and every assertion passes against an empty DB |
 | `t_resolve_count.pl` | what a resolve writes BACK to the row (`Browse::_albumTracks`): a FAILED resolve records nothing and never clobbers a real `track_count`/`rel_type`, Bandcamp helper-only rows count as a failure too, and 0.1.88's successful-resolve refresh + forced single-correction still work. Plus `Sources::hasDirectAlbumRef` — whether a row's tracklist costs one album call or a whole service SEARCH (the Bandcamp page-url case), which is what gates background work |
 | `t_prefs_migration.pl` | 0.1.94's pref migrations and the rule that makes them one-shot: that a leading-underscore pref cannot be stored at all (pinning the stub against `Slim::Utils::Prefs::Base::set` — if that assertion ever passes with a value, every other one here stops meaning anything), that the rebrand copy runs once and never reverts a later choice, that an install which already ran the broken copy isn't copied over again, and that the threshold bump re-applies exactly once. Runs the two migrations in the real startup order — the ordering IS the bug — for both an install that carries a pre-rebrand namespace and one that doesn't. **A real user's box is the second shape**: the rebrand landed in 0.1.25 and the first release was tagged v0.1.69, so no installed copy ever wrote a `plugin.listentolater` pref and the copy has nothing to import. `reset_prefs` seeds that namespace (Simon's dev box, the only one that ran the pre-rebrand code); `reset_prefs_no_legacy` doesn't — pick the one that matches the install you mean, or an assertion proves the wrong thing |
-| `t_material_actions.pl` | 0.1.95's delivery split: that the six SERVER-resolved positive categories are REGISTERED with Material (6.4.6+) and no longer written to actions.json while `track`/`queue-track` stay in the file (0.1.97), that nothing registered is also left in the file (the merge is additive — a leftover means every "Add" shows twice), that registration happens exactly ONCE across a re-register, a Settings save and the deferred radio write, that the suppressors and `podcasts-*` stay in the file where Material can actually see them, that an older Material still gets the byte-identical file it always did, and that a third party's entries in a category we vacated survive. Plus the FAILURE path: a `registerCustomAction` that dies falls back to the file (all of it, or exactly the refused sections on a partial failure — never both places), and a file write with no registration behind it (the pref switched on mid-run) writes the full set. Plus the SETTINGS save itself, driven through `Settings::handler` with `debug_log` OFF (0.1.97): turning `material_action` off clears the file half on the save and warns about the registered half, turning it back on restores `track`/`queue-track` without re-writing anything Material already took, and turning it on when nothing registered writes everything. And the 0.1.98 rule that the OFF save must obey: while entries are still registered, the empty suppressors (ours and the radio ones) STAY and stay EMPTY — deleting them while the `online-*` pair cannot be withdrawn ADDS "Add" to our own rows instead of removing it — including on the path that rule was written for and originally missed, **the file being GONE**, where all three families have to be RE-CREATED rather than preserved. And the same rule from the other side for the one category that is ours, file-only AND per-app: with nothing registered, `podcasts-*` is DELETED rather than left as an empty husk — including for a user who has since unsubscribed from every feed, the state `_materialActionSet` can no longer name — because an empty per-app override hides Add on the Podcasts app for good; with entries still live it stays, and stays empty, for exactly the reason the radio empties do. Plus the 0.1.110 DELIVERY TIER, which needed `set_material_version()` because without a `getPluginVersion` stub every one of the previous 746 checks ran at tier 1 and could not reach the new code at all: the tier table (capability alone is never enough — the one-argument empty-section call pushes a null on 6.4.6/6.4.7), the folded action set, an upgrade from a file install ending with the file UNLINKED, a hand-written actions.json surviving verbatim — populated category, their own empty suppressor, and an entry titled like ours that is not ours — both refusal fallbacks (a refused positive and a refused empty section each reach the user through the file, and the file is created for them if it has gone), the deferred pass registering a late-discovered radio command without re-pushing anything, the pref off at STARTUP vs mid-run (only the latter has anything registered to suppress), the uninstall stranding nothing, and both downgrade steps rebuilding the file. Plus 0.1.114's `Sources::materialAtLeast`, the ONE version comparator the three gates now share: the comparison table, all THREE return values with `undef` (cannot tell) pinned as distinct from `0` (too old) even though both are falsy today, and the LIST-CONTEXT trap that shipped during the refactor — `_materialVersion` is `return eval {...}`, so inlining it into the argument list collapses `(undef,6,4,8)` to `(6,4,8)` and every Material-less install silently reaches the NEWEST tier. That last one is reproduced directly AND pinned as a source check on both callers (`LL_PLUGIN_SRC=`/`LL_BROWSE_SRC=` point those at mutated copies), since no return value shows which spelling a caller used |
-| `t_material_matrix.pl` | the actions.json STATE MACHINE, as invariants rather than scenarios. Enumerates starting file x Material version x podcast subscriptions x user journey and drives real op SEQUENCES (boot on/off, Settings on/off, restarts), checking after EVERY step: **I1** a pref-OFF terminal leaves none of our entries, and with nothing registered none of our categories either; **I2** a foreign category — entries AND deliberate empty suppressors — is byte-identical before and after every operation; **I3** no EMPTY `<cmd>-album/-track` exists for a command we can replay (the 0.1.51 regression as a property); **I4** any journey ending pref-ON converges on the clean baseline, whatever route it took. Exists because the scenario suite is structurally blind to both halves of these bugs: they are TWO-TRANSITION (the clear pass writing `podcasts-*` empty is correct — it goes wrong at the next WRITE) and they live in the one untested cell of a 2x2, since every `$live` case in `t_material_actions.pl`'s podcast block subscribes a feed first. The invariants deliberately carry almost no vocabulary of "which categories are ours" — that list is the bug generator, so a test restating it would inherit the fault; the reference is a BASELINE from a clean run of the same config. I4 compares the MERGED file+registered view, not the file, or a Settings-save enable (which cannot register, so it delivers through the file by design) reads as drift. **A world must reset `%Slim::Utils::Prefs::VALUES`** — a pref written by one journey turns the next journey's "upgrade from an older build" case into an already-migrated one, silently hiding this exact bug class |
+| `t_material_actions.pl` | 0.1.95's delivery split: that the six SERVER-resolved positive categories are REGISTERED with Material (6.4.6+) and no longer written to actions.json while `track`/`queue-track` stay in the file (0.1.97), that nothing registered is also left in the file (the merge is additive — a leftover means every "Add" shows twice), that registration happens exactly ONCE across a re-register, a Settings save and the deferred radio write, that the suppressors and `podcasts-*` stay in the file where Material can actually see them, that an older Material still gets the byte-identical file it always did, and that a third party's entries in a category we vacated survive. Plus the FAILURE path: a `registerCustomAction` that dies falls back to the file (all of it, or exactly the refused sections on a partial failure — never both places), and a file write with no registration behind it (the pref switched on mid-run) writes the full set. Plus the SETTINGS save itself, driven through `Settings::handler` with `debug_log` OFF (0.1.97): turning `material_action` off clears the file half on the save and warns about the registered half, turning it back on restores `track`/`queue-track` without re-writing anything Material already took, and turning it on when nothing registered writes everything. And the 0.1.98 rule that the OFF save must obey: while entries are still registered, the empty suppressors (ours and the radio ones) STAY and stay EMPTY — deleting them while the `online-*` pair cannot be withdrawn ADDS "Add" to our own rows instead of removing it — including on the path that rule was written for and originally missed, **the file being GONE**, where all three families have to be RE-CREATED rather than preserved. And the same rule from the other side for the one category that is ours, file-only AND per-app: with nothing registered, `podcasts-*` is DELETED rather than left as an empty husk — including for a user who has since unsubscribed from every feed, the state `_materialActionSet` can no longer name — because an empty per-app override hides Add on the Podcasts app for good; with entries still live it stays, and stays empty, for exactly the reason the radio empties do. Plus the 0.1.110 DELIVERY TIER, which needed `set_material_version()` because without a `getPluginVersion` stub every one of the previous 746 checks ran at tier 1 and could not reach the new code at all: the tier table (capability alone is never enough — the one-argument empty-section call pushes a null on 6.4.6/6.4.7), the folded action set, an upgrade from a file install ending with the file UNLINKED, a hand-written actions.json surviving verbatim — populated category, their own empty suppressor, and an entry titled like ours that is not ours — both refusal fallbacks (a refused positive and a refused empty section each reach the user through the file, and the file is created for them if it has gone), the deferred pass registering a late-discovered radio command without re-pushing anything, the pref off at STARTUP vs mid-run (only the latter has anything registered to suppress), the uninstall stranding nothing, and both downgrade steps rebuilding the file. Plus 0.1.114's `Sources::materialAtLeast`, the ONE version comparator the three gates now share: the comparison table, all THREE return values with `undef` (cannot tell) pinned as distinct from `0` (too old) even though both are falsy today, and the LIST-CONTEXT trap that shipped during the refactor — `_materialVersion` is `return eval {...}`, so inlining it into the argument list collapses `(undef,6,4,8)` to `(6,4,8)` and every Material-less install silently reaches the NEWEST tier. That last one is reproduced directly AND pinned as a source check on both callers (`LL_PLUGIN_SRC=`/`LL_BROWSE_SRC=` point those at mutated copies), since no return value shows which spelling a caller used. Plus 0.1.119's two Material fixes: that the PRUNE's diagnostics do not claim the API delivered anything when registration never ran (the pref off at STARTUP — the dump must not say "plugin API"/"streaming Add active"/"registered sections" under "material_action pref = OFF"), with the mirror case pinned so the gate cannot be widened into never reporting the API half at all; and that a category appearing MID-RUN still reaches Material — subscribing to a first podcast registers `podcasts-*` while pushing nothing already registered a second time (a duplicate push is how every "Add" comes to show twice), is not ALSO written to the file, and a repeat pass adds nothing. The `setChange` wiring that triggers it is a source check, because the harness's `setChange` is a no-op and no return value shows it |
+| `t_material_matrix.pl` | the actions.json STATE MACHINE, as invariants rather than scenarios. Enumerates starting file x Material version x podcast subscriptions x user journey and drives real op SEQUENCES (boot on/off, Settings on/off, restarts), checking after EVERY step: **I1** a pref-OFF terminal leaves none of our entries, and with nothing registered none of our categories either; **I2** a foreign category — entries AND deliberate empty suppressors — is byte-identical before and after every operation; **I3** no EMPTY `<cmd>-album/-track` exists for a command we can replay (the 0.1.51 regression as a property); **I4** any journey ending pref-ON converges on the clean baseline, whatever route it took. Exists because the scenario suite is structurally blind to both halves of these bugs: they are TWO-TRANSITION (the clear pass writing `podcasts-*` empty is correct — it goes wrong at the next WRITE) and they live in the one untested cell of a 2x2, since every `$live` case in `t_material_actions.pl`'s podcast block subscribes a feed first. The invariants deliberately carry almost no vocabulary of "which categories are ours" — that list is the bug generator, so a test restating it would inherit the fault; the reference is a BASELINE from a clean run of the same config. I4 compares the MERGED file+registered view, not the file, or a Settings-save enable (which cannot register, so it delivers through the file by design) reads as drift. **A world must reset `%Slim::Utils::Prefs::VALUES`** — a pref written by one journey turns the next journey's "upgrade from an older build" case into an already-migrated one, silently hiding this exact bug class. **And it must reset every registration fact, including BOTH per-category ledgers**, or a "restart" carries this process's registrations into the next one. Since 0.1.119 the configs carry a Material-VERSION axis and the matrix covers all three DELIVERY TIERS (2 / 1 / 0) x subscriptions x 9 journeys x 4 invariants; before that it pinned at tier 1 and every assertion ran against a mode that prunes nothing and never unlinks the file. Two things that only make sense once tier 2 is reachable: `merged_view` must treat a ONE-ARGUMENT registration as declaring an EMPTY section (reading `$_->[1]` puts a literal undef in and makes the suppressor look populated), and I3 must take the MERGED view — on tier 2 suppressors arrive by registration, so reading the file alone makes it unfalsifiable exactly where the prune runs |
 | `t_addpath.pl` (Spotify section) | 0.1.113's Spotify support end to end: a bare `spotify:album:<id>` URI storing as an album with source `spotify` and its id captured, a track URI storing a playable `spotify://track:<id>`, both playlist spellings landing the same short id, `svc:'spotty'` resolving to source `spotify` with no cover to sniff — and **the rebuild test**, replaying each stored row and asserting Spotty received a full URI rather than a bare id (a bare id matches nothing in `API::album` and returns an empty tracklist, i.e. a row that plays once and is then gone). The Spotty stubs are declared at the END of the file on purpose, so every test above it runs with Spotty ABSENT and the `->can` refusal is covered by the same file |
 | `t_favurl.pl` (Spotify sections) | `normaliseFavurl` itself, and then the four readers that consume it — including that none of them reaches `favurlIsTrack`'s fail-open branch, which the file's no-warnings check enforces. Plus `sourceFromSvc`: `spotty` → `spotify`, while a home-shelf id still answers `''` so the cover sniff keeps its turn. Plus 0.1.115's `spottyArtistName`, the ONE reader of a Spotty album object's artist: both legitimate shapes (the cache's plain `artist` string and the raw API's `artists` array), the string winning when both are present, and seven miss cases — including a hash in `artist`, which is the TIDAL/DEEZER shape and must NOT be read here, so a fold of the two extractions fails rather than quietly losing a Tidal row's artist. Calls are `eval`'d because a shape the sub fails to guard DIES rather than returning, and a dying assertion aborts the run instead of reporting it. Plus source checks that both modules ask through the sub and neither open-codes the `artists[0]{name}` read outside its body (`LL_SOURCES_SRC=`/`LL_PLUGIN_SRC=` point those at mutated copies) |
 | `t_reltype.pl` (Spotify section) | That a Spotify EP — `album_type: 'single'` with `total_tracks: 5` — is NOT stored as a single, that it resolved a real tracklist to prove it, and that a 9-track "single" demotes to `album` rather than `ep`. Also that the album is requested by full URI, and that no album object at all falls through to the tracklist instead of dying or inventing |
-| `t_refold.pl` | 0.1.112's fleet fold and the migration it owes: apostrophe elision (and the `'n'` guard) plus `%FOLD` in ALL THREE normalisers, that the three punctuation passes still differ where they must (the key keeps "(Deluxe)", the gate strips it, the ranker keeps "(LP4)"), that the lenient empty-artist gates are untouched, and `_migrateRefold` end to end against real SQLite — a stale key rewritten, same-status duplicates collapsed into the earliest save with the loser's `ref` carried across, MIXED-status rows left alone on their old keys, track `|t:` and playlist `|p:<svc>:<id>` identity segments preserved, and idempotence. Plus, at source level, that the fold lives in `DB.pm` and that `DB::_norm` calls it DIRECTLY while `Sources` goes through `->can` — the failure that guards is a permanent wrong key in a UNIQUE column, which no passing call can show |
+| `t_refold.pl` | 0.1.112's fleet fold and the migration it owes: apostrophe elision (and the `'n'` guard) plus `%FOLD` in ALL THREE normalisers, that the three punctuation passes still differ where they must (the key keeps "(Deluxe)", the gate strips it, the ranker keeps "(LP4)"), that the lenient empty-artist gates are untouched, and `_migrateRefold` end to end against real SQLite — a stale key rewritten, same-status duplicates collapsed into the earliest save with the loser's `ref` carried across, MIXED-status rows left alone on their old keys, track `|t:` and playlist `|p:<svc>:<id>` identity segments preserved, and idempotence. Plus, at source level, that the fold lives in `DB.pm` and that `DB::_norm` calls it DIRECTLY while `Sources` goes through `->can` — the failure that guards is a permanent wrong key in a UNIQUE column, which no passing call can show. Plus §4i (0.1.119): a rollback that ITSELF fails must not poison the handle — `AutoCommit` restored, a later transaction still openable, the failed pass still withholding the ladder stamp, and the assertion that actually matters, that an ordinary write made AFTER the failure is durable rather than discarded at shutdown. DBD::SQLite will not fail a rollback on demand, so only the rollback is injected (a `RootClass` subclass); the failing GROUP is 4h's reachable collision. Its squatter pair differs by an apostrophe rather than reusing 4h's accented one — that is fixture history, not a hazard in accents |
 | `t_load.pl` | every shipped module compiles AND loads, plus a called-vs-defined sweep — `perl -c` passes on a call to a sub that doesn't exist, which nearly shipped a runtime crash in 0.1.83 |
 
 Two rules that follow from how this suite is built:

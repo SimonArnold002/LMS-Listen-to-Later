@@ -297,6 +297,68 @@ section('4h. A MERGE THAT CANNOT LAND TAKES NOTHING WITH IT');
     is('...and now the ladder is stamped',     ($h->selectrow_array('PRAGMA user_version'))[0], 5);
 }
 
+section('4i. A ROLLBACK THAT FAILS MUST NOT POISON THE HANDLE');
+{
+    # begin_work turns AutoCommit OFF and only a COMPLETED commit/rollback turns it back on.
+    # The failure branch logged a rollback that raised and carried on, leaving AutoCommit off on
+    # a handle the migration neither owns nor closes. The migration itself is the small half of
+    # that: every later begin_work dies "Already in a transaction" so the rest of the groups run
+    # unwrapped, and every plugin write for the REST OF THE SERVER RUN joins a transaction
+    # nothing ever commits — discarded at handle destruction, silently, hours later.
+    # The failing group is 4h's collision, which needs no injected failure; only the rollback is
+    # injected, because DBD::SQLite will not fail one on demand.
+    package RBFail;     our @ISA = ('DBI');
+    package RBFail::st; our @ISA = ('DBI::st');
+    package RBFail::db; our @ISA = ('DBI::db');
+    our $BOOM = 0;
+    sub rollback { my $s = shift; die "simulated rollback failure\n" if $BOOM; $s->SUPER::rollback(@_) }
+    package main;
+
+    my $f = "$dir/refold-rbfail-" . int(rand(1e9)) . '.db';
+    my $h = DBI->connect("dbi:SQLite:dbname=$f", '', '',
+        { RaiseError => 1, AutoCommit => 1, RootClass => 'RBFail' });
+    Plugins::ListenLater::DB::_migrate($h);
+    $h->do('PRAGMA user_version = 4');
+    $h->do('DELETE FROM albums');
+    # The squatter pair is deliberately ASCII, differing only by an apostrophe, rather than 4h's
+    # "Sigur R\x{f3}s"/'Sigur Ros'. The whole scenario rests on those two rows landing in ONE
+    # group so the mixed-status skip strands the squatter on the key the merge below wants; if
+    # they group separately the squatter is simply rekeyed out of the way, no collision happens,
+    # and the outcome then rides on `values %group` order — which is exactly what this test did,
+    # passing and failing run to run, while the diacritic seed was in it. An apostrophe folds
+    # identically whether the artist comes back from SQLite as octets or as characters, so the
+    # grouping is not a variable here and the collision is guaranteed.
+    $ins->($h, status => 'later',  artist => "Takk's Band", album => 'Takk', year => 2005,
+           key => 'janes addiction|ritual|1990', added => 10);
+    $ins->($h, status => 'played', artist => 'Takks Band', album => 'Takk', year => 2005,
+           key => 'takks band|takk|2005', added => 20);
+    $ins->($h, artist => "Jane's Addiction", album => 'Ritual', year => 1990,
+           key => 'jane s addiction|ritual|1990', added => 100);
+    $ins->($h, artist => 'Janes Addiction', album => 'Ritual', year => 1990,
+           key => 'janes addiction|ritual|1990x', added => 200);
+
+    $RBFail::db::BOOM = 1;
+    eval { Plugins::ListenLater::DB::_migrate($h); 1 };
+    $RBFail::db::BOOM = 0;
+
+    is('AutoCommit is restored after a rollback that itself failed',
+        ($h->{AutoCommit} ? 1 : 0), 1);
+    is('...so a later transaction can still be opened',
+        (eval { $h->begin_work; $h->rollback; 1 } ? 'opened' : 'died'), 'opened');
+
+    # The damage that actually loses data is not in the migration at all — it is the next
+    # ordinary write, which must reach the disk rather than join a transaction nothing commits.
+    $h->do("INSERT INTO albums (status,kind,source,artist,album_title,dedupe_key,added_at)
+            VALUES ('later','album','qobuz','After','Row','after|row|',300)");
+    eval { $h->disconnect; 1 };
+    my $h2 = DBI->connect("dbi:SQLite:dbname=$f", '', '', { RaiseError => 1, AutoCommit => 1 });
+    is('...and a write made after the failure is durable, not discarded at shutdown',
+        scalar(@{ $h2->selectall_arrayref("SELECT id FROM albums WHERE artist = 'After'") }), 1);
+    is('the failed pass still withholds the ladder stamp',
+        ($h2->selectrow_array('PRAGMA user_version'))[0], 4);
+    $h2->disconnect;
+}
+
 section('4g. A FAILED PASS DOES NOT STAMP THE LADDER');
 {
     # _migrateRefold reads the whole table in ONE select and bails if it cannot. Stamping

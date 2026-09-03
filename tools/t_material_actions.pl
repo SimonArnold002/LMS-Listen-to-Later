@@ -88,6 +88,7 @@ sub reset_all {
     $Plugins::ListenLater::Plugin::REGISTERED_N = 0;
     %Plugins::ListenLater::Plugin::UNREGISTERED = ();
     %Plugins::ListenLater::Plugin::REGISTERED_EMPTY = ();
+    %Plugins::ListenLater::Plugin::REGISTERED_POS   = ();
     File::Path::remove_tree("$tmp/material-skin");
 }
 
@@ -177,6 +178,7 @@ is('legacy install has our entries in the file', ours_in_file($legacy), $TOTAL +
 
 install_api();
 $Plugins::ListenLater::Plugin::REGISTERED = 0;
+%Plugins::ListenLater::Plugin::REGISTERED_POS = ();
 my $n = Plugins::ListenLater::Plugin::_registerMaterialActions();
 Plugins::ListenLater::Plugin::_writeMaterialActions();
 my $data = read_file();
@@ -1476,6 +1478,117 @@ is('...and the prune really did write them, which is what makes that true',
 Slim::Utils::Prefs::set_test_pref('debug_log', 0);
 install_api();
 set_material_version(undef);
+
+# ---------------------------------------------------------------------------
+section('the prune dump does not claim delivery registration never made');
+# The pref-off-at-STARTUP path: postinit calls _clearMaterialActions, which on tier 2 prunes.
+# Nothing registered, so nothing was refused either, and %UNREGISTERED is empty for the OPPOSITE
+# of the usual reason. _deliveredCounts subtracts that ledger, so consulted here it reports the
+# whole built set as delivered — and the prune passed a hardcoded $api = 1 alongside it. The dump
+# then answered "plugin API", "streaming Add active" and "registered sections = ..." directly
+# under "material_action pref = OFF", in the one log a "where did Add go" report is read from.
+# Pinned on the DUMP TEXT rather than the counts, because the text is what gets pasted back.
+sub snap_lines { return split /\n/, ($Slim::Utils::Prefs::VALUES{material_debug_snapshot} // '') }
+sub snap_line {
+    my ($re) = @_;
+    my ($line) = grep { /$re/ } snap_lines();
+    return $line // '(no such line)';
+}
+
+reset_all();
+install_api();
+set_material_version('6.4.9');
+Slim::Utils::Prefs::set_test_pref('debug_log', 1);
+save_settings(material_action => 0, debug_log => 1);
+# NB no _registerMaterialActions() call — that is precisely the state under test.
+is('nothing registered, so there is nothing to have refused',
+    ($Plugins::ListenLater::Plugin::REGISTERED
+        || keys %Plugins::ListenLater::Plugin::UNREGISTERED) ? 'ran' : 'never ran', 'never ran');
+Plugins::ListenLater::Plugin::_clearMaterialActions();
+is('the dump still reports the pref as off',
+    (snap_line(qr/^material_action pref/) =~ /OFF/) ? 'off' : snap_line(qr/^material_action pref/),
+    'off');
+is('...and does NOT claim the plugin API delivered anything',
+    (snap_line(qr/^custom-action delivery/) =~ /plugin API/) ? 'claimed the API' : 'did not',
+    'did not');
+is('...nor claims streaming Add is active',
+    (grep { /streaming Add active/ } snap_lines()) ? 'claimed active' : 'did not', 'did not');
+is('...nor lists registered sections',
+    (grep { /^registered sections/ } snap_lines()) ? 'listed some' : 'did not', 'did not');
+is('...nor credits a service to a registered section it never asked for',
+    (grep { /via its own registered/ } snap_lines()) ? 'credited one' : 'did not', 'did not');
+
+# The mirror: when registration HAS run, every one of those statements must come back — or the
+# gate above would be indistinguishable from simply never reporting the API half.
+reset_all();
+install_api();
+set_material_version('6.4.9');
+save_settings(material_action => 1, debug_log => 1);
+Plugins::ListenLater::Plugin::_registerMaterialActions();
+Plugins::ListenLater::Plugin::_writeMaterialActions();
+is('with registration done the dump does name the plugin API',
+    (snap_line(qr/^custom-action delivery/) =~ /plugin API/) ? 'named it' : snap_line(qr/^custom-action delivery/),
+    'named it');
+is('...and lists the registered sections',
+    (grep { /^registered sections = \w/ } snap_lines()) ? 'listed' : 'silent', 'listed');
+Slim::Utils::Prefs::set_test_pref('debug_log', 0);
+install_api();
+set_material_version(undef);
+
+# ---------------------------------------------------------------------------
+section('a category that appears MID-RUN still reaches Material (tier 2)');
+# $REGISTERED was a single latch on the belief that the positive set is fixed at startup. On
+# tier 2 it is not: podcasts-* folds into %positive and is gated on Podcast::hasFeeds(), so a
+# user subscribing to their FIRST feed grows a section after postinit and the deferred pass have
+# both run. The latch then refused it for the rest of the server run, and the prune writes back
+# only what registration REFUSED — so it reached neither half and podcast rows had no "Add"
+# until a restart. Two halves to pin: the per-category ledger lets a NEW section through, and
+# something has to call us when the subscription list changes.
+reset_all();
+install_api();
+set_material_version('6.4.9');
+save_settings(material_action => 1, debug_log => 0);
+Slim::Utils::Prefs::set_test_pref_ns('plugin.podcast', 'feeds', []);
+Plugins::ListenLater::Plugin::_registerMaterialActions();
+Plugins::ListenLater::Plugin::_writeMaterialActions();
+is('with no subscriptions the override is not registered',
+    (grep { $_->[0] eq 'podcasts-album' } @REG) ? 'registered' : 'absent', 'absent');
+my $before = scalar @REG;
+
+# The user subscribes to their first podcast, and the pref watcher fires the deferred pass.
+Slim::Utils::Prefs::set_test_pref_ns('plugin.podcast', 'feeds',
+    [ { name => 'Darko.Audio', value => 'https://darko.audio/feed' } ]);
+Plugins::ListenLater::Plugin::_writeMaterialActionsDeferred();
+is('subscribing mid-run registers the podcasts override',
+    (grep { $_->[0] eq 'podcasts-album' } @REG) ? 'registered' : 'MISSING', 'registered');
+is('...the -track half too',
+    (grep { $_->[0] eq 'podcasts-track' } @REG) ? 'registered' : 'MISSING', 'registered');
+is('...and it is the real Add entry, not an empty section',
+    (grep { $_->[0] eq 'podcasts-album' && @$_ > 1 } @REG) ? 'entry' : 'empty', 'entry');
+# The latch's whole job: everything already handed over must NOT be pushed again, or Material
+# appends it and every "Add" in those sections shows twice.
+my %dup;
+$dup{ $_->[0] }++ for grep { @$_ > 1 } @REG;
+is('...while nothing already registered is pushed a second time',
+    (join ',', sort grep { $dup{$_} > 2 } keys %dup), '');
+is('...and it did not re-register the whole set', (scalar @REG > $before) ? 'grew' : 'static', 'grew');
+is('the override is NOT also written to the file (that would double it)',
+    (exists read_file()->{'podcasts-album'} ? 'written' : 'clean'), 'clean');
+
+# A second identical pass must be a no-op — the deferred pass also runs on a +60s timer.
+my $after = scalar @REG;
+Plugins::ListenLater::Plugin::_writeMaterialActionsDeferred();
+is('...and a repeat pass registers nothing further', scalar @REG, $after);
+
+# The other half: postinit must actually ASK to be told. No return value shows this, and the
+# test harness's setChange is a no-op, so it is pinned at source.
+my $psrc = do {
+    open my $fh, '<', ($ENV{LL_PLUGIN_SRC} || "$FindBin::Bin/../ListenLater/Plugin.pm") or die $!;
+    local $/; <$fh>;
+};
+is('postinit watches the podcast plugin\'s subscription list',
+    ($psrc =~ /preferences\('plugin\.podcast'\)\s*->setChange\(\s*\\&_writeMaterialActionsDeferred\s*,\s*'feeds'\)/s)
+        ? 'watched' : 'NOT watched', 'watched');
 
 printf "\n%d passed, %d failed\n", $pass, $fail;
 exit($fail ? 1 : 0);

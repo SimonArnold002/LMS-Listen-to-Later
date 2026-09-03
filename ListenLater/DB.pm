@@ -370,9 +370,39 @@ sub _migrateRefold {
         }
 
         if (defined $err) {
-            if ($txn) {
-                eval { $h->rollback; 1 }
-                    or $log->error("Listen Later: refold rollback failed: $@");
+            if ($txn && !eval { $h->rollback; 1 }) {
+                # begin_work turned AutoCommit OFF, and ONLY a completed commit or rollback
+                # turns it back on. A rollback that RAISED leaves it off on a handle this sub
+                # does not own and does not close, and the damage runs far past the migration:
+                # every later begin_work dies "Already in a transaction" so the remaining groups
+                # run unwrapped, and every plugin write for the REST OF THE SERVER RUN joins a
+                # transaction nothing ever commits — DBI discards it at handle destruction, so
+                # saves and play counts vanish silently at shutdown with nothing in the log.
+                # Restore it by hand, and ABANDON: the transactional state is the very thing we
+                # just failed to settle, so there is nothing safe for the rest of the loop to run
+                # against. $failed withholds the version stamp, so the whole pass is retried at
+                # the next start — which is what the untouched groups need anyway.
+                $log->error("Listen Later: refold rollback failed: $@");
+                # Undo the group by hand FIRST, and by raw SQL since it is ->rollback that just
+                # failed. Order is not cosmetic: assigning AutoCommit = 1 while a transaction is
+                # still open COMMITS it, which would turn "the rollback failed" into "the
+                # half-applied group is now permanent" — the losers deleted for good and the
+                # survivor left on its stale key, precisely the loss the transaction exists to
+                # prevent. If this fails too there is nothing left to try: SQLite has almost
+                # certainly rolled back on its own already (it does that on a full disk or an I/O
+                # error, which is also the likeliest reason ->rollback raised), and that is the
+                # outcome we wanted anyway.
+                eval { $h->do('ROLLBACK'); 1 }
+                    or $log->error("Listen Later: refold could not roll back by hand either "
+                        . "(SQLite has most likely done it already): $@");
+                eval { $h->{AutoCommit} = 1; 1 }
+                    or $log->error("Listen Later: refold could not restore AutoCommit: $@");
+                $skipped += @$g;
+                $failed++;
+                $log->warn("Listen Later: refold $err — and the rollback failed too, so the "
+                    . 'migration is abandoned here rather than run on a handle whose '
+                    . 'transaction state is unknown; the whole pass is retried at the next start');
+                last;
             }
             $skipped += @$g;
             $failed++;

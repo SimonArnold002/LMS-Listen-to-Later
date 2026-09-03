@@ -95,6 +95,24 @@ sub new_process {
     $Plugins::ListenLater::Plugin::REGISTERED   = 0;
     $Plugins::ListenLater::Plugin::REGISTERED_N = 0;
     %Plugins::ListenLater::Plugin::UNREGISTERED = ();
+    # BOTH per-category ledgers, or the "restart" carries this process's registrations into the
+    # next one and every assertion after it runs against a warmed-up server. %REGISTERED_EMPTY
+    # was missed until the tier-2 axis below was added, and could not bite before it: the empty
+    # -section loop is gated on tier >= 2, so at tier 0/1 the hash is never populated at all.
+    %Plugins::ListenLater::Plugin::REGISTERED_POS   = ();
+    %Plugins::ListenLater::Plugin::REGISTERED_EMPTY = ();
+}
+
+# The DELIVERY TIER is a version test as well as a capability one: on 6.4.6/6.4.7 the
+# one-argument "declare an empty section" call pushes a NULL into the section and breaks every
+# custom action in it, so tier 2 needs >= 6.4.8 AND the API. Absent = tier 1 when the API is
+# installed, which is what every config in this suite used to be.
+sub set_material_version {
+    my ($v) = @_;
+    no strict 'refs';
+    no warnings 'redefine';
+    if (defined $v) { *{'Plugins::MaterialSkin::Plugin::getPluginVersion'} = sub { $v } }
+    else            { delete $Plugins::MaterialSkin::Plugin::{getPluginVersion} }
 }
 sub set_feeds {
     Slim::Utils::Prefs::set_test_pref_ns('plugin.podcast', 'feeds',
@@ -118,7 +136,11 @@ my @REPLAYABLE = grep { $_ ne 'listenlater' } split ' ', $SUPQW;
 # --- the ops, mirroring the four real entry points exactly -------------------------------
 #   boot_on  postinitPlugin, pref ON  — register (6.4.6+) then write
 #   boot_off postinitPlugin, pref OFF — clear; nothing registered this run, so $live is 0
-#   on       Settings save, pref ON   — write only; a save can never register (no de-dupe)
+#   on       Settings save, pref ON   — register then write, mirroring Settings::handler since
+#                                        0.1.111. It used to write only, on the belief that a
+#                                        save must never register; $REGISTERED is the per-run
+#                                        latch that makes it safe, and on tier 2 there is no
+#                                        file write left, so writing alone delivers NOTHING.
 #   off      Settings save, pref OFF  — clear; $live is whatever THIS process registered
 sub do_op {
     my ($op) = @_;
@@ -127,7 +149,8 @@ sub do_op {
                              Plugins::ListenLater::Plugin::_writeMaterialActions(); }
     elsif ($op eq 'boot_off') { new_process();
                              Plugins::ListenLater::Plugin::_clearMaterialActions(); }
-    elsif ($op eq 'on')    { Plugins::ListenLater::Plugin::_writeMaterialActions(); }
+    elsif ($op eq 'on')    { Plugins::ListenLater::Plugin::_registerMaterialActions();
+                             Plugins::ListenLater::Plugin::_writeMaterialActions(); }
     elsif ($op eq 'off')   { Plugins::ListenLater::Plugin::_clearMaterialActions(); }
     else { die "unknown op $op" }
 }
@@ -165,16 +188,23 @@ my @SEQS = (
     { name => 'boot off, then turn it on',              ops => [qw(boot_off on)],                end => 'on'  },
 );
 
+# The three DELIVERY TIERS, not two. Until the `ver` axis was added every config here ran at
+# tier 1 — the API installed with no version to read — so all 108 assertions were driven against
+# a delivery mode that prunes nothing, registers no suppressors and never unlinks the file. That
+# is the mode most installs are LEAVING; 6.4.8+ is what the husk bugs now live in.
 my @CONFIGS = (
-    { name => 'Material 6.4.6+ / podcasts subscribed',   api => 1, feeds => 1 },
-    { name => 'Material 6.4.6+ / no subscriptions',      api => 1, feeds => 0 },
-    { name => 'Material 6.4.5- / podcasts subscribed',   api => 0, feeds => 1 },
-    { name => 'Material 6.4.5- / no subscriptions',      api => 0, feeds => 0 },
+    { name => 'tier 2 (6.4.9) / podcasts subscribed',    api => 1, ver => '6.4.9', feeds => 1 },
+    { name => 'tier 2 (6.4.9) / no subscriptions',       api => 1, ver => '6.4.9', feeds => 0 },
+    { name => 'tier 1 (6.4.6/7) / podcasts subscribed',  api => 1, ver => undef,   feeds => 1 },
+    { name => 'tier 1 (6.4.6/7) / no subscriptions',     api => 1, ver => undef,   feeds => 0 },
+    { name => 'tier 0 (no API) / podcasts subscribed',   api => 0, ver => undef,   feeds => 1 },
+    { name => 'tier 0 (no API) / no subscriptions',      api => 0, ver => undef,   feeds => 0 },
 );
 
 sub apply_config {
     my ($cfg) = @_;
     $cfg->{api} ? install_api() : remove_api();
+    set_material_version($cfg->{ver});
     set_feeds($cfg->{feeds});
 }
 sub start_world {
@@ -223,7 +253,14 @@ sub merged_view {
         next unless ref $data->{$cat} eq 'ARRAY';
         $m{$cat} = [ @{ $data->{$cat} } ];
     }
-    push @{ $m{ $_->[0] } ||= [] }, $_->[1] for @REG;
+    # A one-argument registerCustomAction DECLARES AN EMPTY SECTION; a two-argument one pushes
+    # an entry. Reading `$_->[1]` for both would put a literal undef into the suppressor and make
+    # it look populated — the opposite of what it is, and on tier 2 every suppressor arrives this
+    # way, so the whole tier would compare wrong.
+    for my $r (@REG) {
+        $m{ $r->[0] } ||= [];
+        push @{ $m{ $r->[0] } }, $r->[1] if @$r > 1;
+    }
     # Sorted, so which path delivered an entry never decides the comparison.
     $_ = [ sort { $JSON->encode($a) cmp $JSON->encode($b) } @$_ ] for values %m;
     return \%m;
@@ -242,8 +279,13 @@ sub v_foreign {
     }
     return @bad;
 }
+# NB takes the MERGED view, not the file. An empty suppressor is a suppressor whichever half it
+# arrives through, and on tier 2 it arrives by REGISTRATION — so reading the file alone made this
+# invariant unfalsifiable on exactly the tier where the prune runs. Merged, it means the same
+# thing on all three tiers: does Material end up hiding "Add" on a service we can replay.
 sub v_no_self_harm {
-    my ($data) = @_;
+    my ($file) = @_;
+    my $data = merged_view($file);
     my @bad;
     for my $cmd (@REPLAYABLE) {
         for my $type (qw(album track)) {
