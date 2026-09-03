@@ -426,12 +426,31 @@ sub _clearMaterialActions {
     #
     # $departing (uninstall/disable) takes the same path: the prune removes everything of ours
     # from the file, and the registrations die with the server that holds them.
+    #
+    # The second argument says "the pref is OFF" — every route into this sub is the pref being
+    # off or the plugin leaving — so the prune's positive file fallback goes too. Without it the
+    # prune would put the entries registration REFUSED straight back into a file the user just
+    # asked to be rid of, while tier 0/1 (below) deletes those same entries immediately: one
+    # concept, two answers, which is how this pair drifts apart.
     if (_actionTier() >= 2) {
-        $log->warn('LL: material_action is off — the registered "Add" entries go at the next '
-            . 'server restart (Material has no unregister API). The suppressors are registered '
-            . 'too, so until then "Add" still does not appear inside our own list or on radio '
-            . 'rows') if !$departing && ($REGISTERED_N || %REGISTERED_EMPTY);
-        return _pruneMaterialActions($departing);
+        # Two clauses, two independent facts — a dead $register coderef can leave either half at
+        # zero, and the pair used to be announced together on `$REGISTERED_N || %REGISTERED_EMPTY`.
+        # Whichever half was empty, the message asserted it anyway: the same class of untrue
+        # diagnostic as the per-service verdict in _dumpMaterialState, in the log a "why is Add
+        # still there / why has Add gone" report starts from.
+        if (!$departing && ($REGISTERED_N || %REGISTERED_EMPTY)) {
+            $log->warn('LL: material_action is off — '
+                . ($REGISTERED_N
+                    ? 'the registered "Add" entries go at the next server restart (Material has no '
+                    . 'unregister API)'
+                    : 'nothing of ours registered, so no "Add" entry of ours is live')
+                . (%REGISTERED_EMPTY
+                    ? '. The suppressors are registered too, so until then "Add" still does not '
+                    . 'appear inside our own list or on radio rows'
+                    : '. No suppressor registered either, so another plugin\'s "Add" is not being '
+                    . 'held off those rows'));
+        }
+        return _pruneMaterialActions($departing, 1);
     }
 
     # Only when something was actually registered — if the API refused every entry they are
@@ -799,8 +818,11 @@ sub _materialActionSet {
     # keeps rejecting exactly as it does today, rather than promising a podcast add we
     # can't honour.
     #
-    # FILE-ONLY, and it has to be: this is a per-app "<command>-<type>" override, and Material
-    # only consults one of those when the category is present in actions.json.
+    # FILE-ONLY up to tier 1, and it has to be there: this is a per-app "<command>-<type>"
+    # override, and a Material before 6.4.8 only consults one of those when the category is
+    # present in actions.json. 6.4.8 made that test read the plugin list too, so the tier-2
+    # branch below folds this pair in with the rest — see the %fileCats fold, and the
+    # per-service diagnostic in _dumpMaterialState, which names whichever half it came from.
     if (Plugins::ListenLater::Podcast::hasFeeds()) {
         $fileCats{'podcasts-album'} = [ $podcastBase ];
         $fileCats{'podcasts-track'} = [ $podcastBase ];
@@ -1161,7 +1183,7 @@ sub _writeMaterialActions {
 # list, so there is no window. What this sub must NOT assume is that registration SUCCEEDED —
 # hence the two fallback sets below, which are the whole reason it is not a plain delete.
 sub _pruneMaterialActions {
-    my ($departing) = @_;
+    my ($departing, $prefOff) = @_;
     my $file = _materialActionsFile();
 
     # What is still ours to WRITE, because registration could not deliver it:
@@ -1173,21 +1195,39 @@ sub _pruneMaterialActions {
     #                  one of those from the file would not remove "Add", it would ADD it where
     #                  it was suppressed — the exact regression 0.1.98 was written about.
     #
-    # **%emptyFallback is gated on $REGISTERED_N, and that gate is load-bearing.** A suppressor
-    # exists to hold OUR registered online-* pair off our own rows; if nothing of ours is live
-    # there is nothing to hold back, and writing empty `<cmd>-*` categories anyway would
-    # suppress ANOTHER plugin's online-* actions on every radio and podcast row with nothing of
-    # ours left to clean them up. The pref-off-at-startup path reaches this sub with nothing
-    # registered, and that is exactly the path that must leave no trace.
+    # **%emptyFallback is gated on whether our online-* pair is live AT ALL, and that gate is
+    # load-bearing in BOTH directions.** A suppressor exists to hold our own online-* pair off
+    # our own rows; if nothing of ours is live there is nothing to hold back, and writing empty
+    # `<cmd>-*` categories anyway would suppress ANOTHER plugin's online-* actions on every
+    # radio and podcast row with nothing of ours left to clean them up. The pref-off-at-startup
+    # path reaches this sub with nothing registered, and that is exactly the path that must
+    # leave no trace.
+    #
+    # But "live" is not "$REGISTERED_N": %fallback is written to the file a few lines below, and
+    # a file entry renders exactly like a registered one. Gating on the registered half alone
+    # meant that when registration refused EVERY positive AND every empty section — one dead
+    # $register coderef does both — the prune wrote our online-album/online-track back into the
+    # file with no suppressor on either half, so "Add to Listen Later" reappeared on our own
+    # list, Played and Wish List rows (using it on a Played row bounces it back to Listen
+    # Later) and on radio browse rows. The legacy write path never had this hole: it writes the
+    # suppressors unconditionally, right beside the positives it is writing.
     #
     # $departing (uninstall/disable, from shutdownPlugin) forces the full clean for the same
     # reason 0.1.108 gave: the whole fallback apparatus protects entries that are live IN THIS
     # RUN, and on the way out there is no next run to protect. Leaving either kind behind
     # strands it for ever.
-    my %fallback      = $departing ? () : %UNREGISTERED;
+    #
+    # $prefOff (material_action turned off, from _clearMaterialActions) drops the POSITIVE
+    # fallback for a reason the registrations cannot claim: a FILE entry CAN be withdrawn, and
+    # on tier 0/1 the clear path withdraws exactly these, here and now. Only the registrations
+    # are stuck until the restart. Dropping them also settles the suppressor question by
+    # itself — with %fallback empty the gate below collapses to $REGISTERED_N, which is the
+    # right answer on this path: what is still live is what REGISTERED, and only that needs
+    # holding off our own rows.
+    my %fallback      = ($departing || $prefOff) ? () : %UNREGISTERED;
     my @radioCats     = _radioSuppressorCats();
     my @suppressors   = ( _ownSurfaceSuppressorCats(), @radioCats );
-    my %emptyFallback = (!$departing && $REGISTERED_N)
+    my %emptyFallback = (!$departing && ($REGISTERED_N || %fallback))
         ? ( map { $_ => 1 } grep { !$REGISTERED_EMPTY{$_} } @suppressors )
         : ();
 
@@ -1424,16 +1464,31 @@ sub _dumpMaterialState {
             my $cmd = $a->{cmd} or next;
             next if $seen{$cmd}++;
             my $name = $a->{name} // $cmd;
-            # A per-command category in the FILE (only the file — Material's override test is
-            # `appCat in customActions`) decides this service on its own: populated it shows
-            # its own entries, empty it hides Add entirely. Otherwise the generic online-*.
-            my $ownCat  = exists $data->{"$cmd-album"} || (grep { $_ eq "$cmd-album" } @$radioCats);
-            my $ownPop  = ref $data->{"$cmd-album"} eq 'ARRAY' && @{ $data->{"$cmd-album"} };
-            my $verdict = !$online_ok      ? "no Add (Material < 6.4.4)"
-                        : $ownPop          ? "Add shown (via its own '$cmd-album' category)"
-                        : $ownCat          ? "Add HIDDEN (empty per-command category)"
-                        : $online_pop      ? "Add shown (via online-*)"
-                        :                    "no Add (online-* empty)";
+            # A per-command category decides this service on its own: populated it shows its
+            # own entries, empty it hides Add entirely; otherwise the generic online-*. It
+            # counts from EITHER half — Material's override test reads both lists
+            # (`(appCat in customActions) || (appCat in pluginCustomActions)`, browse-resp.js)
+            # — so this asks the file AND the registrations. Reading only the file was right
+            # until 6.4.8 and is wrong on tier 2, where our own 'listenlater-*'/'LLHome-*' and
+            # the podcasts override are REGISTERED and the file is pruned: the file-only test
+            # reported "Add shown (via online-*)" for the very rows we suppress, in the one
+            # dump a "where did Add go" report is made from.
+            #
+            # Evidence, never intent: what the file HAS, what Material TOOK. The old
+            # @$radioCats fall-back said "we mean to suppress this", which reads the same in
+            # the healthy case and lies in the one case worth reporting — a suppressor that
+            # reached neither half. Those now show as online-* and that is the truth.
+            my $filePop = ref $data->{"$cmd-album"} eq 'ARRAY' && @{ $data->{"$cmd-album"} };
+            my $fileCat = exists $data->{"$cmd-album"};
+            my $regPop  = ($regCount->{"$cmd-album"} // 0) > 0;
+            my $regCat  = $REGISTERED_EMPTY{"$cmd-album"} ? 1 : 0;
+            my $verdict = !$online_ok ? 'no Add (Material < 6.4.4)'
+                        : $filePop    ? "Add shown (via its own '$cmd-album' in actions.json)"
+                        : $regPop     ? "Add shown (via its own registered '$cmd-album' section)"
+                        : $fileCat    ? "Add HIDDEN (empty '$cmd-album' in actions.json)"
+                        : $regCat     ? "Add HIDDEN (registered empty '$cmd-album' section)"
+                        : $online_pop ? 'Add shown (via online-*)'
+                        :               'no Add (online-* empty)';
             $emit->("service '$cmd' ($name) [$menu->[0]]: $verdict");
         }
     }

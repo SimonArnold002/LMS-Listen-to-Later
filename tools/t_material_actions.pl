@@ -1051,6 +1051,142 @@ is('...and stays EMPTY, which is what does the suppressing',
 is('the ones that DID register are not also left in the file',
     (exists $sup->{'listenlater-track'} ? 'both' : 'registered only'), 'registered only');
 
+# EVERY registration refused. One dead $register coderef takes the positives AND the empty
+# sections with it, and that combination is the hole the $REGISTERED_N gate used to leave: the
+# prune wrote our online-* pair back to the file (correctly — they exist nowhere else) while
+# writing NO suppressor, because it asked "did anything REGISTER" rather than "is anything of
+# ours live". "Add to Listen Later" then rendered on our own list, Played and Wish List rows —
+# and on a Played row, using it bounces the album back to Listen Later.
+reset_all();
+install_failing_api(sub { 1 });
+set_material_version('6.4.9');
+Plugins::ListenLater::Plugin::_registerMaterialActions();
+Plugins::ListenLater::Plugin::_writeMaterialActions();
+my $all_refused = read_file();
+my ($a_radio)   = sort( Plugins::ListenLater::Plugin::_radioSuppressorCats() );
+is('nothing registered at all', n_actions() + n_empties(), 0);
+is('so every positive falls back to the file',
+    scalar @{ $all_refused->{'online-album'} // [] }, 2);
+is('...and our own list suppressor is written BESIDE them',
+    (exists $all_refused->{'listenlater-album'} ? 'kept' : 'MISSING — Add is back on our rows'),
+    'kept');
+is('...as is the home shelf one',
+    (exists $all_refused->{'LLHome-album'} ? 'kept' : 'MISSING — Add is back on the shelf'),
+    'kept');
+is("...as are the radio browse ones ($a_radio)",
+    (exists $all_refused->{$a_radio} ? 'kept' : 'MISSING — Add is back on radio rows'), 'kept');
+is('...and they are EMPTY, which is what does the suppressing',
+    scalar @{ $all_refused->{'listenlater-album'} // [] }, 0);
+
+# TURNING THE PREF OFF withdraws the half that CAN be withdrawn. The registrations are stuck
+# until the restart (Material has no unregister), but a file entry is not — and tier 0/1's
+# clear path deletes exactly these, immediately. The prune used to put them back, because the
+# only thing it was told was $departing: the pref going off looked identical to a normal
+# startup write, so the file the user had just asked to be rid of got the refused entries
+# again. One concept, two answers, in two subs.
+reset_all();
+install_failing_api(sub { $_[0] eq 'online-album' });
+set_material_version('6.4.9');
+Plugins::ListenLater::Plugin::_registerMaterialActions();
+Plugins::ListenLater::Plugin::_writeMaterialActions();
+is('pref ON: the refused entry lives in the file',
+    scalar @{ read_file()->{'online-album'} // [] }, 2);
+Plugins::ListenLater::Plugin::_clearMaterialActions();
+my $pref_off = read_file();
+is('pref OFF: the file half is withdrawn, not re-written',
+    scalar @{ $pref_off->{'online-album'} // [] }, 0);
+is('...and nothing of ours is left in the file at all', ours_in_file($pref_off), 0);
+is('...nor a suppressor for entries that are no longer anywhere',
+    (exists $pref_off->{'listenlater-album'} ? 'wrote' : 'clean'), 'clean');
+
+# The gate still has to hold the OTHER way: nothing live, nothing written. This is the
+# pref-off-at-startup path, and a suppressor left there would hide ANOTHER plugin's online-*
+# actions on every radio and podcast row with nothing of ours left to clean it up.
+reset_all();
+install_api();
+set_material_version('6.4.9');
+Plugins::ListenLater::Plugin::_writeMaterialActions();     # no registration ever ran
+my $untouched = read_file();
+is('nothing registered and nothing refused leaves no suppressor behind',
+    (exists $untouched->{'listenlater-album'} || exists $untouched->{$a_radio}) ? 'wrote' : 'clean',
+    'clean');
+is('...and nothing of ours in the file at all', ours_in_file($untouched), 0);
+
+# ---------------------------------------------------------------------------
+section('the per-service diagnostic reads BOTH delivery halves');
+# The dump's last block is the one a remote "Add has gone" report is actually read from: per
+# installed service, will its browse rows show Add. It resolved that from the FILE alone,
+# which was complete until 6.4.8 and wrong after it — on tier 2 our own suppressors and the
+# podcasts override are REGISTERED and the file is pruned, so the file-only test reported
+# "Add shown (via online-*)" for precisely the rows we hold Add off. Material itself reads
+# both lists (`(appCat in customActions) || (appCat in pluginCustomActions)`), so the
+# diagnostic has to as well — and it has to say WHICH half, since that is the difference
+# between "hard-refresh the tab" and "look in actions.json".
+sub svc_line {
+    my ($cmd) = @_;
+    my ($line) = grep { /^service '\Q$cmd\E'/ }
+        split /\n/, ($Slim::Utils::Prefs::VALUES{material_debug_snapshot} // '');
+    return $line // "(no line for $cmd)";
+}
+Slim::Utils::Prefs::set_test_pref('debug_log', 1);
+Slim::Utils::Prefs::set_test_pref_ns('plugin.podcast', 'feeds', [ { url => 'http://x/f.xml' } ]);
+$Slim::Control::Request::RESULTS{apps} = [
+    { cmd => 'listenlater', name => 'Listen Later' },
+    { cmd => 'podcasts',    name => 'Podcasts' },
+    { cmd => 'qobuz',       name => 'Qobuz' },
+];
+$Slim::Control::Request::RESULTS{radios} = [ { cmd => 'music', name => 'Radio' } ];
+
+reset_all();
+install_api();
+set_material_version('6.4.9');
+Plugins::ListenLater::Plugin::_registerMaterialActions();
+Plugins::ListenLater::Plugin::_writeMaterialActions();
+is('tier 2: our own list rows report the REGISTERED suppressor',
+    (svc_line('listenlater') =~ /Add HIDDEN \(registered empty 'listenlater-album' section\)/)
+        ? 'registered' : svc_line('listenlater'), 'registered');
+is('tier 2: a radio browse command too',
+    (svc_line('music') =~ /Add HIDDEN \(registered empty 'music-album' section\)/)
+        ? 'registered' : svc_line('music'), 'registered');
+is('tier 2: the podcasts override is reported as its own REGISTERED category',
+    (svc_line('podcasts') =~ /Add shown \(via its own registered 'podcasts-album' section\)/)
+        ? 'registered' : svc_line('podcasts'), 'registered');
+is('tier 2: a plain streaming app still falls through to online-*',
+    (svc_line('qobuz') =~ /Add shown \(via online-\*\)/) ? 'online' : svc_line('qobuz'), 'online');
+
+# The same three services on tier 1, where every one of those categories IS the file. Same
+# verdicts, different half named.
+reset_all();
+install_api();
+set_material_version('6.4.7');
+Plugins::ListenLater::Plugin::_registerMaterialActions();
+Plugins::ListenLater::Plugin::_writeMaterialActions();
+is('tier 1: our own list rows report the FILE suppressor',
+    (svc_line('listenlater') =~ /Add HIDDEN \(empty 'listenlater-album' in actions\.json\)/)
+        ? 'file' : svc_line('listenlater'), 'file');
+is('tier 1: the podcasts override is reported from the file',
+    (svc_line('podcasts') =~ /Add shown \(via its own 'podcasts-album' in actions\.json\)/)
+        ? 'file' : svc_line('podcasts'), 'file');
+is('tier 1: and online-* still carries the rest',
+    (svc_line('qobuz') =~ /Add shown \(via online-\*\)/) ? 'online' : svc_line('qobuz'), 'online');
+
+# A suppressor that reached NEITHER half must read as online-* — the state worth reporting,
+# and the one an "intent" list (our @radioCats) used to paper over by claiming a category we
+# had not delivered.
+reset_all();
+install_failing_api(sub { $_[0] =~ /^music-/ });
+set_material_version('6.4.9');
+Plugins::ListenLater::Plugin::_registerMaterialActions();
+Plugins::ListenLater::Plugin::_writeMaterialActions();
+is('an undelivered suppressor is not claimed as a suppressor',
+    (svc_line('music') =~ /Add HIDDEN \(empty 'music-album' in actions\.json\)/) ? 'file fallback'
+        : svc_line('music'), 'file fallback');
+
+Slim::Utils::Prefs::set_test_pref('debug_log', 0);
+Slim::Utils::Prefs::set_test_pref_ns('plugin.podcast', 'feeds', []);
+delete $Slim::Control::Request::RESULTS{apps};
+delete $Slim::Control::Request::RESULTS{radios};
+
 # ---------------------------------------------------------------------------
 section('tier 2 — the deferred pass registers radio commands discovered late');
 

@@ -200,6 +200,62 @@ Also carried forward: **`matcher_sync_check.py` could not have caught #2.** It c
 ordering slip INSIDE it is outside the gate's view and the check exits 0 on both trees.
 The sync gate proves the tables agree, not that the code around them does.
 
+**Third round of 2026-09-03 — CLOSED, all six findings dispositioned.** Run
+against the 0.1.116 tree (`origin/dev...HEAD`: Spotify/Spotty adapter, fleet
+matcher fold + `_migrateRefold`, Material delivery tiers 0/1/2 + prune, uninstall
+hook, checkbox pref fix). **Shipped as 0.1.117** — five findings fixed, one
+declined, plus two defects the knock-on pass found (below). Tests 13 suites green:
+`t_material_actions.pl` 195 → 215, `t_refold.pl` 61 → 75.
+
+| # | finding | disposition |
+|---|---|---|
+| 1 | `_pruneMaterialActions` gates `%emptyFallback` on `$REGISTERED_N` alone, so if tier-2 registration refuses EVERYTHING the refused `online-*` pair is written to the file with no suppressor on either half — "Add" back on our own list/Played/Wish List rows and on radio browse rows | **FIXED** — gate is now `($REGISTERED_N \|\| %fallback)`: "is anything of ours live", not "did anything register". `t_material_actions.pl` covers both directions (3 red without it) |
+| 2 | `_migrateRefold` DELETEs the losing rows before the survivor's UPDATE on an AutoCommit handle, so a failed rekey commits the merge away and keeps the stale key — a saved album and its play history gone, silently | **FIXED** — one transaction per group, rolled back whole. The collision is reachable with no injected failure: a mixed-status group left on its OLD keys can hold the key another survivor is claiming. `t_refold.pl` §4h builds exactly that (4 red without it, and the row count drops to 3) |
+| 3 | `PRAGMA user_version = 5` was stamped even when `_migrateRefold` bailed, retiring the migration for good and leaving every key on the old fold — the invisible-row state it exists to prevent | **FIXED** — `_migrateRefold` returns false on a failed SELECT or a rolled-back group, and only a true return stamps. A mixed-status skip does NOT withhold the stamp: policy, not error, and it could only re-log the same warn for ever. `t_refold.pl` §4g (6 red without it) |
+| 4 | the Settings save now calls `_registerMaterialActions` ungated, so on tier 1 ticking then unticking leaves entries live until a restart where it used to clean up in-session | **DECLINED** — unavoidable and already reported to the user. On tier 1 `$api` is `($REGISTERED && $tier)`, so without registering on save the toggle writes nothing and does nothing until a restart (that is the 0.1.110 bug the save-register fixed). Material has no unregister API, so once registered the only honest answer is the restart warning `_clearMaterialActions` already logs |
+| 5 | the per-service verdict in `_dumpMaterialState` reads only the file, so on tier 2 it reported `listenlater`/`LLHome`/`podcasts` as "Add shown (via online-\*)" when they are registered-suppressed/overridden | **FIXED** — it now reads both halves the way `browse-resp.js` does and NAMES the half ("registered empty … section" vs "empty … in actions.json"). Evidence, not intent: the old `@radioCats` fall-back claimed a suppressor we might never have delivered. 8 new checks (3 red without it) |
+| 6 | `$rekeyed++` fell through the failure branch, counting a failed rekey in both `$skipped` and `$rekeyed` | **FIXED** — subsumed by #2: `$rekeyed`/`$merged` are now reached only after a successful commit, and a failed group counts once as `$skipped += @$g` |
+
+**The knock-on pass (asked for explicitly, after PFR's repeat rounds).** Every
+concept touched above was then traced to every OTHER place that answers the same
+question, because PFR needed a second round of fixes for exactly this — a finding
+fixed at one carrier while a second carrier kept the old answer.
+
+- The DB side is single-carrier: `_migrate` has one caller (`_dbh`, at connect,
+  never inside a transaction), `_migrateRefold` has one caller, and the new
+  per-group transaction is the only one in the module. The other `DELETE FROM
+  albums` sites (remove-by-id, the played prune) carry no merge policy.
+- The Material side was NOT, and the fix for #1 exposed it. "Is our file half
+  still wanted" was answered in three subs, and `_pruneMaterialActions` only knew
+  `$departing` — so **turning the pref OFF re-wrote the entries registration had
+  REFUSED back into the file**, while tier 0/1's clear path deletes those same
+  entries immediately. One concept, two answers. The prune now takes `$prefOff`,
+  and with `%fallback` empty on that path the #1 gate collapses to `$REGISTERED_N`
+  by itself — which is the right answer there, since only registrations are stuck
+  until the restart. Pinned in `t_material_actions.pl` (2 red without it).
+- `_clearMaterialActions`'s pref-off WARN asserted both halves ("the registered
+  entries go at the next restart. The suppressors are registered too") on
+  `$REGISTERED_N || %REGISTERED_EMPTY`, so whichever half was empty it claimed
+  anyway — #5's untrue-diagnostic class, in the log a report starts from. Now one
+  clause per fact.
+
+Carried forward, and bigger than any of the six:
+
+- **A migration is two decisions, not one: what to rewrite, and whether to
+  RECORD that it ran.** #2 and #3 are the same bug seen from either end — the
+  write was not atomic, and the version stamp did not depend on the write. Either
+  alone is silent and permanent. Any future `_migrate` rung gets both: wrap the
+  row work in a transaction, and stamp only on a reported success.
+- **"Did our half register" is not "is our entry live".** #1 and #5 are both that
+  substitution, in the writer and in the diagnostic. With two delivery halves that
+  MERGE client-side, every question about a category has to ask both — Material
+  does (`(appCat in customActions) || (appCat in pluginCustomActions)`), so a
+  single-half test is wrong by construction, not by accident.
+- **A diagnostic that reports INTENT cannot report the failure it exists for.**
+  The dump's old radio fall-back read the list of categories we mean to suppress,
+  which agrees with reality in every healthy state and lies in the one state worth
+  a bug report. Diagnostics assert only what the file HAS and what Material TOOK.
+
 ### D. ADDING TO THIS LEDGER
 
 When a finding is declined, or accepted-but-deferred, add it here in the same

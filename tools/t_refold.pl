@@ -33,8 +33,12 @@
 #                                                                 §4's migration assertions
 #                                                                 stay GREEN, which is the
 #                                                                 asymmetry §5 exists for)
-#   - skip _migrateRefold in the ladder               ->  8 red
+#   - skip _migrateRefold in the ladder               -> 14 red
 #   - let the migration merge MIXED-status rows       ->  3 red
+#   - stamp user_version regardless of the refold's   ->  6 red
+#     result
+#   - drop the per-group transaction (delete, then    ->  4 red  (and the 3 rows §4h says
+#     rekey, on the AutoCommit handle)                           survive are GONE)
 use strict;
 use warnings;
 use utf8;
@@ -247,6 +251,89 @@ section('4e. IDEMPOTENT — a second pass changes nothing');
     my $r = $h->selectall_arrayref('SELECT dedupe_key FROM albums', { Slice => {} });
     is('still one row',            scalar(@$r), 1);
     is('and the same key',         $r->[0]{dedupe_key}, $before);
+}
+
+section('4h. A MERGE THAT CANNOT LAND TAKES NOTHING WITH IT');
+{
+    # The deletes have to precede the survivor's UPDATE (the new key would otherwise collide
+    # with a row about to go), so on an AutoCommit handle a failed UPDATE used to leave the
+    # losers committed away and the survivor on its stale key: a saved album and its play
+    # history gone, silently. The collision is REACHABLE without any injected failure — a
+    # mixed-status group is left on its OLD keys, and one of those can be exactly the key
+    # another group's survivor is moving to. That is the case built here.
+    my $h = $mig->(sub {
+        my ($d) = @_;
+        # The mixed-status pair: left alone, and one of them is squatting on the key the
+        # pair below is about to claim.
+        $ins->($d, status => 'later',  artist => 'Sigur Rós', album => 'Takk', year => 2005,
+               key => 'janes addiction|ritual|1990', added => 10);
+        $ins->($d, status => 'played', artist => 'Sigur Ros', album => 'Takk', year => 2005,
+               key => 'sigur ros|takk|2005', added => 20);
+        # The merge that will therefore fail: two spellings of one album, same status.
+        $ins->($d, artist => "Jane's Addiction", album => 'Ritual', year => 1990,
+               key => 'jane s addiction|ritual|1990', added => 100, play_count => 3);
+        $ins->($d, artist => 'Janes Addiction', album => 'Ritual', year => 1990,
+               key => 'janes addiction|ritual|1990x', added => 200,
+               ref_kind => 'album_id', ref_json => '{"album_id":"z9"}');
+    });
+    my $r = $h->selectall_arrayref('SELECT * FROM albums ORDER BY added_at', { Slice => {} });
+    is('nothing is deleted when the rekey cannot land', scalar(@$r), 4);
+    is('the survivor keeps its old key',       $r->[2]{dedupe_key}, 'jane s addiction|ritual|1990');
+    is('...and the loser is still there',      $r->[3]{dedupe_key}, 'janes addiction|ritual|1990x');
+    is('...with its ref intact',               $r->[3]{ref_kind}, 'album_id');
+    is('a failed group withholds the stamp',   ($h->selectrow_array('PRAGMA user_version'))[0], 4);
+
+    # …and because the stamp was withheld, resolving the collision heals it at the next
+    # start. A mixed-status skip on its own would NOT hold the ladder back like this.
+    $h->do("UPDATE albums SET dedupe_key = 'sigur ros|takk|2005x' WHERE album_title = 'Takk'
+             AND status = 'later'");
+    Plugins::ListenLater::DB::_migrate($h);
+    my $r2 = $h->selectall_arrayref("SELECT * FROM albums WHERE album_title = 'Ritual'",
+                                    { Slice => {} });
+    is('the retry merges the pair',            scalar(@$r2), 1);
+    is('...under the folded key',              $r2->[0]{dedupe_key}, 'janes addiction|ritual|1990');
+    is('...keeping the higher play count',     $r2->[0]{play_count}, 3);
+    is('...and the loser\'s ref',              $r2->[0]{ref_kind}, 'album_id');
+    is('...and now the ladder is stamped',     ($h->selectrow_array('PRAGMA user_version'))[0], 5);
+}
+
+section('4g. A FAILED PASS DOES NOT STAMP THE LADDER');
+{
+    # _migrateRefold reads the whole table in ONE select and bails if it cannot. Stamping
+    # user_version anyway would retire the migration for good: every key stays on the OLD
+    # fold, invisible to add()'s dedupe and to Played's lookups, and nothing ever runs to
+    # fix them. The version is the only retry there is, so it is stamped on a COMPLETED
+    # pass only — an empty table included (nothing to rewrite is a pass).
+    my $h = $mig->(sub {
+        $ins->($_[0], artist => "Jane's Addiction", album => 'Ritual', year => 1990,
+               key => 'jane s addiction|ritual|1990');
+    });
+    # Put it back to where an upgrading user starts: old key, previous ladder height.
+    $h->do("UPDATE albums SET dedupe_key = 'jane s addiction|ritual|1990'");
+    $h->do('PRAGMA user_version = 4');
+
+    {   # the one SELECT the refold makes fails
+        no warnings 'redefine';
+        my $orig = \&DBI::db::selectall_arrayref;
+        local *DBI::db::selectall_arrayref = sub {
+            die "simulated read failure\n" if ($_[1] // '') =~ /FROM albums/s;
+            goto &$orig;
+        };
+        Plugins::ListenLater::DB::_migrate($h);
+    }
+    is('a failed refold leaves the version alone',
+       ($h->selectrow_array('PRAGMA user_version'))[0], 4);
+    is('...and the key is still the stale one',
+       ($h->selectrow_array('SELECT dedupe_key FROM albums'))[0],
+       'jane s addiction|ritual|1990');
+
+    # …so the next start retries it, which is the whole point of not stamping.
+    Plugins::ListenLater::DB::_migrate($h);
+    is('the retry rekeys the row',
+       ($h->selectrow_array('SELECT dedupe_key FROM albums'))[0],
+       'janes addiction|ritual|1990');
+    is('...and stamps the ladder',
+       ($h->selectrow_array('PRAGMA user_version'))[0], 5);
 }
 
 # ---------------------------------------------------------------------------

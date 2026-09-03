@@ -171,9 +171,23 @@ SQL
     # must run AFTER the migrations that change what a key is built from (0.1.43's year
     # segment, 0.1.71's artist-prefix cleanup), or it would faithfully rekey rows that
     # those passes are about to rewrite again.
+    #
+    # Stamped ONLY on a completed pass. _migrateRefold reports false when its one SELECT
+    # fails, and when a group's merge had to be rolled back; stamping regardless would retire
+    # the migration for good — those keys left on the OLD fold, which is precisely the
+    # invisible-row state it exists to prevent, with no path back. Leaving the version where
+    # it is costs one extra SELECT at the next start and gets the rewrite done then instead.
+    # A mixed-status group is NOT a failure — it is left alone on purpose (see
+    # _migrateRefold), so it must not hold the ladder back for ever.
     if ($schemaVer < 5) {
-        _migrateRefold($h);
-        $h->do('PRAGMA user_version = 5');
+        if (_migrateRefold($h)) {
+            $h->do('PRAGMA user_version = 5');
+        }
+        else {
+            $log->warn('Listen Later: dedupe-key refold did not complete (see the warnings '
+                . "above) — schema left at version $schemaVer so it is retried at the next "
+                . 'start');
+        }
     }
     return;
 }
@@ -248,7 +262,9 @@ sub _migrateRefold {
                FROM albums",
             { Slice => {} });
     } or return;
-    return unless $rows && @$rows;
+    # An empty table IS a completed pass — nothing to rewrite, so the version stamps and this
+    # never runs again. Only the failed SELECT above returns false.
+    return 1 unless $rows && @$rows;
 
     # A PLAYLIST key is not rebuildable from artist/album/year — its identity is the
     # service's own id, which lives in the '|p:<source>:<id>' tail rather than in any
@@ -270,7 +286,7 @@ sub _migrateRefold {
         push @{ $group{ ($r->{source} // '') . "\0" . $new } }, $r;
     }
 
-    my ($rekeyed, $merged, $skipped) = (0, 0, 0);
+    my ($rekeyed, $merged, $skipped, $failed) = (0, 0, 0, 0);
     for my $g (values %group) {
         # Untouched by the fold: nothing to do, and no group to settle.
         next if @$g == 1 && $g->[0]{dedupe_key} eq $g->[0]{_new};
@@ -308,34 +324,79 @@ sub _migrateRefold {
             }
         }
 
-        # Losers go FIRST, so the survivor's UPDATE cannot collide with a row that is
-        # about to be removed.
+        # ONE TRANSACTION PER GROUP — the merge is all-or-nothing.
+        #
+        # The deletes MUST land before the survivor's UPDATE, or the new key collides with a
+        # row that is about to be removed. The handle is AutoCommit, so without a transaction
+        # that ordering is a trap: a failed UPDATE leaves the losers already COMMITTED AWAY
+        # and the survivor still on its stale key — a saved album and its play history gone,
+        # silently, with nothing left to retry from. A failed rekey is not hypothetical: a
+        # MIXED-STATUS group (skipped just above, left on its OLD keys) can hold the very key
+        # this survivor is moving to, and UNIQUE(source, dedupe_key) then refuses the UPDATE.
+        #
+        # Rolled back, the group is exactly as it was — on the old keys, which is what
+        # $skipped already means for the mixed-status case and what the ladder's unstamped
+        # version (see _migrate) gets to retry.
+        #
+        # begin_work is guarded: it dies on a handle already inside a transaction, and one
+        # group is not worth taking the whole ladder down for. Failing that, do the same work
+        # unwrapped — no worse than what this replaces — and say so in the warn, because then
+        # the failure really can be partial.
+        my $txn = eval { $h->begin_work; 1 } ? 1 : 0;
+
+        my $err;
         for my $lose (@sorted) {
-            eval { $h->do('DELETE FROM albums WHERE id = ?', undef, $lose->{id}); 1 }
-                or $log->warn("Listen Later: refold could not delete id $lose->{id}: $@");
-            $merged++;
+            next if eval { $h->do('DELETE FROM albums WHERE id = ?', undef, $lose->{id}); 1 };
+            $err = "could not delete id $lose->{id}: $@";
+            last;
+        }
+        if (!defined $err) {
+            eval {
+                $h->do('UPDATE albums SET dedupe_key = ?, played_at = ?, play_count = ?,
+                                          track_count = ?, rel_type = ?, artwork = ?, year = ?,
+                                          ref_kind = ?, ref_json = ?
+                         WHERE id = ?',
+                    undef, $keep->{_new}, $keep->{played_at}, $keep->{play_count} // 0,
+                    $keep->{track_count}, $keep->{rel_type}, $keep->{artwork}, $keep->{year},
+                    $keep->{ref_kind}, $keep->{ref_json}, $keep->{id});
+                1;
+            } or $err = "could not rekey id $keep->{id}: $@";
         }
 
-        eval {
-            $h->do('UPDATE albums SET dedupe_key = ?, played_at = ?, play_count = ?,
-                                      track_count = ?, rel_type = ?, artwork = ?, year = ?,
-                                      ref_kind = ?, ref_json = ?
-                     WHERE id = ?',
-                undef, $keep->{_new}, $keep->{played_at}, $keep->{play_count} // 0,
-                $keep->{track_count}, $keep->{rel_type}, $keep->{artwork}, $keep->{year},
-                $keep->{ref_kind}, $keep->{ref_json}, $keep->{id});
-            1;
-        } or do {
-            $skipped++;
-            $log->warn("Listen Later: refold could not rekey id $keep->{id}: $@");
-        };
+        # A commit that fails leaves nothing applied, so it is the same outcome as any other
+        # failure in the group and is reported as one.
+        if (!defined $err && $txn) {
+            eval { $h->commit; 1 } or $err = "could not commit the merge of id $keep->{id}: $@";
+        }
+
+        if (defined $err) {
+            if ($txn) {
+                eval { $h->rollback; 1 }
+                    or $log->error("Listen Later: refold rollback failed: $@");
+            }
+            $skipped += @$g;
+            $failed++;
+            $log->warn("Listen Later: refold $err — "
+                . ($txn ? 'the whole group is left on its old key(s), untouched'
+                        : 'NO transaction was available, so this group may be half-applied')
+                . '; it is retried at the next start');
+            next;
+        }
+
+        $merged  += scalar @sorted;
         $rekeyed++;
     }
 
     $log->info("Listen Later: dedupe-key refold — $rekeyed row(s) rekeyed, "
              . "$merged duplicate(s) merged, $skipped left on the old key")
         if $rekeyed || $merged || $skipped;
-    return;
+
+    # A group that FAILED withholds the version stamp, so the next start tries it again —
+    # the likeliest causes (the db locked by another process, a full disk) are transient, and
+    # a rolled-back group is in exactly the state a retry wants. A MIXED-STATUS skip does not:
+    # that is a deliberate policy decision, not an error, and re-running could never change it
+    # — it would just re-log the same warn at every boot for ever.
+    return $failed ? 0 : 1;
 }
 
 sub _migrateArtistPrefix {
