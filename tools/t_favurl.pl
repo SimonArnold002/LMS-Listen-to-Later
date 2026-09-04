@@ -371,17 +371,72 @@ is('deezer episode IS a track',
 is('...and so is a spotify episode',
     Plugins::ListenLater::Sources::favurlIsTrack(norm('spotify:episode:0tQdtR5')), 1);
 
-# ONE predicate, because Browse asks the question three times (glyph, type word, whether to
-# print the source). Spotify episodes are deliberately NOT podcast sources: Spotty plays them
-# as 'spotify://episode:<id>', so they are stored under source 'spotify' and read as what
-# they are — a Spotify track.
-my $isPod = \&Plugins::ListenLater::Sources::isPodcastSource;
+# ONE predicate, because the question has four consumers (Browse's glyph, its type word, its
+# source segment, and the Wish List rule). It takes source AND url because the three episode
+# sources do not answer the same way: the built-in app and Deezer each have a source tag of
+# their own, while SPOTIFY has none — Spotty stores an episode under plain 'spotify', exactly
+# like a music track, and says "episode" only in the url. A source-only predicate therefore
+# read every Spotify episode as a Spotify track, which is how one stayed Wish-Listable after
+# 0.1.125 closed the identical Deezer hole (0.1.126).
+my $isPod = \&Plugins::ListenLater::Sources::isPodcastEpisode;
 is('built-in podcast source',   $isPod->('podcast'),       1);
 is('deezer podcast source',     $isPod->('deezerpodcast'), 1);
-is('spotify is NOT one',        $isPod->('spotify'),       0);
 is('deezer itself is NOT one',  $isPod->('deezer'),        0);
 is('library is NOT one',        $isPod->('library'),       0);
 is('undef is NOT one',          $isPod->(undef),           0);
+# Spotify: the SOURCE cannot answer, so the url has to. Both halves are asserted — without
+# the negative case a predicate that simply said "spotify is a podcast" would pass, and that
+# would relabel every Spotify album and track in the list as a podcast.
+is('spotify source alone is NOT one', $isPod->('spotify'), 0);
+is('...but a spotify EPISODE url is',
+    $isPod->('spotify', 'spotify://episode:0tQdtR5'), 1);
+is('...and a spotify TRACK url is not',
+    $isPod->('spotify', 'spotify://track:0tQdtR5'), 0);
+is('...nor a spotify ALBUM url',
+    $isPod->('spotify', 'spotify://album:0tQdtR5'), 0);
+# The un-normalised spelling too: normaliseFavurl inserts the '//' before anything is stored,
+# so every row written from 0.1.113 on carries it — but a row saved before that normalisation
+# existed keeps the bare URI, and reading THAT as a music track is the bug being closed.
+is('...the bare pre-normalisation URI counts as well',
+    $isPod->('spotify', 'spotify:episode:0tQdtR5'), 1);
+# 'episode' must be a container ref, not a substring: a track whose id merely contains the
+# letters cannot be relabelled.
+is('...but "episode" inside an id does not count',
+    $isPod->('spotify', 'spotify://track:myepisode:9'), 0);
+
+# The Spotify-episode SHAPE, as one carrier — the predicate above and the metadata tidy in
+# _saveTrackRecord both ask it, so a second spelling anywhere would make a row a podcast to one
+# of them and a music track to the other. Both use it as a PREDICATE; the show/publisher API
+# lookup that once consumed the URI itself was removed in 0.1.127. The returned form is still
+# asserted because it is the one place the shape is written out.
+my $epUri = \&Plugins::ListenLater::Sources::spotifyEpisodeUri;
+is('the stored // form yields the canonical URI',
+    $epUri->('spotify://episode:0tQdtR5'), 'spotify:episode:0tQdtR5');
+is('...and so does the bare URI Spotty sends',
+    $epUri->('spotify:episode:0tQdtR5'),   'spotify:episode:0tQdtR5');
+is('a spotify TRACK is not one',   $epUri->('spotify://track:0tQdtR5'), undef);
+is('a spotify SHOW is not one',    $epUri->('spotify://show:0tQdtR5'),  undef);
+is('another service is not one',   $epUri->('deezerpodcast://927648401'), undef);
+is('undef is not one',             $epUri->(undef), undef);
+
+# The date Spotty prefixes onto an episode's browse-row title. Its release_date precision
+# varies by show, so all three shapes are stripped — and NOTHING else is, because a real
+# episode title can legitimately open with a year.
+my $strip = \&Plugins::ListenLater::Sources::stripEpisodeDatePrefix;
+is('a full date comes off',  $strip->('2026-01-05 - Mission Killer'), 'Mission Killer');
+is('a year-month comes off', $strip->('2026-01 - Mission Killer'),    'Mission Killer');
+# A BARE year is deliberately left alone: "1979 - The Year In Review" is an ordinary episode
+# title, and there is nothing in the string to tell it from a low-precision release date.
+is('a bare year is NOT stripped',
+    $strip->('1979 - The Year In Review - Part 2'), '1979 - The Year In Review - Part 2');
+is('...nor is a non-date number a prefix',
+    $strip->('101 - How To Listen'), '101 - How To Listen');
+is('...and only the exact " - " separator counts',
+    $strip->('2026-01-05: Mission Killer'), '2026-01-05: Mission Killer');
+is('a plain title is untouched',   $strip->('Mission Killer'), 'Mission Killer');
+is('a date with nothing after it is untouched',
+    $strip->('2026-01-05 - '), '2026-01-05 - ');
+is('undef survives',               $strip->(undef), undef);
 
 # The subtitle label. `ucfirst` was the whole rule until a source tag stopped being a service
 # name — 'deezerpodcast' would read "Deezerpodcast" in every row.

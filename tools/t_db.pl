@@ -273,5 +273,51 @@ is('...and does not re-append the year',   $h->selectrow_hashref('SELECT * FROM 
                                            'temples|sun structures|2014');
 $h->disconnect;
 
+# ---------------------------------------------------------------------------
+# ONE CARRIER FOR THE KEY (_keyForRow). Five writers used to answer "what key does this row
+# have" — add(), updateArtist(), updateYear(), _migrateArtistPrefix() and _migrateRefold() —
+# and two of them had drifted: updateArtist/updateYear rebuilt with dedupeKey($artist,$album,
+# $year) and NO track segment, so calling either on a kind='track' row silently re-keyed it as
+# an ALBUM. It could not fire when found (both callers sit behind _finishAlbumAdd, which only
+# makes album rows) but the guard lived entirely in the caller, so any future caller inherited
+# it. ANTI-TEST: point updateArtist/updateYear back at dedupeKey(...) with three args and the
+# first four of these go red.
+section('the dedupe key has one writer, and it respects kind');
+{
+    my $D = 'Plugins::ListenLater::DB';
+    my $mk = sub { my ($id) = $D->can('add')->({ @_ }, 'later'); return $D->can('get')->($id); };
+
+    # A TRACK row keeps its '|t:<title>' segment through both key-rewriting updaters.
+    my $tr = $mk->(source=>'tidal', kind=>'track', artist=>undef, album_title=>'Album X',
+                   track_title=>'Song Y', ref_kind=>'url', ref=>{url=>'tidal://9.flac'});
+    $D->can('updateArtist')->($tr->{id}, 'Some Artist');
+    is('updateArtist keeps a track row a TRACK key',
+       $D->can('get')->($tr->{id})->{dedupe_key}, 'some artist|album x||t:song y');
+    $D->can('updateYear')->($tr->{id}, 2024);
+    is('...and so does updateYear',
+       $D->can('get')->($tr->{id})->{dedupe_key}, 'some artist|album x|2024|t:song y');
+    is('...so the row is still findable AS a track',
+       ($D->can('findTrackByArtistTitle')->('tidal', 'Some Artist', 'Song Y') || {})->{id}, $tr->{id});
+
+    # An EPISODE's id tail must survive a key rewrite — rebuilding it from `ref` would be a
+    # second notion of the row's identity.
+    my $ep = $mk->(source=>'spotify', kind=>'track', track_title=>'Trailer', ref_kind=>'url',
+                   ref=>{url=>'spotify://episode:zz'}, episode=>1);
+    $D->can('updateArtist')->($ep->{id}, 'Some Publisher');
+    is('updateArtist leaves an episode id tail alone',
+       $D->can('get')->($ep->{id})->{dedupe_key}, '|trailer||e:spotify:spotify://episode:zz');
+
+    # ANTI-REGRESSION: the album path — the only one these two updaters could reach before —
+    # must behave exactly as it always did.
+    my $al = $mk->(source=>'tidal', kind=>'album', artist=>undef, album_title=>'Some Album',
+                   year=>2020, ref=>{});
+    $D->can('updateArtist')->($al->{id}, 'Real Artist');
+    is('an ALBUM row is keyed exactly as before',
+       $D->can('get')->($al->{id})->{dedupe_key}, 'real artist|some album|2020');
+    my $pl = $mk->(source=>'tidal', kind=>'playlist', album_title=>'Dance Pop',
+                   ref=>{playlist_id=>'p1'});
+    is('...and a PLAYLIST key is untouched too', $pl->{dedupe_key}, '|dance pop||p:tidal:p1');
+}
+
 printf "\n%d passed, %d failed\n", $pass, $fail;
 exit($fail ? 1 : 0);

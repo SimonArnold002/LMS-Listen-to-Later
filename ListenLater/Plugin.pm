@@ -1831,8 +1831,9 @@ sub _wantedList {
 }
 
 # Could you BUY this? The Wish List is for things you mean to buy, and two kinds of row
-# never are: a podcast episode — from EITHER source, which is the whole reason this asks
-# Sources::isPodcastSource rather than testing one spelling — and a curated playlist.
+# never are: a podcast episode — from ANY of the three sources, which is the whole reason
+# this asks Sources::isPodcastEpisode rather than testing one spelling — and a curated
+# playlist.
 #
 # ONE carrier for the rule, because it has four consumers and they used to answer it
 # separately: _savePodcastEpisode and _savePlaylistRecord each carried their own
@@ -1842,13 +1843,20 @@ sub _wantedList {
 # _saveTrackRecord, the one path with no redirect — and how BOTH podcast sources went on
 # offering "Move to Wish List" on the saved row, undoing the redirect in one tap.
 #
-# Asked of the STORED shape (kind + source), never of the menu the row was tapped in:
-# Material builds a menu per surface, not per row, so a mixed list (Favourites) offers
-# "Add to Wish List" over rows of every kind and the menu cannot be the guard.
+# Asked of the STORED shape (kind + source + play url), never of the menu the row was
+# tapped in: Material builds a menu per surface, not per row, so a mixed list (Favourites)
+# offers "Add to Wish List" over rows of every kind and the menu cannot be the guard.
+#
+# THE URL IS NOT OPTIONAL, and leaving it out is how the 0.1.125 fix still missed Spotify.
+# That release made this the one carrier and asked it of (kind, source) — which answers for
+# the two podcast sources that have a source tag of their own and CANNOT answer for the
+# third: Spotty stores an episode under source 'spotify', identical to a music track, and
+# says "episode" only in the url. So a Spotify episode went on being Wish-Listable through
+# every one of the four consumers below. Pass the row's play url wherever there is one.
 sub _wishListable {
-    my ($kind, $source) = @_;
+    my ($kind, $source, $url) = @_;
     return 0 if defined $kind && $kind eq 'playlist';
-    return 0 if Plugins::ListenLater::Sources::isPodcastSource($source);
+    return 0 if Plugins::ListenLater::Sources::isPodcastEpisode($source, $url);
     return 1;
 }
 
@@ -1856,8 +1864,8 @@ sub _wishListable {
 # say so. $what names the thing for the log line, which is the only place the user sees why
 # the confirmation toast named a list they did not pick.
 sub _redirectWishList {
-    my ($list, $kind, $source, $what) = @_;
-    return $list unless $list eq 'wishlist' && !_wishListable($kind, $source);
+    my ($list, $kind, $source, $url, $what) = @_;
+    return $list unless $list eq 'wishlist' && !_wishListable($kind, $source, $url);
     $log->warn("LL: $what sent to the Wish List — saving to Listen Later instead");
     return 'later';
 }
@@ -2108,11 +2116,52 @@ sub _saveTrackRecord {
           :                                   'no track title');
     }
 
-    # Placed HERE, after the scheme/track-id/now-playing branches above have settled
-    # $source, because that is the first point the rule can be asked: a Deezer episode
-    # arrives as a bare 'deezerpodcast://<id>' favurl with no kind:podcast param, so its
-    # being a podcast is knowable only from the resolved source.
-    $list = _redirectWishList($list, 'track', $source, 'podcast episode');
+    # A podcast episode's browse row is DISPLAY-shaped, and that is not a Spotify quirk —
+    # it is what a browse row is. Spotty builds an episode's line1 as
+    # "<release_date> - <title>" and its line2 as the episode DESCRIPTION (OPML::episodesList),
+    # and because an episode row carries no metadata.type it resolves to 'online-album', so
+    # Material sends that decorated title as `name` and that blurb as `artist`. Two cheap
+    # corrections are possible from the row alone, and both are made here:
+    #   * the date prefix comes off the title (the same class of fix as the " (YYYY)" strip
+    #     Material's album name gets a few lines above — a renderer's decoration, removed);
+    #   * the blurb is dropped rather than stored as an artist.
+    # `$album` is undef exactly on the favurl-redirected online row, which is the one whose
+    # artist is the blurb; a track-CONTEXT add (queue, Now Playing) arrives with $ALBUMNAME
+    # populated and its artist already came from the handler, so it is left alone.
+    my $spotifyEpUri = Plugins::ListenLater::Sources::spotifyEpisodeUri($url);
+    if ($spotifyEpUri) {
+        $track = Plugins::ListenLater::Sources::stripEpisodeDatePrefix($track);
+        undef $artist unless defined $album && length $album;
+    }
+
+    # Placed HERE, after the scheme/track-id/now-playing branches above have settled $source
+    # AND $url, because that is the first point the rule can be asked: neither streaming
+    # episode source carries a kind:podcast param, and the two state their podcast-ness in
+    # different places — Deezer in the scheme ('deezerpodcast://<id>'), Spotify only in the
+    # url's container ref ('spotify://episode:<id>'), since its source is plain 'spotify'.
+    # Both are settled by here, so both are passed.
+    $list = _redirectWishList($list, 'track', $source, $url, 'podcast episode');
+
+    # Fill what the row could not supply from the SAME reader Played will use at play time.
+    #
+    # THIS IS THE WHOLE POINT, so it is worth stating plainly: Played's metadata fallback
+    # compares a stored row against `Sources::playingMeta`, which is
+    # `handlerForURL($url)->getMetadataFor(...)`. Asking that same sub HERE is what makes the
+    # two ends agree by construction, instead of by a per-service guess about what the
+    # service will report later. Every previous attempt at this re-derived the answer for one
+    # service and got it wrong; there is only one right source for it, and this is it.
+    #
+    # Synchronous, local, and free: getMetadataFor reads the service plugin's own cache — no
+    # HTTP call, no callback, no timeout, and nothing to hang the add. Whatever it does not
+    # know it simply does not answer, and the row keeps what it arrived with.
+    #
+    # Scoped to podcast EPISODES deliberately. A music track's browse row is already the
+    # title and artist, so there is nothing to correct, and widening this to every streaming
+    # track would change the stored album on Qobuz/Tidal/Deezer browse-track adds — which
+    # changes their dedupe keys, for no defect anyone has reported. An episode's row is the
+    # case that is measurably wrong.
+    _fillFromPlayingMeta($request->client, $url, \$track, \$artist, \$album)
+        if Plugins::ListenLater::Sources::isPodcastEpisode($source, $url);
 
     my %tf = (
         source => $source, url  => $url,  track   => $track,   artist  => $artist,
@@ -2139,6 +2188,55 @@ sub _saveTrackRecord {
     return _insertTrackRow($request, $list, \%tf);
 }
 
+# Fill a track add's blank title/artist/album from the URL's own protocol handler.
+#
+# ONE carrier, and the reason it exists rather than a per-service lookup: this is literally
+# the sub Played::_markPlayedTrack falls back to (`Sources::playingMeta`), so anything it
+# answers here is by definition what Played will compare against later. There is no second
+# opinion to get wrong.
+#
+# FILL-ONLY, never overwrite. The row the user actually tapped beats a cache lookup: a
+# track-context add already carries the handler's own values, and a browse row's title is
+# the one the user saw. Only genuinely absent values are taken.
+#
+# The title is the exception to "only if absent": a handler that names the track is stating
+# the string it will report at play time, and that is the one the metadata fallback needs —
+# so it wins over a browse row's decorated version. Guarded on the handler actually knowing
+# it (some return a placeholder while an async fetch runs, and a placeholder must never
+# replace a real title), which is why the value has to differ from what we hold rather than
+# merely exist.
+sub _fillFromPlayingMeta {
+    my ($client, $url, $trackRef, $artistRef, $albumRef) = @_;
+    return unless $client && defined $url && length $url;
+
+    my $meta = eval { Plugins::ListenLater::Sources::playingMeta($client, $url) };
+    return unless ref $meta eq 'HASH' && keys %$meta;
+
+    my $take = sub {
+        my ($k) = @_;
+        my $v = $meta->{$k};
+        return undef unless defined $v && !ref $v && length $v;
+        return $v;
+    };
+
+    for my $pair ([ 'artist', $artistRef ], [ 'album', $albumRef ]) {
+        my ($key, $ref) = @$pair;
+        next if defined $$ref && length $$ref;
+        my $v = $take->($key) // next;
+        $$ref = $v;
+        $log->info("LL: filled $key from the handler for $url: '$v'");
+    }
+
+    # The title only when the handler HAS one and it differs — see the note above.
+    my $t = $take->('title');
+    if (defined $t && (!defined $$trackRef || !length $$trackRef || $t ne $$trackRef)) {
+        $log->info("LL: handler names this track '$t' (row said '"
+            . ($$trackRef // '?') . "') — storing the handler's");
+        $$trackRef = $t;
+    }
+    return;
+}
+
 # Save a podcast EPISODE from a Podcasts-app browse row. That row carries no play url and
 # no durable id (only $TITLE and $IMAGE), so the episode is resolved against the user's
 # subscribed feeds first — see Podcast.pm for why that's the only identity available. The
@@ -2162,7 +2260,7 @@ sub _savePodcastEpisode {
     # The podcast action offers no Wish List entry at all, so this only fires when the
     # episode came in through a GENERIC container's "Add to Wish List" (Favourites etc.),
     # where the menu can't know it's a podcast. The rule itself lives in _wishListable.
-    $list = _redirectWishList($list, 'track', 'podcast', 'podcast episode');
+    $list = _redirectWishList($list, 'track', 'podcast', undef, 'podcast episode');
 
     # Same gate every other add path runs: don't store what we can't replay. This path
     # inserts via _insertTrackRow directly (it doesn't go through _saveTrackRecord), so the
@@ -2192,9 +2290,11 @@ sub _savePodcastEpisode {
             'no podcast episode resolved from the subscribed feeds') unless $ep && $ep->{url};
 
         # artist is left EMPTY and the show goes in album_title: the row then reads
-        # "♪ <episode>" with "Podcast · <show>" beneath it, rather than repeating the show
-        # on both lines. Dedupe still separates episodes (the key's track segment is the
-        # episode title, the album segment the show).
+        # "❝ <episode>" with "Podcast · <show>" beneath it, rather than repeating the show on
+        # both lines. Dedupe still separates episodes (the key's track segment is the episode
+        # title, the album segment the show). This path takes its names from the RSS feed,
+        # which is authoritative for it, so it does not go through _fillFromPlayingMeta — the
+        # two streaming episode sources do, because their names come from a browse row.
         return _insertTrackRow($request, $list, {
             source  => 'podcast',
             url     => $ep->{url},
@@ -2238,6 +2338,36 @@ sub _insertTrackRow {
     my ($source, $url, $track, $artist, $album, $year, $artwork, $trackId)
         = @{$tf}{qw(source url track artist album year artwork trackId)};
 
+    # SAME PLAY URL = SAME RECORDING, checked FIRST and with no artist gate.
+    #
+    # The two guards below both require `length $artist`, and the name key they fall back on
+    # varies by add SURFACE (a queue row sends $ALBUMNAME, a browse row does not) — so an
+    # artist-LESS track added from two surfaces skipped both guards, keyed differently, and
+    # stored TWICE for one url. Played then marks whichever findTrackByUrl returns first
+    # (ORDER BY id) and the twin sits in the list for ever.
+    #
+    # This is the identity contract applied at the add end: Played::_markPlayedTrack already
+    # treats the play url as what a track row IS, matching findTrackByUrl before it looks at
+    # any name. The add path was the one place still deciding sameness purely by name, so the
+    # two ends disagreed about what a duplicate is. They no longer do — and it is the same
+    # reasoning that made DB::episodeKey key an episode on its url.
+    #
+    # Safe by construction: two rows can only share a play url if they are the same audio.
+    if (defined $url && length $url) {
+        my $sameUrl = eval { Plugins::ListenLater::DB::findTrackByUrl($source, $url) };
+        if ($sameUrl) {
+            $log->warn("LL: track '" . ($track // '?') . "' already saved under the same play url"
+                . " (id=" . ($sameUrl->{id} // '?') . ") — not adding a duplicate track row");
+            if (my $client = $request->client) {
+                eval { $client->showBriefly({ line => [ cstring($client, 'PLUGIN_LL'),
+                    _addedMsg($client, $list, 1, $sameUrl->{source}, $source) ] }, { duration => 2 }); };
+            }
+            $request->addResult('count', 0);
+            $request->setStatusDone;
+            return;
+        }
+    }
+
     if (defined $artist && length $artist && defined $track && length $track) {
         my $sing = eval { Plugins::ListenLater::DB::findByArtistAlbum($source, $artist, $track) };
         undef $sing unless $sing && ($sing->{rel_type} // '') eq 'single';
@@ -2257,6 +2387,20 @@ sub _insertTrackRow {
         }
     }
 
+    # A STREAMING podcast episode is keyed on its play url, not on its title — see
+    # DB::episodeKey. The decision is made HERE because this is the layer that knows what a
+    # podcast is; DB is handed the fact and reads the url out of `ref`, exactly as it is
+    # handed `ref->{playlist_id}` for a playlist.
+    #
+    # 'podcast' (the built-in app) is excluded deliberately, and it is not an inconsistency:
+    # that source stores the SHOW in album_title from the RSS feed, so its key already carries
+    # a discriminator and cannot collide — while Deezer and Spotify store no show at all, which
+    # is what collapses their keys to '|||t:<title>'. The rule is "an episode with no show
+    # stored keys on its url". Excluding it also means no released row is re-keyed (built-in
+    # episodes ship from 0.1.87; `main` is 0.1.93), so nothing here owes a migration.
+    my $isStreamingEpisode = ($source ne 'podcast')
+        && Plugins::ListenLater::Sources::isPodcastEpisode($source, $url);
+
     my $rec = {
         kind        => 'track',
         source      => $source,
@@ -2266,6 +2410,7 @@ sub _insertTrackRow {
         year        => ($year && $year =~ /(\d{4})/) ? $1 : undef,
         artwork     => $artwork,
         ref_kind    => 'url',
+        ($isStreamingEpisode ? (episode => 1) : ()),
         ref         => { _svc => $source, url => $url,
                          (defined $trackId && length $trackId ? (track_id => $trackId) : ()) },
     };
@@ -2315,7 +2460,7 @@ sub _savePlaylistRecord {
 
     # A curated playlist is not something you buy — the same rule, and the same carrier,
     # as a podcast episode (_wishListable).
-    $list = _redirectWishList($list, 'playlist', $source, 'playlist');
+    $list = _redirectWishList($list, 'playlist', $source, undef, 'playlist');
 
     # No rel_type and no track_count, ever: a playlist is not a release, and a curated one
     # changes under you. Leaving both NULL is also what keeps it out of Played (every Played
@@ -2356,9 +2501,27 @@ sub _savePlaylistRecord {
 }
 
 # Services whose streaming track-adds we try to classify (single → store as the Single).
-# Qobuz gives an authoritative release_type; Tidal falls back to a resolved track count.
-# Deezer/Bandcamp can't cheaply yield an album id from a playing track, so they degrade to
-# storing the track (the cross-kind guards still prevent a duplicate).
+# The gate is "can Sources::trackAlbumId get an album id out of this service's cached track
+# metadata": with one, Qobuz gives an authoritative release_type and Tidal/Deezer fall back
+# to a resolved track count; without one, _saveTrackClassify degrades to storing the plain
+# track (the cross-kind guards still prevent a duplicate).
+#
+# SPOTIFY IS DELIBERATELY ABSENT, and this is a measurement rather than an oversight — do
+# not "complete the parity" by adding it. Read at the consuming end (Spotty-Plugin
+# ProtocolHandler.pm, getMetadataFor, 2026-09-04): every return path builds a fresh hash
+# with `album => $cached->{album}->{name}`, a plain STRING. There is no albumId, no
+# album_id, and `album` is never a hash — so trackAlbumId answers undef for every Spotify
+# url and adding 'spotify' here would buy one wasted metadata lookup and a WARN per add.
+# The id is reachable one layer down in API->trackCached, which is Spotty-internal and was
+# DECLINED for Tidal/Deezer on 2026-07-25 and again for Spotify on 2026-09-02.
+# It would also be actively HARMFUL: a Spotify podcast EPISODE reaches _saveTrackRecord on
+# this same branch, so a service listed here that ever did answer with the show's id would
+# classify a podcast series as a release. Anything added here must exclude episodes first.
+#
+# (Deezer IS listed, and the older wording here claiming it "can't cheaply yield an album
+# id" was wrong: its cached track meta carries the album OBJECT — API.pm cacheTrackMetadata
+# stores `album => $entry->{album}` — and getMetadataFor flattens it to a title only on the
+# complete-cache return path, so an id does reach us on the others.)
 sub _canClassifyTrack {
     my ($source) = @_;
     return defined $source && $source =~ /^(?:qobuz|tidal|deezer)$/;
@@ -2482,6 +2645,10 @@ sub _contextMenuQuery {
     my $id     = $request->getParam('id');
     my $client = $request->client;
     my $rec    = eval { Plugins::ListenLater::DB::get($id) };
+    # The row's stored ref, at THIS scope because the Wish List rule below needs the play
+    # url out of it (a Spotify episode is told from a Spotify track by nothing else). The
+    # Bandcamp block further down keeps its own narrower copy.
+    my $recRef = ($rec && ref $rec->{ref} eq 'HASH') ? $rec->{ref} : {};
 
     my $status = ($rec && $rec->{status}) ? $rec->{status} : 'later';
 
@@ -2528,7 +2695,7 @@ sub _contextMenuQuery {
         # Still gated on having a record: with none we cannot say, and hiding a Move on a
         # row we failed to read would be the worse guess.
         next if $target eq 'wishlist'
-             && $rec && !_wishListable($rec->{kind}, $rec->{source});
+             && $rec && !_wishListable($rec->{kind}, $rec->{source}, $recRef->{url});
         push @entries, {
             text   => cstring($client, $moveStr{$target}),
             cmd    => [ 'listenlater', 'move' ],
@@ -3633,7 +3800,6 @@ sub _coverFromMeta {
     return undef;
 }
 
-
 sub _removeCommand {
     my $request = shift;
     my $id = $request->getParam('id');
@@ -3654,7 +3820,8 @@ sub _moveCommand {
     # a menu at all. Without this the redirect the add path just made is undone in one tap.
     if ($status eq 'wishlist') {
         my $rec = eval { Plugins::ListenLater::DB::get($id) };
-        if ($rec && !_wishListable($rec->{kind}, $rec->{source})) {
+        my $rref = ($rec && ref $rec->{ref} eq 'HASH') ? $rec->{ref} : {};
+        if ($rec && !_wishListable($rec->{kind}, $rec->{source}, $rref->{url})) {
             $log->warn('LL: refusing to move a ' . ($rec->{kind} // 'kind-less')
                 . ' row (source ' . ($rec->{source} // '?')
                 . ') to the Wish List — left where it was');
@@ -3684,12 +3851,30 @@ sub shutdownPlugin {
     # dispatches the needs-* states; _needsUninstall then rmtree's our directory). It calls
     # shutdownPlugin on every loaded module on the way down — so this is the last moment we
     # are loaded, our state pref already says we are going, and the file is still ours to
-    # tidy. Keyed on __PACKAGE__ because that is exactly what plugin.state is keyed on.
+    # tidy.
+    #
+    # KEYED ON THE PLUGIN'S SHORT NAME, NOT __PACKAGE__ — and that one word is what made
+    # this whole branch dead code from 0.1.108 until 0.1.126. plugin.state is keyed by the
+    # plugin DIRECTORY name, so `get(__PACKAGE__)` answered undef on every server, $state
+    # was always '', and an uninstall or disable stranded every LL entry AND every empty
+    # suppressor in Material's shared actions.json for good — the exact failure this hook
+    # exists to prevent, with the leftover suppressors then hiding ANOTHER plugin's
+    # 'online-*' on every podcast and radio row. Verified live over jsonrpc.js 2026-09-04:
+    #     ["","pref","plugin.state:ListenLater","?"]                  -> "enabled"
+    #     ["","pref","plugin.state:Plugins::ListenLater::Plugin","?"] -> null
+    # (same shape for MaterialSkin, Qobuz, Spotty, PitchforkReviews, Discography).
+    #
+    # NB the two PluginManager APIs genuinely differ, which is how the wrong one was picked:
+    # `dataForPlugin(__PACKAGE__)` in _dumpMaterialState IS keyed by MODULE and is correct
+    # as written (its output reads "Listen Later version = 0.1.124" on the live box). Module
+    # for dataForPlugin, short name for the plugin.state pref. Derived by splitting
+    # __PACKAGE__ rather than hardcoded, so a future rename cannot silently re-open this.
     #
     # Deliberately NOT gated on the material_action pref: the user may have turned it off
     # long ago, and the entries written while it was on still need removing. $departing
     # forces the full clean (see _clearMaterialActions).
-    my $state = eval { preferences('plugin.state')->get(__PACKAGE__) } || '';
+    my $shortName = (split /::/, __PACKAGE__)[1];
+    my $state = eval { preferences('plugin.state')->get($shortName) } || '';
     if ($state eq 'needs-uninstall' || $state eq 'needs-disable') {
         $log->warn("LL: $state — clearing our Material custom actions before we go");
         eval { _clearMaterialActions(1); 1 }

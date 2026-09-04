@@ -688,7 +688,13 @@ section('UNINSTALL: shutdownPlugin clears the file on the way out (0.1.108)');
 # the user clicks Apply and removes us at the NEXT start, so shutdownPlugin is the last
 # moment we can still tidy.
 my $STATE_NS = 'plugin.state';
-my $ME       = 'Plugins::ListenLater::Plugin';
+# The plugin's SHORT name, because that is the key Slim::Utils::PluginManager actually uses
+# — NOT the module name. This fixture used to say 'Plugins::ListenLater::Plugin', matching
+# the wrong key shutdownPlugin read, so all six assertions below passed against a branch
+# that could never run on a real server: the stub carried the bug (0.1.126). Verified live
+# over jsonrpc.js 2026-09-04 — plugin.state:ListenLater => "enabled", while the module-name
+# key answers null. ANTI-TEST: put the module name back and these six go red.
+my $ME       = 'ListenLater';
 sub set_state { Slim::Utils::Prefs::set_test_pref_ns($STATE_NS, $ME, $_[0]) }
 # Everything the departing clean must remove, in one list: our own view suppressors, a radio
 # one, and the file-only podcasts override.

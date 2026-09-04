@@ -87,7 +87,7 @@ CREATE TABLE IF NOT EXISTS albums (
     artwork     TEXT,
     ref_kind    TEXT,                                -- 'album_id' | 'url' | 'passthrough'
     ref_json    TEXT,                                -- JSON: { album_id, url, passthrough, _svc }
-    dedupe_key  TEXT    NOT NULL,                     -- normalised artist|album|year (+ '|t:<track>' for a track, '|p:<svc>:<id>' for a playlist)
+    dedupe_key  TEXT    NOT NULL,                     -- normalised artist|album|year (+ '|t:<track>' for a track, '|p:<svc>:<id>' for a playlist, '|e:<svc>:<url>' for a streaming podcast episode)
     added_at    INTEGER,
     played_at   INTEGER,
     play_count  INTEGER NOT NULL DEFAULT 0,
@@ -272,18 +272,11 @@ sub _migrateRefold {
     # so the one part that identifies the row cannot be disturbed by a fold change.
     my %group;
     for my $r (@$rows) {
-        my $new;
-        if (($r->{kind} || '') eq 'playlist' && $r->{dedupe_key} =~ /(\|p:.*)$/s) {
-            $new = '' . '|' . _norm($r->{album_title}) . '|' . '' . $1;
-        }
-        elsif (($r->{kind} || '') eq 'track' && length($r->{track_title} // '')) {
-            $new = dedupeKey($r->{artist}, $r->{album_title}, $r->{year}, $r->{track_title});
-        }
-        else {
-            $new = dedupeKey($r->{artist}, $r->{album_title}, $r->{year});
-        }
-        $r->{_new} = $new;
-        push @{ $group{ ($r->{source} // '') . "\0" . $new } }, $r;
+        # Same carrier as every other writer (_keyForRow). It prefers a stored '|p:'/'|e:' id
+        # tail over a rebuild, which is exactly what this migration needs: re-normalise the
+        # TITLE segment under the new fold, never touch the segment that identifies the row.
+        $r->{_new} = _keyForRow($r);
+        push @{ $group{ ($r->{source} // '') . "\0" . $r->{_new} } }, $r;
     }
 
     my ($rekeyed, $merged, $skipped, $failed) = (0, 0, 0, 0);
@@ -455,7 +448,7 @@ sub _migrateArtistPrefix {
         my $clean = $r->{album_title};
         next unless $clean =~ s/^\s*\Q$r->{artist}\E\s+[-\x{2012}\x{2013}\x{2014}\x{2015}\x{2212}]\s+//i
                  && length $clean;
-        my $key = dedupeKey($r->{artist}, $clean, $r->{year});
+        my $key = _keyForRow({ %$r, album_title => $clean });
         eval {
             $h->do('UPDATE albums SET album_title = ?, dedupe_key = ? WHERE id = ?',
                 undef, $clean, $key, $r->{id});
@@ -620,6 +613,92 @@ sub playlistKey {
     return '' . '|' . _norm($title) . '|' . '' . '|p:' . lc($source // '') . ':' . ($id // '');
 }
 
+# The dedupe key for a saved STREAMING podcast episode. Same problem as the playlist above and
+# the same answer: its TITLE is not an identity. "Trailer", "Episode 1", "Introduction" and
+# "Chapter I" are titles dozens of shows share, and a streaming episode row stores NO artist
+# and NO show to tell them apart — Deezer's and Spotify's browse rows carry an episode title
+# and a description, nothing naming the show (measured 2026-09-04: getMetadataFor supplies a
+# TITLE once Spotty's cache is warm, but never a show or publisher). So the plain track key
+# collapses to
+# '|||t:trailer' and DB::add swallows the second episode, leaving one row pointing at the
+# FIRST episode's url — the user gets a confirmation and a row that plays the wrong thing.
+#
+#   '' | <normalised episode title> | '' | 'e:<source>:<play url>'
+#
+# The PLAY URL is the id, and deliberately so: it is already this row's identity everywhere
+# else (Played::_markPlayedTrack matches DB::findTrackByUrl on it first), so keying on it
+# makes the dedupe agree with the match instead of inventing a second notion of sameness. It
+# also needs no per-service id parsing — the thing this whole area was cleaned up to avoid.
+#
+# AND THE TITLE IS NOT EVEN STABLE, which was measured after the fix and is the stronger
+# argument: the same episode stores a DIFFERENT title depending on whether the service's
+# metadata cache happened to be warm — the browse row's date-stripped line1 when cold, the
+# handler's own name when warm (verified live 2026-09-04: the same add sent "Trailer" and
+# stored "Mission Killer: …" once Spotty had the episode cached). A title-keyed row is
+# therefore not merely ambiguous between episodes, it is unstable for ONE episode. A url is
+# the same on both paths.
+# The source is inside the id segment for the same reason playlistKey puts it there:
+# findAnyByKey is cross-source.
+#
+# BUILT-IN Podcasts-app episodes deliberately do NOT use this. They store the show in
+# album_title (read from the RSS feed), so their key already carries a discriminator and
+# cannot collide; and unlike the streaming sources they exist in released builds (0.1.87,
+# where `main` is 0.1.93), so re-keying them would owe a migration for no defect. The rule is
+# therefore "an episode with no show stored keys on its url", which is exactly the set that
+# lost its discriminator.
+sub episodeKey {
+    my ($source, $url, $title) = @_;
+    return '' . '|' . _norm($title) . '|' . '' . '|e:' . lc($source // '') . ':' . ($url // '');
+}
+
+# THE ONE PLACE A ROW'S KEY IS DECIDED. Every writer goes through here — add(), updateArtist(),
+# updateYear(), _migrateArtistPrefix() and _migrateRefold() — because "what key does this row
+# have" was answered in five places and they had already drifted: updateArtist() and
+# updateYear() rebuilt with dedupeKey($artist,$album,$year) and NO track segment, so calling
+# either on a kind='track' row silently re-keyed it as an ALBUM ('|album x||t:song y' becomes
+# 'some artist|album x|'). The row then vanished from findTrackByArtistTitle and findSavedTrack
+# and could collide with a real album row, with the eval swallowing the UNIQUE violation. That
+# was unreachable when found — both callers sit behind _finishAlbumAdd, which only ever makes
+# album rows — but the guard lived entirely in the CALLER, so the first future caller on a track
+# row would have inherited it silently. Three separate bugs in this repo have now come from one
+# concept answered in more than one place; this closes it for keys.
+#
+# THE STORED TAIL WINS when there is one. A playlist's and an episode's identity is an id, not a
+# name, and it lives in the key's own '|p:…' / '|e:…' tail. Preferring that tail over a rebuild
+# is what lets _migrateRefold share this sub: a fold change may legitimately alter how the TITLE
+# segment normalises, but it must never disturb the id — and a rebuild would silently do so if
+# ref_json ever drifted from the key. Build from `ref` only when there is no tail to keep, which
+# is the add path.
+sub _keyForRow {
+    my ($rec) = @_;
+    my $source = $rec->{source} // '';
+    my $kind   = ($rec->{kind} && $rec->{kind} =~ /^(?:track|playlist)$/) ? $rec->{kind} : 'album';
+    my $stored = $rec->{dedupe_key} // '';
+
+    # `ref` decoded, whichever form the caller holds: add() and get() carry the hash, the
+    # migrations select raw ref_json.
+    my $ref = (ref $rec->{ref} eq 'HASH') ? $rec->{ref}
+            : (defined $rec->{ref_json} ? (eval { $JSON->decode($rec->{ref_json}) } || {}) : {});
+
+    if ($kind eq 'playlist') {
+        return '' . '|' . _norm($rec->{album_title}) . '|' . '' . $1 if $stored =~ /(\|p:.*)$/s;
+        return playlistKey($source, $ref->{playlist_id}, $rec->{album_title});
+    }
+
+    if ($kind eq 'track') {
+        return '' . '|' . _norm($rec->{track_title}) . '|' . '' . $1 if $stored =~ /(\|e:.*)$/s;
+        # No tail yet: the ADD path says whether this is a streaming episode (Plugin::
+        # _insertTrackRow sets it — DB has no business knowing what a podcast is, exactly as it
+        # does not know what a playlist is).
+        my $epUrl = $rec->{episode} ? $ref->{url} : undef;
+        return episodeKey($source, $epUrl, $rec->{track_title})
+            if defined $epUrl && length $epUrl;
+        return dedupeKey($rec->{artist}, $rec->{album_title}, $rec->{year}, $rec->{track_title});
+    }
+
+    return dedupeKey($rec->{artist}, $rec->{album_title}, $rec->{year});
+}
+
 sub _rowToHash {
     my ($row) = @_;
     return undef unless $row;
@@ -643,11 +722,9 @@ sub add {
     # A three-way whitelist, not a binary: anything unrecognised still falls back to 'album',
     # which is what every legacy row and every caller that passes no kind at all relies on.
     my $kind   = ($rec->{kind} && $rec->{kind} =~ /^(?:track|playlist)$/) ? $rec->{kind} : 'album';
-    my $key    = ($kind eq 'track')
-        ? dedupeKey($rec->{artist}, $rec->{album_title}, $rec->{year}, $rec->{track_title})
-      : ($kind eq 'playlist')
-        ? playlistKey($source, ($rec->{ref} || {})->{playlist_id}, $rec->{album_title})
-        : dedupeKey($rec->{artist}, $rec->{album_title}, $rec->{year});
+    # One carrier — see _keyForRow. `episode` on the rec is how Plugin::_insertTrackRow tells
+    # it this is a streaming podcast episode.
+    my $key    = _keyForRow({ %$rec, kind => $kind, source => $source });
 
     # Block duplicates across EVERY source, not just the same one: the same album
     # saved from a different streaming service (or the library) is still the same
@@ -691,7 +768,7 @@ sub updateArtist {
     return unless $id && defined $artist && length $artist;
     my $rec = get($id) or return;
     return if defined $rec->{artist} && length $rec->{artist};   # don't overwrite a real artist
-    my $key = dedupeKey($artist, $rec->{album_title}, $rec->{year});
+    my $key = _keyForRow({ %$rec, artist => $artist });
     eval { dbh()->do('UPDATE albums SET artist = ?, dedupe_key = ? WHERE id = ?', undef, $artist, $key, $id); 1 }
         or $log->warn("ListenLater: updateArtist($id) failed: $@");
     return;
@@ -712,7 +789,7 @@ sub updateYear {
     return unless $id && defined $year && $year =~ /^(?:19|20)\d{2}$/;
     my $rec = get($id) or return;
     return if $rec->{year};                                       # don't overwrite a real year
-    my $key = dedupeKey($rec->{artist}, $rec->{album_title}, $year);
+    my $key = _keyForRow({ %$rec, year => $year });
     eval { dbh()->do('UPDATE albums SET year = ?, dedupe_key = ? WHERE id = ?', undef, $year, $key, $id); 1 }
         or $log->warn("ListenLater: updateYear($id) failed: $@");
     return;

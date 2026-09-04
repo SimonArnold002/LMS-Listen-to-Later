@@ -1412,17 +1412,82 @@ sub _hasPodcastHandler {
     return _hasSchemeHandler('podcast://https://example.com/e.mp3');
 }
 
-# Is this source a podcast EPISODE source? Two of them now: the built-in Podcasts app
-# ('podcast') and Deezer's own podcast scheme ('deezerpodcast'). ONE predicate rather than
-# four `eq 'podcast'` tests, because Browse asks the question three times (glyph, type word,
-# whether to print the source) and a fourth site would otherwise be added without them —
-# which is exactly how 'podcast' came to be spelled out at each. Spotify episodes are NOT
-# here: Spotty plays them through 'spotify://episode:<id>', so they are stored under source
-# 'spotify' and read as a Spotify track, which is what they are.
-sub isPodcastSource {
-    my ($source) = @_;
-    return 0 unless defined $source && length $source;
-    return ($source eq 'podcast' || $source eq 'deezerpodcast') ? 1 : 0;
+# Is this row a podcast EPISODE? THREE sources supply them and they answer in two different
+# ways, which is the whole reason this takes a URL as well as a source:
+#
+#   built-in Podcasts app   source 'podcast'         — its own source tag
+#   Deezer                  source 'deezerpodcast'   — its own scheme, so its own source tag
+#   Spotify (Spotty)        source 'spotify'         — NO tag of its own; only the url says
+#
+# Spotify is the one that cannot be answered from the source. Spotty plays an episode through
+# 'spotify://episode:<id>' — the same scheme as a music track — so a source-only predicate
+# reads it as an ordinary Spotify track, which is how a Spotify episode came to be offered
+# the Wish List while the identical Deezer one was redirected out of it (0.1.126). The url is
+# the only place the difference is stated, so the url is asked for.
+#
+# ONE predicate rather than an `eq` test at each site, because the question has FOUR
+# consumers — Browse's glyph, its type word, the Wish List rule, and the type word's source
+# segment — and a fifth would otherwise be written without them. That is exactly how
+# 'podcast' came to be spelled out at each site before 0.1.124.
+#
+# Asked of the STORED shape (source + play url), never of the menu the row was tapped in:
+# Material builds a menu per surface, not per row.
+#
+# Both Spotify spellings are accepted. Spotty's favurl is a bare URI ('spotify:episode:<id>')
+# and normaliseFavurl inserts the '//' before anything stores it, so a row written by 0.1.113
+# or later always carries the '//' form — but a row saved before that normalisation existed
+# can carry the bare one, and reading it as a music track is precisely the bug this closes.
+sub isPodcastEpisode {
+    my ($source, $url) = @_;
+    if (defined $source && length $source) {
+        return 1 if $source eq 'podcast' || $source eq 'deezerpodcast';
+    }
+    return defined spotifyEpisodeUri($url) ? 1 : 0;
+}
+
+# A Spotify episode's canonical URI ('spotify:episode:<id>'), or undef if this url is not one.
+#
+# USED AS A PREDICATE, not for its value (0.1.127). Two callers: isPodcastEpisode above, which
+# only asks whether it answered, and _saveTrackRecord, which uses it as the flag that says
+# "this row's title and artist are episode-shaped, correct them". Nothing consumes the URI
+# itself any more — 0.1.126's `Plugins::Spotty::API::episode` lookup, which wanted the bare
+# form, was removed with the rest of that path.
+#
+# It still RETURNS the URI rather than 1, and that is deliberate: it is the one place the
+# shape is written out, so a future caller that does need the id has somewhere to get it that
+# cannot disagree with the predicate. A second spelling anywhere would mean a row that is a
+# podcast to one reader and a music track to another.
+#
+# Both spellings are accepted. Spotty's favurl is the bare URI and normaliseFavurl inserts the
+# '//' before anything is stored, so a row written from 0.1.113 on carries
+# 'spotify://episode:<id>' — but a row saved before that normalisation existed carries the bare
+# one, and reading THAT as a music track is the bug this closes.
+sub spotifyEpisodeUri {
+    my ($url) = @_;
+    return undef unless defined $url && length $url;
+    return ($url =~ m{^spotify:(?://)?(episode:[^/?#]+)$}i) ? "spotify:$1" : undef;
+}
+
+# Strip the release date Spotty prefixes onto an episode's browse-row title.
+#
+# OPML::episodesList builds the row as `join(' - ', $episode->{release_date}, $title)` (read
+# from the plugin source 2026-09-04), and Material hands us that whole string as $TITLE — so
+# a saved episode was titled "2026-01-05 - Mission Killer". That is not cosmetic: Spotty's
+# own getMetadataFor reports the PLAIN name at play time, so the prefixed title never matched
+# Played's metadata fallback (DB::findSavedTrack keys on the normalised track title).
+#
+# Spotify's release_date precision varies, so 'YYYY-MM-DD' and 'YYYY-MM' are both matched,
+# anchored, and only with the exact ' - ' separator that join built. A BARE 'YYYY - ' is
+# DELIBERATELY NOT stripped, even though Spotify can emit that precision: it is
+# indistinguishable from a real episode title — "1979 - The Year In Review" is a perfectly
+# ordinary name — and mangling a genuine title is worse than leaving a date on a rare one.
+# Podcast episodes carry day precision essentially always; shows are what lose it.
+sub stripEpisodeDatePrefix {
+    my ($title) = @_;
+    return $title unless defined $title && length $title;
+    my $t = $title;
+    return $title unless $t =~ s{^\d{4}-\d{2}(?:-\d{2})? - (?=\S)}{};
+    return $t;
 }
 
 # How a source is written in a row's subtitle. `ucfirst` was the whole rule until a source

@@ -892,6 +892,31 @@ is('a Spotify EPISODE still stores',  $r->{kind},     'track');
 is('...with source spotify',          $r->{source},   'spotify');
 is('...and a playable episode url',   $r->{ref}{url}, 'spotify://episode:0tQdtR5srOLPVaevOrLyhR');
 
+# ...and it must READ as a podcast, not as a Spotify track. Spotty gives an episode the same
+# source tag and the same scheme as a music track, so the url is the only thing that says
+# which it is — and until 0.1.126 nothing asked, so a Spotify episode drew the ♪ note, said
+# "Track", and was allowed into the Wish List. The row is passed WHOLE to both renderers,
+# because a predicate handed only the source cannot answer for this service at all.
+is('...reads as a podcast episode',
+    Plugins::ListenLater::Sources::isPodcastEpisode($r->{source}, $r->{ref}{url}), 1);
+is('...so the row draws the podcast glyph, not the music note',
+    Plugins::ListenLater::Browse::_glyphFor($r), "\x{275d}");
+is('...and its type word is Podcast',
+    Plugins::ListenLater::Browse::_typeLabel(undef, $r), 'PLUGIN_LL_TYPE_PODCAST');
+# POSITIVE CONTROL, and the reason the url is tested rather than the source: an ordinary
+# Spotify TRACK must be untouched by all of it. Without this, "spotify is always a podcast"
+# would pass every assertion above and silently relabel the whole service.
+{
+    my $tr = add(kind => 'track', trackname => 'Just A Song', artist => 'Blondie',
+                 svc => 'spotty', favurl => 'spotify:track:4cOdK2wGLETKBW3PvgPWqT');
+    is('a Spotify TRACK is not a podcast',
+        Plugins::ListenLater::Sources::isPodcastEpisode($tr->{source}, $tr->{ref}{url}), 0);
+    is('...it keeps the single-note glyph',
+        Plugins::ListenLater::Browse::_glyphFor($tr), "\x{266a}");
+    is('...and still says Track',
+        Plugins::ListenLater::Browse::_typeLabel(undef, $tr), 'PLUGIN_LL_TYPE_TRACK');
+}
+
 # TIDAL mixes ride the same gate, for a reason that is NOT "a mix is unaddable": TIDAL's own
 # plugin routes them to getMix($params->{id}) and playlists to getPlaylist($params->{uuid}),
 # two different API calls, so a mix id handed to the playlist path would fail. Refusing is
@@ -940,12 +965,12 @@ is('...keeping the play url intact', $r->{ref}{url}, 'deezerpodcast://927648401'
 # The source tag is deliberately NOT folded onto 'deezer': the album adapter has nothing to
 # do with an episode, and a tag of its own is what lets Browse mark the row as a podcast.
 # These three are what Browse asks of it.
-is('...and reads as a podcast source',
-    Plugins::ListenLater::Sources::isPodcastSource($r->{source}), 1);
+is('...and reads as a podcast episode',
+    Plugins::ListenLater::Sources::isPodcastEpisode($r->{source}, $r->{ref}{url}), 1);
 is('...labelled Deezer, not Deezerpodcast',
     Plugins::ListenLater::Sources::sourceLabel($r->{source}), 'Deezer');
-is('...while plain deezer is not a podcast source',
-    Plugins::ListenLater::Sources::isPodcastSource('deezer'), 0);
+is('...while plain deezer is not',
+    Plugins::ListenLater::Sources::isPodcastEpisode('deezer'), 0);
 
 # ANTI-TEST: the SERIES stays refused. Supporting episodes must not open the container.
 $r = add(name => 'The Minimalists', svc => 'deezer', favurl => 'deezer://podcast:19887');
@@ -1013,6 +1038,19 @@ is('a built-in podcast episode is redirected out of the Wish List', $where, 'lat
                      list => 'wishlist');
 is('a DEEZER episode is redirected too — it stores through _saveTrackRecord', $where, 'later');
 
+# The third source, and the one 0.1.125 could not catch: Spotify says "episode" only in the
+# url, so the redirect had nothing to key on and the episode went straight into the Wish List.
+($where) = landed_in(kind => 'track', trackname => 'Spotify Ep', artist => 'Some Show',
+                     svc => 'spotty', favurl => 'spotify:episode:5wMPFS9B5V7gg6hZ3UZ7hf',
+                     list => 'wishlist');
+is('a SPOTIFY episode is redirected too — the url is what says so', $where, 'later');
+
+# ANTI-TEST for that one specifically: the guard is the episode ref, not the service.
+($where) = landed_in(kind => 'track', trackname => 'Buyable Spotify Track',
+                     artist => 'Some Other Band', svc => 'spotty',
+                     favurl => 'spotify:track:1cOdK2wGLETKBW3PvgPWqT', list => 'wishlist');
+is('...while an ordinary Spotify TRACK still reaches the Wish List', $where, 'wishlist');
+
 # ANTI-TESTS. The redirect keys on what the row IS, not on the word "wishlist", so an
 # ordinary track and an ordinary album must still get there.
 # Identities unused anywhere else in this file: the cross-kind single dedupe is live here,
@@ -1037,6 +1075,14 @@ is('_wishListable: an album',
     Plugins::ListenLater::Plugin::_wishListable('album', 'qobuz'), 1);
 is('_wishListable: no record to judge (kind undef) fails OPEN',
     Plugins::ListenLater::Plugin::_wishListable(undef, undef), 1);
+# Spotify, both ways round — the source is identical, so ONLY the third argument separates
+# them. Drop the url at any of the four consumers and the episode becomes buyable again.
+is('_wishListable: a Spotify podcast episode',
+    Plugins::ListenLater::Plugin::_wishListable('track', 'spotify',
+        'spotify://episode:0tQdtR5'), 0);
+is('_wishListable: an ordinary Spotify track',
+    Plugins::ListenLater::Plugin::_wishListable('track', 'spotify',
+        'spotify://track:0tQdtR5'), 1);
 
 # --- the saved row's own menu, and the command behind it ---------------------
 # The menu is presentation; the command is the enforcement. Both are asked, because Material
@@ -1055,15 +1101,20 @@ sub move_to {
     return $rec ? $rec->{status} : '(gone)';
 }
 
-for my $c ( [ 'a built-in podcast episode', 'podcast',      'track',    0 ],
-            [ 'a Deezer podcast episode',   'deezerpodcast','track',    0 ],
-            [ 'a playlist',                 'tidal',        'playlist', 0 ],
-            [ 'an ordinary album',          'qobuz',        'album',    1 ] ) {
-    my ($what, $source, $kind, $allowed) = @$c;
+# The stored ref goes in as well, because for Spotify it is the ONLY thing separating the
+# episode from the track: both rows below are kind='track', source='spotify'.
+for my $c ( [ 'a built-in podcast episode', 'podcast',      'track',    0, undef ],
+            [ 'a Deezer podcast episode',   'deezerpodcast','track',    0, 'deezerpodcast://1' ],
+            [ 'a Spotify podcast episode',  'spotify',      'track',    0, 'spotify://episode:e1' ],
+            [ 'an ordinary Spotify track',  'spotify',      'track',    1, 'spotify://track:t1' ],
+            [ 'a playlist',                 'tidal',        'playlist', 0, undef ],
+            [ 'an ordinary album',          'qobuz',        'album',    1, undef ] ) {
+    my ($what, $source, $kind, $allowed, $url) = @$c;
     my ($id) = Plugins::ListenLater::DB::add({
         source => $source, kind => $kind, artist => 'A',
-        track_title => ($kind eq 'track' ? "T-$source" : undef),
-        album_title => "Al-$source", ref_kind => 'search', ref => {},
+        track_title => ($kind eq 'track' ? "T-$what" : undef),
+        album_title => "Al-$what", ref_kind => 'search',
+        ref => (defined $url ? { url => $url } : {}),
     }, 'later');
     is("menu on $what: Move to Wish List " . ($allowed ? 'offered' : 'withheld'),
         (menu_titles($id) =~ /PLUGIN_LL_MOVE_WISHLIST/ ? 'offered' : 'withheld'),
@@ -1072,6 +1123,214 @@ for my $c ( [ 'a built-in podcast episode', 'podcast',      'track',    0 ],
         move_to($id, 'wishlist'), ($allowed ? 'wishlist' : 'later'));
     # Whatever the verdict, the OTHER moves are untouched — the guard is Wish-List-only.
     is('...while Move to Played is unaffected', move_to($id, 'played'), 'played');
+}
+
+# ---------------------------------------------------------------------------
+# A podcast episode's browse row is DISPLAY-shaped, and the fix is judged by whether PLAYED
+# can find the row afterwards — not by whether the row looks tidy.
+#
+# THE CONTRACT BEING TESTED (Played.pm): a track row's identity is its play URL.
+# `_markPlayedTrack` matches `DB::findTrackByUrl($source, $url)` FIRST — an exact string
+# compare — and only falls back to `findSavedTrack(source, artist, album, title)` when that
+# misses. So the URL is what must be right, and the naming is the fallback.
+#
+# The naming is still worth getting right, and there is exactly ONE honest source for it:
+# `Sources::playingMeta`, which is `handlerForURL($url)->getMetadataFor(...)` — the very sub
+# Played falls back to. Asking it at ADD time is what makes the two ends agree by
+# construction. Previous attempts asked each service's own API instead and had to guess what
+# it would return; this asks the thing that will actually be compared against.
+section('a podcast episode stores what the handler will report while playing');
+
+# The handler stub is modelled on MEASURED output — Spotty's own getMetadataFor for a
+# spotify:// url, read from the live server log 2026-09-04:
+#     url => "spotify://track:5Oby…", album => "Save My Love",
+#     artist => "Kygo, Khalid, Gryffin", title => "Save My Love"
+# Note what that shape does NOT contain: any album id, and any separate publisher field. The
+# handler answers a flat trio of strings, which is all this path needs.
+our %HANDLER_META;
+our $HANDLER_ASKED;
+{
+    no strict 'refs'; no warnings 'redefine';
+    *{'Slim::Player::ProtocolHandlers::handlerForURL'} = sub {
+        my $u = $_[1] // '';
+        return 'Plugins::Deezer::ProtocolHandler' if $u =~ m{^(?:deezer)?podcast://};
+        return 'FakeSpotifyHandler'               if $u =~ m{^spotify://};
+        return undef;
+    };
+    *{'FakeSpotifyHandler::getMetadataFor'} = sub {
+        my ($self, $client, $url) = @_;
+        $HANDLER_ASKED = $url;
+        return $HANDLER_META{$url} || {};
+    };
+}
+
+my $EPCL  = bless {}, 'FakePlayingClient';
+my $EPURL = 'spotify://episode:9wMPFS9B5V7gg6hZ3UZ7hf';
+$HANDLER_META{$EPURL} = {
+    title  => 'Mission Killer',
+    album  => 'Serial',
+    artist => 'Serial Productions',
+};
+
+$r = add(_client => $EPCL,
+         name => '2026-01-05 - Mission Killer',
+         artist => 'In this episode we follow a case that has haunted the department for '
+                 . 'thirty years, and the detective who would not let it go...',
+         svc => 'spotty', favurl => 'spotify:episode:9wMPFS9B5V7gg6hZ3UZ7hf');
+
+is('the episode stores', ($r ? $r->{kind} : 'nothing'), 'track');
+is('...the release-date prefix is off the title', $r->{track_title}, 'Mission Killer');
+is('...the description is NOT stored as the artist', $r->{artist}, 'Serial Productions');
+is('...the show is stored as the parent album',      $r->{album_title}, 'Serial');
+is('...and the handler was asked about the STORED url',  $HANDLER_ASKED, $EPURL);
+
+# THE ASSERTION THIS SECTION EXISTS FOR — both routes Played::_markPlayedTrack takes, driven
+# with exactly what the handler reports.
+is('PLAYED finds it by url — the PRIMARY route, and the one that must never depend on naming',
+    (Plugins::ListenLater::DB::findTrackByUrl('spotify', $EPURL) || {})->{id}, $r->{id});
+# AND THE METADATA FALLBACK DELIBERATELY DOES NOT FIND IT — this is the trade the url-based
+# episode key makes, and it is recorded as an assertion so it can never be lost silently.
+# DB::findSavedTrack matches a key shaped 'artist|album|%|t:<title>'; an episode's key ends in
+# '|e:<source>:<url>' and has no '|t:' segment at all, so it cannot match by construction.
+#
+# That costs nothing REAL, for two reasons worth keeping. (1) It could not match in the field
+# anyway: a streaming episode stores no artist and no show (measured — the browse row carries
+# neither and getMetadataFor answers nothing for an unplayed episode url), while the handler
+# reports a publisher and a show at play time, so the two sides never lined up. The old green
+# assertion here only passed because the STUB filled values the real path does not have.
+# (2) The fallback exists for url DRIFT, which episode URIs do not have — 'spotify://episode:<id>'
+# and 'deezerpodcast://<id>' are stable ids, not signed or expiring urls like a Qobuz stream.
+# So the primary route below is the whole story, and it is the one asserted.
+is('the metadata fallback does NOT find an episode — it is url-keyed, by design',
+    (Plugins::ListenLater::DB::findSavedTrack('spotify', 'Serial Productions', 'Serial',
+                                              'Mission Killer') || {})->{id}, undef);
+
+# THE WHOLE REASON THE EPISODE KEY IS URL-BASED. Two episodes with the SAME TITLE from
+# different shows — "Trailer", "Episode 1", "Introduction" and "Chapter I" are titles dozens of
+# shows share. A streaming episode row stores no artist and no show, so under the plain track
+# key both collapse to '|||t:trailer': DB::add returns the FIRST row, the user gets a
+# confirmation toast, and the single row left in the list plays the WRONG episode.
+# ANTI-TEST: revert episodeKey and these two go red with 'collided'.
+{
+    my $u1 = 'spotify://episode:aaaaaaaaaaaaaaaaaaaaaa';
+    my $u2 = 'spotify://episode:bbbbbbbbbbbbbbbbbbbbbb';
+    my $e1 = add(_client => $EPCL, name => '2026-01-01 - Trailer', artist => 'blurb one',
+                 svc => 'spotty', favurl => 'spotify:episode:aaaaaaaaaaaaaaaaaaaaaa');
+    my $e2 = add(_client => $EPCL, name => '2026-02-02 - Trailer', artist => 'blurb two',
+                 svc => 'spotty', favurl => 'spotify:episode:bbbbbbbbbbbbbbbbbbbbbb');
+    is('two same-titled episodes from different shows BOTH store',
+        (($e1 && $e2 && $e1->{id} != $e2->{id}) ? 'two rows' : 'collided'), 'two rows');
+    is('...told apart by the play url, which is the row identity everywhere else',
+        $e2->{dedupe_key}, '|trailer||e:spotify:' . $u2);
+    # And each still resolves to its OWN episode — the failure was not just "not saved", it
+    # was a row that played someone else's audio.
+    is('...and each row keeps its own play url',
+        (Plugins::ListenLater::DB::findTrackByUrl('spotify', $u1) || {})->{id}, $e1->{id});
+    is('...both ways round',
+        (Plugins::ListenLater::DB::findTrackByUrl('spotify', $u2) || {})->{id}, $e2->{id});
+}
+
+# THE FALLBACK, and it is the important case rather than an edge one: a handler that knows
+# nothing about this url. The row must still store, still be playable, and still be findable
+# by PLAYED via the url — because the url never depended on the lookup.
+{
+    my $u = 'spotify://episode:cc3cc3cc3cc3cc3cc3cc3c';
+    my $f = add(_client => $EPCL, name => '2026-03-03 - Unresolvable',
+                artist => 'a blurb the row supplied', svc => 'spotty',
+                favurl => 'spotify:episode:cc3cc3cc3cc3cc3cc3cc3c');
+    is('an episode the handler cannot describe still stores', ($f ? $f->{kind} : 'nothing'), 'track');
+    is('...with the date prefix still stripped',   $f->{track_title}, 'Unresolvable');
+    is('...and the blurb still kept out of the artist', $f->{artist}, undef);
+    is('...and PLAYED still finds it by url, which is what actually matters',
+        (Plugins::ListenLater::DB::findTrackByUrl('spotify', $u) || {})->{id}, $f->{id});
+}
+
+# FILL-ONLY: a track-context add (queue / Now Playing) already carries the handler's values,
+# and the row the user tapped must not be replaced by a second lookup.
+{
+    my $u = 'spotify://episode:6wMPFS9B5V7gg6hZ3UZ7hf';
+    $HANDLER_META{$u} = { title => 'Episode Two', album => 'A Different Show',
+                          artist => 'A Different Publisher' };
+    my $r2 = add(_client => $EPCL,
+                 kind => 'track', trackname => 'Episode Two', name => 'Serial',
+                 artist => 'A Publisher The Row Knew', svc => 'spotty',
+                 favurl => 'spotify:episode:6wMPFS9B5V7gg6hZ3UZ7hf');
+    is('a track-context episode keeps the artist the row supplied',
+        $r2->{artist}, 'A Publisher The Row Knew');
+    is('...and the album it supplied', $r2->{album_title}, 'Serial');
+}
+
+# ANTI-TEST: none of this touches an ordinary Spotify TRACK. The tidy and the fill are both
+# gated on the row being a podcast episode, so a music track keeps what Material sent and the
+# handler is never consulted for it.
+{
+    $HANDLER_ASKED = undef;
+    my $r3 = add(_client => $EPCL,
+                 kind => 'track', trackname => 'Heart of Glass', artist => 'Blondie',
+                 svc => 'spotty', favurl => 'spotify:track:7wMPFS9B5V7gg6hZ3UZ7hf');
+    is('an ordinary Spotify track keeps its artist', $r3->{artist}, 'Blondie');
+    is('...and the handler is never asked about it', $HANDLER_ASKED, undef);
+}
+
+# A DEEZER episode takes the identical path — this is the "no different from other services"
+# assertion. Same fill, same reader, no per-service branch.
+{
+    my $u = 'deezerpodcast://927648402';
+    $HANDLER_META{$u} = { title => 'The Floor', album => 'The Minimalists' };
+    my $d = add(_client => $EPCL, kind => 'track', trackname => 'The Floor',
+                svc => 'deezer', favurl => 'deezerpodcast://927648402');
+    is('a Deezer episode stores', ($d ? $d->{kind} : 'nothing'), 'track');
+    is('...and PLAYED finds it by url, exactly as for Spotify',
+        (Plugins::ListenLater::DB::findTrackByUrl('deezerpodcast', $u) || {})->{id}, $d->{id});
+}
+
+
+# ---------------------------------------------------------------------------
+# A TRACK ROW'S IDENTITY IS ITS PLAY URL, at the ADD end as well as the Played end.
+#
+# Played::_markPlayedTrack has always matched findTrackByUrl FIRST and only then looked at
+# names. The add path decided sameness purely by NAME, behind two guards that both require
+# `length $artist` — so the two ends disagreed about what a duplicate is. An artist-less track
+# added from two surfaces (a queue row sends $ALBUMNAME, a browse row does not) skipped both
+# guards, keyed differently, and stored TWICE for one url; Played then marked whichever row
+# came back first and the twin sat in the list for ever.
+# ANTI-TEST: remove the findTrackByUrl check in _insertTrackRow and the first two go red.
+section('the same play url is the same track, whatever the row called it');
+{
+    my $u = 'qobuz://999111.flac';
+    my $a = add(kind => 'track', trackname => 'Untitled', svc => 'qobuz', favurl => $u);
+    # Same url, same (absent) artist, but a DIFFERENT album — the surface difference that used
+    # to produce two keys and therefore two rows.
+    my $b = add(kind => 'track', trackname => 'Untitled', name => 'Some Album',
+                svc => 'qobuz', favurl => $u);
+    is('an artist-less track stores once', ($a ? $a->{kind} : 'nothing'), 'track');
+    is('...and the same url from another surface does NOT store again',
+        (defined $b ? 'stored twice' : 'deduped'), 'deduped');
+    is('...the surviving row is the first one, and still resolves by url',
+        (Plugins::ListenLater::DB::findTrackByUrl('qobuz', $u) || {})->{id}, $a->{id});
+
+    # ANTI-REGRESSION: a different track still stores separately — the url check must not
+    # over-dedupe.
+    my $c = add(kind => 'track', trackname => 'Something Else', svc => 'qobuz',
+                favurl => 'qobuz://999222.flac');
+    is('a different track still stores separately',
+        (($c && $c->{id} != $a->{id}) ? 'two rows' : 'wrongly deduped'), 'two rows');
+
+    # KNOWN RESIDUAL, pinned so it is a recorded limitation rather than a surprise. Two
+    # genuinely DIFFERENT music tracks that are both artist-less AND share a title still
+    # collapse, because the name key is '|||t:<title>' for both and DB::add dedupes on the key
+    # BEFORE _insertTrackRow's url check is ever consulted. This is the same shape as the
+    # podcast-episode collision that DB::episodeKey fixed, and the same fix would work — but a
+    # music track row would have to be re-keyed on its url, and unlike streaming episodes those
+    # rows exist in released builds (track saves ship from 0.1.74; `main` is 0.1.93), so it
+    # owes a migration rather than a key change. Left as-is deliberately: it needs a track with
+    # NO artist at all (Material populates $ARTISTNAME for track rows on every service checked
+    # — a Qobuz browse row carries "Title\nArtist - Album") AND a second one sharing its
+    # title. If artist-less track rows ever turn out to be common, revisit this with a rung.
+    my $d = add(kind => 'track', trackname => 'Untitled', svc => 'qobuz',
+                favurl => 'qobuz://999333.flac');
+    is('two artist-less tracks sharing a title still collapse (known, needs a migration)',
+        (defined $d ? 'stored' : 'collapsed'), 'collapsed');
 }
 
 printf "\n%d passed, %d failed\n", $pass, $fail;

@@ -22,6 +22,38 @@ with nowhere to live is.*
 them only if you have genuinely NEW information — a case the recorded reasoning
 does not cover. Say which ledger entry you are challenging and what changed.
 
+### Identity: what Played actually matches on — READ THIS BEFORE ANY NAMING CHANGE
+
+Four review rounds re-derived this per service and got it wrong in a different way each time.
+It is two rules, they differ by KIND, and neither is a matter of judgement — both are read
+straight out of `Played.pm`.
+
+**A TRACK row's identity is its PLAY URL.** `Played::_markPlayedTrack` calls
+`DB::findTrackByUrl($source, $url)` first, an EXACT string compare against the stored
+`ref.url`. Only when that misses does it fall back to
+`DB::findSavedTrack($source, $artist, $album, $title)`. So:
+
+> **Get the URL right and Played cannot fail. Naming is the fallback, plus display and the
+> dedupe key.** A row whose URL matches will move to Played however badly its names read.
+
+**An ALBUM row's identity is its NAMES.** `Played::_matchRecord` never looks at a URL for a
+remote track — it matches `findByArtistAlbum` on artist + album as `Sources::playingMeta`
+reports them, then two progressively looser fallbacks. There is no album-id route for
+streaming, for ANY service, and there never was; do not report its absence as a Spotify gap.
+
+**The corollary, and the rule that replaced four rounds of guessing.** When an add has to fill
+a blank name, it asks `Sources::playingMeta` — `handlerForURL($url)->getMetadataFor(...)` — the
+SAME sub Played will compare against later. That is the only source that cannot disagree with
+the play side, because it *is* the play side. Asking a service's own API instead means
+predicting what its protocol handler will report, which is the thing every previous attempt got
+wrong. `Plugin::_fillFromPlayingMeta` is the one carrier; it is synchronous, reads the service
+plugin's cache, makes no HTTP call, and answers `{}` rather than failing.
+
+**So, before "fixing" a stored name:** say which of the two contracts the row is under, and
+whether the change affects the PRIMARY match or only the fallback. If it is only the fallback,
+it is a display and dedupe question, not a Played bug — and it is not worth a per-service
+subsystem.
+
 ### A. NOT FINDINGS — deliberate, fleet-wide
 
 - **The zip is not rebuilt and `repo.xml <sha>` is not recomputed in the working
@@ -86,9 +118,14 @@ does not cover. Say which ledger entry you are challenging and what changed.
   streaming side refuses one (0.1.123). THREE sources supply episodes** — the built-in Podcasts
   app (`podcast://`, matched against subscribed feeds), Deezer (`deezerpodcast://<id>`, 0.1.124)
   and Spotify (`spotify://episode:<id>`, stored under source `spotify`). Qobuz, TIDAL and
-  Bandcamp have no podcasts at all. Ask `Sources::isPodcastSource`, never `eq 'podcast'` — it is
-  the predicate Browse's glyph, type word and source-segment all share, and Spotify is
-  deliberately NOT in it (Spotty plays an episode as a Spotify track, which is what it is). The Podcasts app has always refused a series:
+  Bandcamp have no podcasts at all. Ask `Sources::isPodcastEpisode($source, $url)`, never
+  `eq 'podcast'` — it is the predicate Browse's glyph and type word share with the Wish List
+  rule. **It takes the URL as well as the source, and that is not decoration (0.1.126):** the
+  built-in app and Deezer each have a source tag of their own, and Spotify has none — Spotty
+  stores an episode under plain `spotify`, identical to a music track, and says `episode:`
+  only in the url. A source-only predicate therefore cannot answer for a third of the
+  sources, which is exactly how a Spotify episode kept the ♪ glyph, the word "Track" and a
+  Wish List entry after 0.1.125 closed the identical Deezer hole. The Podcasts app has always refused a series:
   a feed row arrives as `kind:podcast` with the FEED name as `$TITLE`, `Podcast::resolveEpisode`
   finds no episode containing it, and `_rejectAdd` says so (verified live 2026-09-03 on
   "Darko.Audio podcast" — nothing stored). The STREAMING side did not, because the two gates it
@@ -102,6 +139,43 @@ does not cover. Say which ledger entry you are challenging and what changed.
   path, still stored; the anti-test in `t_addpath.pl` asserts BOTH shapes for exactly that
   reason (4 red without the gate, and each names which wrong shape it stored as). Supporting
   series would be a `kind='playlist'`-shaped container feature per service, not a gate change.
+- **AN EPISODE'S NAMES COME FROM THE HANDLER, NOT FROM THE SERVICE'S API (0.1.127).** A browse
+  row is display-shaped — Spotty packs the release date into the title and the description into
+  the artist slot — so the row's own strings are corrected (`stripEpisodeDatePrefix`, blurb
+  dropped) and anything still blank is filled by `Plugin::_fillFromPlayingMeta` from
+  `Sources::playingMeta`. **Do not "improve" this by asking the service's API for the show and
+  publisher.** 0.1.126 did exactly that, and it was reverted: it predicted what the protocol
+  handler would report later instead of asking it, its stub was written from the same prediction
+  so it could not catch a wrong guess, and the account it depends on is rate-limited. The URL is
+  the identity here — see *Identity: what Played actually matches on*. A blank show is a display
+  and dedupe shortcoming, never a Played failure.
+- **THE DEDUPE KEY HAS ONE WRITER: `DB::_keyForRow` (0.1.129). Do not add a second.** Five
+  writers used to answer "what key does this row have" — `add`, `updateArtist`, `updateYear`,
+  `_migrateArtistPrefix`, `_migrateRefold` — and two had drifted: `updateArtist`/`updateYear`
+  rebuilt with `dedupeKey($artist,$album,$year)` and NO track segment, so either one called on a
+  `kind='track'` row silently re-keyed it as an ALBUM (`|album x||t:song y` → `some artist|album
+  x|`), losing it from `findTrackByArtistTitle` and `findSavedTrack` and letting it collide with
+  a real album row under an eval that swallows the UNIQUE violation. **It was unreachable when
+  found** — both callers sit behind `_finishAlbumAdd`, which only makes album rows — but the
+  guard lived entirely in the CALLER, so the first future caller on a track row inherited it.
+  The carrier also PREFERS a stored `|p:`/`|e:` id tail over rebuilding it, which is what lets
+  `_migrateRefold` share it: a fold may change how the TITLE segment normalises, never the
+  segment that identifies the row. Pinned in `t_db.pl` (4 red without it).
+- **A TRACK ROW'S IDENTITY IS ITS PLAY URL AT THE ADD END TOO (0.1.129).** `_insertTrackRow`
+  checks `findTrackByUrl` FIRST, with no artist gate, before the two name-based guards. Those
+  both require `length $artist` and fall back on a key that varies by add SURFACE, so an
+  artist-less track added from two surfaces stored TWICE for one url. Played has always matched
+  the url first; the add path was the last place deciding sameness purely by name, so the two
+  ends disagreed about what a duplicate IS. **KNOWN RESIDUAL, deliberately not fixed:** two
+  genuinely different music tracks that are both artist-LESS and share a title still collapse,
+  because `DB::add` dedupes on the name key before the url check is reached. The same
+  `episodeKey` treatment would fix it, but music track rows exist in released builds (0.1.74;
+  `main` is 0.1.93) so it owes a migration rather than a key change — and it needs a track with
+  no artist at all, which no service checked produces (a Qobuz browse row carries
+  `"Title\nArtist - Album"`). **DECLINED BY THE USER 2026-09-04** — *"the chances of that is very
+  slight to occur"* — so this is a recorded decision, not an open item. Do not re-raise it as a
+  finding. Pinned as a limitation in `t_addpath.pl`; it would only be worth a migration rung if
+  artist-less track rows turn out to be common in the field, which nothing suggests.
 - **A TIDAL `mix:` is refused, and that is NOT a claim that mixes are unaddable — it is that
   TIDAL keeps them off the playlist call.** `Plugins::TIDAL::Plugin::getPlaylist` takes
   `$params->{uuid}` and calls `$api->playlist`; `getMix` takes `$params->{id}` and calls
@@ -297,16 +371,18 @@ does not cover. Say which ledger entry you are challenging and what changed.
   stub now models `album`/`albumname` as the separate accessors they are; the suite stays green
   through the correction, which is what shows behaviour never depended on it.
 
-- **A SPOTIFY podcast episode CAN go in the Wish List; a Deezer or Podcasts-app one cannot.
-  Deliberate, VERIFIED 2026-09-04, and not an oversight in the 0.1.125 fix.** `_wishListable`
-  asks `Sources::isPodcastSource`, which answers for `podcast` and `deezerpodcast` and
-  deliberately NOT for `spotify`: Spotty plays an episode through `spotify://episode:<id>`, so
-  it is stored under source `spotify` and is a Spotify TRACK to everything downstream — the
-  Browse glyph, the type word, the source segment and the replay path all read it that way.
-  Confirmed by running it: `list:wishlist` on a `spotify://episode:` favurl stores in
-  `wishlist` with `source='spotify'`. Widening `isPodcastSource` to cover it is not a one-line
-  change — it relabels those rows across Browse — and would be a feature decision, not a bug
-  fix. Documented in README.md under *Podcasts* so the asymmetry is stated rather than found.
+- ~~**A SPOTIFY podcast episode CAN go in the Wish List.**~~ **REVERSED 2026-09-04 by the
+  user, and fixed in 0.1.126 — do not restore the asymmetry.** The 0.1.125 entry here recorded
+  it as deliberate, on the reasoning that Spotty plays an episode through
+  `spotify://episode:<id>` so it *is* a Spotify track to everything downstream. Simon found it
+  in the field and ruled the other way: an episode is a podcast whichever service carries it,
+  so all three sources now behave alike — savable to Listen Later, never to the Wish List, and
+  rendered with the ❝ glyph and the word "Podcast".
+  What made the old entry sound reasonable is worth keeping, because it is the mechanism:
+  Spotify is the ONLY episode source with no source tag of its own, so `_wishListable(kind,
+  source)` could not have caught it — the fix was to give the carrier the play url as its
+  third fact, not to widen a list of source names. The stated cost ("it relabels those rows
+  across Browse") was real and is exactly what was wanted; it came to four call sites.
 
 ### C. CLOSED FINDINGS
 
@@ -825,6 +901,190 @@ That gap was open for PLAYLISTS too, since the playlist redirect shipped, and wa
 asking "what else can set this column?" — `DB::setStatus` has exactly one caller, which is what
 made the answer cheap.
 
+**Twelfth round of 2026-09-04 — two findings, one FIXED and one DISPOSITIONED as not-a-defect;
+plus a third defect the follow-up audit found, which is the one that mattered to the user.**
+Run against the 0.1.125 tree. Tests 1220 → 1272 assertions, 14 suites green.
+
+| # | finding | disposition |
+|---|---|---|
+| 1 | `shutdownPlugin` reads `preferences('plugin.state')->get(__PACKAGE__)`, but LMS keys `plugin.state` by the plugin's SHORT name — so the 0.1.108 uninstall hook has never run | **FIXED** — short name derived from `__PACKAGE__`; 6 red without it |
+| 2 | `_canClassifyTrack` omits `spotify`, so the Spotify branch of `classifyRelType` is unreachable from the track path | **NOT A DEFECT** — measured at the consuming end; comment corrected instead |
+| 3 | a Spotify podcast episode was Wish-Listable, drew the ♪ note and said "Track" | **FIXED** — `isPodcastEpisode(source, url)`; 7+2 red reverted, 7+4 red widened |
+
+**FINDING 1 IS THE ONE TO REMEMBER, because the suite was green and the live server was not.**
+`plugin.state` is keyed by the plugin DIRECTORY name; the hook asked for the MODULE name, got
+undef on every server, and quietly did nothing from 0.1.108 until now — so an uninstall left
+every LL entry AND every empty suppressor in Material's shared `actions.json` for good, the
+leftovers then hiding another plugin's `online-*` on podcast and radio rows. Verified live over
+`jsonrpc.js`: `plugin.state:ListenLater` → `"enabled"`, `plugin.state:Plugins::ListenLater::Plugin`
+→ `null`, same shape for MaterialSkin/Qobuz/Spotty/PFR/DSC.
+**The fixture carried the same wrong belief** (`my $ME = 'Plugins::ListenLater::Plugin'`), so all
+six assertions passed against a branch that could never run — the vacuous pass sitting in the
+STUB, for the fourth time in this file (0.1.94 prefs, 0.1.98 RemoteTrack, 0.1.109 checkbox, now
+this). **The two PluginManager APIs genuinely differ and that is the trap**: `dataForPlugin()` IS
+keyed by module and the neighbouring call is correct as written — proven from the live box, where
+the diagnostics snapshot reads `Listen Later version = 0.1.124`. Module for `dataForPlugin`,
+short name for the `plugin.state` pref. **A pref key that another subsystem owns is verifiable in
+one HTTP call; verify it rather than reasoning from the name you happen to have in scope.**
+
+**FINDING 2 WAS REFUTED BY READING THE OTHER PLUGIN, not by argument.** Spotty-Plugin's
+`ProtocolHandler::getMetadataFor` builds every return with `album => $cached->{album}->{name}` —
+a plain STRING, no `albumId`, no `album_id`, `album` never a hash — so `Sources::trackAlbumId`
+answers undef for every Spotify url and listing `spotify` would buy one wasted lookup and a WARN
+per add. It would also be HARMFUL: a Spotify episode reaches `_saveTrackRecord` on that same
+branch, so any service listed there that did answer with the show's id would classify a podcast
+series as a release. Anything added to `_canClassifyTrack` must exclude episodes first.
+The old comment was wrong in the other direction too and is corrected: Deezer IS listed and CAN
+yield an id — `API.pm cacheTrackMetadata` stores `album => $entry->{album}`, the album OBJECT,
+and `getMetadataFor` flattens it to a title only on the complete-cache return path.
+
+**FINDING 3 — the user's report, and the reason the 0.1.125 one-carrier fix did not reach it.**
+0.1.125 made `_wishListable` the single carrier and asked it of `(kind, source)`. That answers
+for the two episode sources that have a source tag of their own and CANNOT answer for the third:
+Spotty stores an episode under plain `spotify`, indistinguishable from a music track except in
+the play url. So the newest source was the one the new carrier could not see. **One carrier is
+not enough if it is asked the wrong question** — the carrier now takes `(kind, source, url)`, and
+`Sources::isPodcastSource` is REPLACED by `isPodcastEpisode($source, $url)` at all four consumers
+(Browse's glyph, its type word, the Wish List rule, the move command), so an episode cannot be
+podcast-shaped in one place and track-shaped in another.
+Both anti-tests were run, and both directions matter: reverting to the source-only predicate goes
+7 red in `t_addpath.pl` (including `got='wishlist'` on the redirect — the reported symptom) and 2
+in `t_favurl.pl`; making it "spotify is always a podcast" goes 7 and 4 red on the POSITIVE
+CONTROLS, which is what stops the fix relabelling every Spotify album and track in the list.
+
+**FINDING 4 — SUPERSEDED 2026-09-04 by the thirteenth round. The DIAGNOSIS below is right and
+worth keeping; the FIX it describes has been removed. Read both halves before touching this
+path again.**
+
+*The diagnosis, unchanged and still true.* Spotty's episode rows arrive with their metadata in
+the WRONG FIELDS. From `OPML::episodesList`: `line1 => join(' - ', $episode->{release_date},
+$title)` and `line2 => substr($episode->{description}, 0, 512)`. Material maps an online row's
+title to `$TITLE` and its subtitle to `$ARTISTNAME`, and a Spotty episode resolves to
+`online-album` (no `metadata.type`), so LL stored a DATE-PREFIXED title and a 512-character
+DESCRIPTION as the artist. Both corrections are made from the ROW alone and both stay:
+`stripEpisodeDatePrefix`, and dropping the blurb.
+
+*What was WRONG with the fix.* 0.1.126 resolved the show and publisher through
+`Plugins::Spotty::API::episode` — a per-service async lookup with a six-second timeout, a
+`->can` probe, and a bespoke failure path, all inside the add. Three things were wrong with it,
+and only the third is a matter of taste:
+
+1. **It rested on an UNMEASURED claim.** The shape it parsed (`show`/`artists`) was inferred by
+   reading Spotty's source, and the test stub was written from the same inference — so the stub
+   returned an object satisfying both readers and could not have detected a wrong guess. That is
+   the identical failure as the `plugin.state` fixture two entries above, in the same release.
+2. **The dependency does not work here.** Spotify rate-limits this account (`429 Too Many
+   Requests` on `browse/new-releases`, measured in the server log 2026-09-04), so on the test rig
+   that lookup 429s, sits out its full timeout, and falls back — on every add, forever. A code
+   path that has never once succeeded anywhere cannot be shipped.
+3. It made Spotify structurally different from every other service, for a field the primary
+   Played route does not use.
+
+**THE CONTRACT THAT REPLACES IT — this is the part that stops the churn.** See *Identity: what
+Played actually matches on*, near the top of this file. In one line: a track row's identity is
+its **play URL**, and naming is the fallback. So the naming is filled from `Sources::playingMeta`
+— `handlerForURL($url)->getMetadataFor(...)`, the very sub Played falls back to — which makes
+both ends agree BY CONSTRUCTION rather than by a per-service guess about what a service will
+report later. Synchronous, reads the service plugin's own cache, no HTTP, no timeout, nothing to
+hang the add, and no service named anywhere in it. `_fillFromPlayingMeta` is the one carrier.
+
+**MEASURED, not inferred (server log, 2026-09-04) — the shape that reader really returns.**
+`Plugins::Spotty::ProtocolHandler::getMetadataFor` for `spotify://track:5ObyGDxNWH0Uuuk3NvC5r8`:
+
+    url => "spotify://track:5ObyGDxNWH0Uuuk3NvC5r8"
+    album => "Save My Love"       artist => "Kygo, Khalid, Gryffin"
+    title => "Save My Love"       year => 2026
+
+Three facts follow, and none of them is a guess. (1) **The play URL is byte-identical to what LL
+stores** — the load-bearing assumption of the whole contract, now observed rather than argued.
+(2) `album` is a plain STRING with no album id anywhere, which is the measurement `_canClassifyTrack`
+rests on. (3) **Spotty joins EVERY credit at play time** ("Kygo, Khalid, Gryffin") while
+`spottyArtistName` stores only the first — so for a multi-credit track the stored artist and the
+played artist differ and the metadata fallback cannot match. Harmless, because the URL matches;
+recorded because it is the clearest measure of how far naming can drift while Played still works.
+
+Two smaller decisions recorded so they are not re-argued: a BARE `YYYY - ` prefix is deliberately
+NOT stripped (indistinguishable from a real title like "1979 - The Year In Review"; podcast
+episodes carry day precision essentially always), and the artist is dropped only on the browse
+shape — a queue or Now Playing add arrives with `$ALBUMNAME` populated and its artist already came
+from the handler. **No migration is owed**: `main` is 0.1.93, so neither Deezer episodes (0.1.124)
+nor Spotify ones (0.1.126) exist in any released build, and the live list holds none.
+
+**Round of 2026-09-04 — CLOSED. Five findings; the user overruled two and redirected the
+round, which is why the fix is a CONTRACT rather than five patches.** Run against the 0.1.126
+tree. Shipped as 0.1.127. Tests 14 suites green, `t_addpath.pl` 204 → 205.
+
+| # | finding | disposition |
+|---|---|---|
+| 1 | `_insertTrackRow`'s `findTrackByArtistTitle` guard is album-WILD, so two same-titled episodes from the same publisher collide and the second is silently refused | **DECLINED, then RE-RAISED on new information and FIXED in 0.1.128** — see below. Declined as remote while the design stored publisher-as-artist and show-as-album; the basis changed when the fill turned out to answer nothing, leaving BOTH fields empty |
+| 2 | `_saveSpotifyEpisode` reads the show from BOTH response shapes but the publisher from only one, so a raw episode object silently loses the artist | **SUPERSEDED** — the whole sub was deleted. The finding was right about the asymmetry and, more importantly, about WHY it existed: nobody had measured the shape |
+| 3 | the no-Spotty fallback logs nothing, unlike `_saveTrackClassify` which logs its decision unconditionally | **SUPERSEDED** — same deletion; `_fillFromPlayingMeta` logs each field it fills |
+| 4 | `_contextMenuQuery` extracts `$rec->{ref}` twice, 22 lines apart, the second defended as "its own narrower copy" when it is identical | **OPEN, cosmetic** — left alone this round to keep the diff to one concern |
+| 5 | the episode lookup runs even when the row already has album and artist, costing a round trip and up to 6s | **DECLINED by the user** — "adding from now playing of a podcast is also highly unlikely"; and moot after the deletion |
+
+**WHAT THE ROUND WAS ACTUALLY FOR, and the reason it is worth reading when the next Spotify
+finding appears.** The user's objection was not to any finding but to the pattern: *"you keep
+coming up with contradictions each review and it is not consistent."* He was right, and the
+cause was structural rather than a run of bad luck. **Every Spotify fact in this file had been
+derived by reading fragments of Spotty's source rather than by observing a payload, and each
+test stub was then written from the same assumption — so a stub could only ever confirm the
+guess that produced it.** Four rounds each overturned an earlier round's Spotify assertion
+(episodes "are Spotify tracks", `_wishListable` on `(kind, source)`, Deezer "cannot cheaply
+yield an album id", the episode response shape). 0.1.126 shipped two instances of the
+stub-confirms-the-guess failure in a single release — the `plugin.state` fixture, caught by
+review, and the episode-API stub, not caught by anything.
+
+**The three things that ended it, all measurements:**
+1. `Played.pm` says a TRACK row is matched on its play URL and only falls back to names. That
+   made most of the naming work optional and the async subsystem unjustifiable. It had been
+   sitting in the code the whole time, unread — see *Identity: what Played actually matches on*.
+2. Spotty's `getMetadataFor`, from the live server log, returns `spotify://track:<id>` —
+   byte-identical to what LL stores. The URL contract is observed, not argued.
+3. That account is rate-limited by Spotify (`429`, in the same log), so the API lookup 0.1.126
+   added could never have succeeded on the test rig at all.
+
+**The rule that comes out of it, and it is not Spotify-specific:** when an add needs a value the
+play side will later compare against, get it from the play side's own reader
+(`Sources::playingMeta`), never from a prediction of what that reader will say. And **a stub
+written from the same assumption as the code under test proves nothing** — model it on captured
+output, or accept that the test cannot fail for the reason you care about.
+
+**THE ONE FINDING THAT CAME BACK, and the ledger rule working as intended.** #1 was declined on
+the user's judgement that two podcasts sharing a name AND a publisher is remote — sound for the
+facts at the time, because the 0.1.126 design stored the publisher as the artist and the show as
+the album. When the live test showed `_fillFromPlayingMeta` answers NOTHING on the browse path,
+both of those fields went empty and the key collapsed to `|||t:<title>`: the collision no longer
+needed a shared publisher, only a shared TITLE. "Trailer", "Episode 1", "Introduction" and
+"Chapter I" are titles dozens of shows share. Re-raised under the ledger's own rule (new
+information, and say what changed), and fixed in 0.1.128 by `DB::episodeKey`.
+
+**Worth keeping about the failure mode:** it was not "the episode did not save". `DB::add`
+returned the FIRST row, so the user got a confirmation toast and a single list row whose play url
+belonged to a DIFFERENT show's episode. A silent wrong-audio row is a much worse bug than a
+refused add, and the toast is what hides it.
+
+**THE TRADE THE FIX MAKES, recorded so it is not later reported as a defect.** A url-keyed episode
+has no `|t:<title>` segment, so `DB::findSavedTrack` — Played's METADATA fallback — can never
+match it. That costs nothing real, for two measured reasons: (1) it could not match in the field
+anyway, because a streaming episode stores no artist and no show while the handler reports a
+publisher and a show at play time, so the two sides never lined up (the pre-0.1.128 test only
+passed because the STUB supplied values the real path does not have); and (2) the fallback exists
+for url DRIFT, which episode URIs do not have — `spotify://episode:<id>` and
+`deezerpodcast://<id>` are stable ids, not signed or expiring stream urls. The primary
+`findTrackByUrl` route is the whole story for an episode, and `t_addpath.pl` asserts the absence
+explicitly so it cannot be "fixed" back.
+
+*Not investigated further, by the user's instruction:* Spotify playback does not work on the
+test rig. Established this round: the helper exists and is current (spotty 2.1.2 / librespot
+0.8.0), the architecture matches, ports 4070 and 443 are open, credentials are present, and it
+is not lock contention — the helper simply produces no audio and no log output. The account is
+separately rate-limited on the Web API. **No add path may therefore BLOCK on a Spotify API call
+succeeding**, which is now a measured constraint rather than a preference. The line is whether
+the add depends on the answer: `_backfillStreamingArtist`'s Spotify branch still calls
+`$api->album` and is fine, because it is fire-and-forget — no `setStatusProcessing`, no timeout,
+a guarded callback — so a 429 costs one row its artist rather than hanging an add. That is the
+distinction, not "no API calls".
+
 ### D. ADDING TO THIS LEDGER
 
 When a finding is declined, or accepted-but-deferred, add it here in the same
@@ -1164,7 +1424,7 @@ Played albums are auto-removed after `played_retention_days` (default 7; **0 = k
 
 ## Streaming replay per service (Sources.pm) — the differences that bite
 
-**ADDING A NEW SERVICE — READ `docs/streaming-adapter-spec.md` FIRST.** It is the adapter contract across the released plugins (LBF, PFR, LL), carried verbatim in each repo: what a service's own plugin must expose (R1-R8), the leg semantics (`undef` = inconclusive vs `[]` = a real miss, and the TTL each picks), the item fields to stamp, the acceptance tests, and — per plugin — every site that still forces an edit OUTSIDE the adapter table, with the registry field that closes it. **This repo is the exception the spec's section 9 describes: it RECOGNISES a service from a url scheme rather than searching one, and its capability logic sits in per-source branches across `Sources.pm` and `Plugin.pm` rather than in an adapter table.** The claim that full support "wants those branches collected into a sources table of coderefs first" was **DISPROVEN by the Spotify build (0.1.113)** — full parity landed in ten branches with no refactor. The refactor is still worth doing; it is not a prerequisite, so do not let it block a service. The ELEVEN sites, so the next one is counted rather than guessed at: `_streamingAlbumNode`, `_streamingPlaylistNode`, `_searchService`, `_serviceCan`, `_serviceCanPlaylist`, `%SUPPORTED_CMD`, `classifyRelType` (only if the service states a type/count on its album object), `_backfillStreamingArtist` (only if its rows can arrive artist-less), `sourceFromSvc`/`%SVC_ALIAS` (only if the service's BROWSE COMMAND differs from its source tag — Spotty browses as `spotty` and plays `spotify://`), `normaliseFavurl` (only if its favurl is not a `<scheme>://` url — Spotty sends the bare URI `spotify:album:<id>`), and `unsupportedContainer` (only if the service browses CONTAINERS we cannot replay — a podcast series, a mix; added 0.1.123 after Spotify shows and Deezer podcasts were found storing as albums and tracks respectively). **The last two were MISSED by this very sentence when 0.1.113 wrote it**, which is exactly the failure the count exists to prevent: both are conditional, like the two before them, so a service that needs neither reads the list as complete and a service that needs one finds nothing telling it to look. A missed alias silently drops the native album id (the row falls back to fuzzy search, 0.1.96's class of bug); a missed normalisation misreads the favurl in all four readers at once; a missed container type stores a row that can never replay, which is the one thing `_isReplayableSource` exists to prevent. Edit the canonical copy in the ListenBrainz repo and re-copy, per the header.
+**ADDING A NEW SERVICE — READ `docs/streaming-adapter-spec.md` FIRST.** It is the adapter contract across the released plugins (LBF, PFR, LL), carried verbatim in each repo: what a service's own plugin must expose (R1-R8), the leg semantics (`undef` = inconclusive vs `[]` = a real miss, and the TTL each picks), the item fields to stamp, the acceptance tests, and — per plugin — every site that still forces an edit OUTSIDE the adapter table, with the registry field that closes it. **This repo is the exception the spec's section 9 describes: it RECOGNISES a service from a url scheme rather than searching one, and its capability logic sits in per-source branches across `Sources.pm` and `Plugin.pm` rather than in an adapter table.** The claim that full support "wants those branches collected into a sources table of coderefs first" was **DISPROVEN by the Spotify build (0.1.113)** — full parity landed in ten branches with no refactor. The refactor is still worth doing; it is not a prerequisite, so do not let it block a service. The THIRTEEN sites, so the next one is counted rather than guessed at: `_streamingAlbumNode`, `_streamingPlaylistNode`, `_searchService`, `_serviceCan`, `_serviceCanPlaylist`, `%SUPPORTED_CMD`, `classifyRelType` (only if the service states a type/count on its album object), `_backfillStreamingArtist` (only if its rows can arrive artist-less), `sourceFromSvc`/`%SVC_ALIAS` (only if the service's BROWSE COMMAND differs from its source tag — Spotty browses as `spotty` and plays `spotify://`), `normaliseFavurl` (only if its favurl is not a `<scheme>://` url — Spotty sends the bare URI `spotify:album:<id>`), `unsupportedContainer` (only if the service browses CONTAINERS we cannot replay — a podcast series, a mix; added 0.1.123 after Spotify shows and Deezer podcasts were found storing as albums and tracks respectively), `isPodcastEpisode` (only if the service browses podcast EPISODES under its ordinary music scheme, so the source tag cannot identify one — Spotify does, Deezer does not because its episodes carry `deezerpodcast://`; added 0.1.126), and `_canClassifyTrack` (only if the service's own protocol handler exposes an album id in its cached track metadata — read `getMetadataFor` at the consuming end before adding one, and note it must exclude podcast EPISODES, which reach `_saveTrackRecord` and now fall through to this very branch: 0.1.126's early return for Spotify episodes was removed with `_saveSpotifyEpisode` in 0.1.127, so nothing diverts an episode ahead of it any more. It is safe today only because no episode source — `podcast`, `deezerpodcast`, `spotify` — appears in the list; adding one that does would classify a podcast SERIES as a release). **Two of these were MISSED by this very sentence when 0.1.113 wrote it, and two more were added after 0.1.123 and 0.1.126 found them the hard way**, which is exactly the failure the count exists to prevent: both are conditional, like the two before them, so a service that needs neither reads the list as complete and a service that needs one finds nothing telling it to look. A missed alias silently drops the native album id (the row falls back to fuzzy search, 0.1.96's class of bug); a missed normalisation misreads the favurl in all four readers at once; a missed container type stores a row that can never replay, which is the one thing `_isReplayableSource` exists to prevent; and a missed episode predicate renders a podcast as a music track and lets it into the Wish List. **Every one of the conditional sites has now been missed at least once**, which is the argument for reading the whole list rather than the ones a new service obviously needs. **`_fillFromPlayingMeta` is deliberately NOT a fourteenth site, and that is the point of it:** it asks the url's own protocol handler, so it already answers for every service — including one that does not exist yet — without naming any. If a new service needs a branch there, the branch is the bug. Edit the canonical copy in the ListenBrainz repo and re-copy, per the header.
 
 **AN ELEVENTH SITE, added 0.1.120: `_searchService`'s QUERY ENCODING.** It is inside a site already
 on the list, which is exactly why it went unnoticed for two months — a new service's branch is written
@@ -3664,6 +3924,134 @@ The "Add to Listen Later"/"Add to Wish List" custom actions appear on streaming 
   Podcast `CACHE_VER` bumped 28 → 29 with the build per the dev-build cache rule.
 
 - **0.1.125** — Eleventh review round, two findings, both reproduced before being fixed. **(1) A shared `actions.json` we cannot READ is no longer treated as an empty one.** `_readMaterialActions` answered `{}` for "absent", "could not open" and "malformed JSON" alike, so a hand-edit syntax error — or a file left root-owned/0600, which LMS running as `squeezeboxserver` cannot open — was OVERWRITTEN by the tier-0/1 writers and UNLINKED by the tier-2 prune, taking every other plugin's custom actions with it and logging "removed the now-empty" file about it. It now answers `undef` for unreadable and all three callers bail out without writing; an EMPTY file still reads as `{}` so the husk removal is unaffected. Safe to bail because Material streams this same file and neither an unopenable nor an unparseable one reaches `customActions` (`MaterialSkin::Plugin::_customActionsHandler` + `customactions.js`), so nothing can be doubled. **(2) The Wish List rule has one carrier.** `_wishListable(kind, source)` replaces four independent answers; a Deezer podcast episode (`deezerpodcast://`, 0.1.124) stores through `_saveTrackRecord`, which had no redirect, so it landed in the Wish List the identical built-in episode was redirected out of — and `Move to Wish List` was offered on the saved row of BOTH podcast sources, because the old exclusion tested `kind eq 'playlist'` and an episode is `kind='track'`. `_moveCommand` now asks the same carrier, since the menu is presentation and the command is enforcement (Material replays a stale page without re-querying). Spotify episodes are deliberately excluded — see §B. Tests 1183 → 1220, 14 suites green. Podcast `CACHE_VER` 29 → 30 per the dev-build cache rule.
+
+- **0.1.126** — Twelfth review round. **(1) The uninstall/disable hook has never run.**
+  `shutdownPlugin` read `plugin.state` with `__PACKAGE__`, but LMS keys that pref by the
+  plugin's SHORT name — verified live (`plugin.state:ListenLater` → `"enabled"`, the module-name
+  key → `null`) — so from 0.1.108 until now removing the plugin stranded every LL entry and every
+  empty suppressor in Material's shared `actions.json`, where the leftovers then hid ANOTHER
+  plugin's `online-*` on podcast and radio rows. The short name is derived from `__PACKAGE__`
+  so a rename cannot re-open it. `dataForPlugin(__PACKAGE__)` a few hundred lines up is keyed by
+  MODULE and is correct as written — the two PluginManager APIs differ, which is how this was
+  got wrong. The test fixture had the same wrong key, so all six assertions passed against dead
+  code; fixed, 6 red without it. **(2) Spotify podcast episodes are podcasts.** They were
+  Wish-Listable, drew the ♪ note and read "Track", because `_wishListable` was asked of
+  `(kind, source)` and Spotify is the one episode source with NO source tag of its own — Spotty
+  stores an episode under plain `spotify` and says `episode:` only in the play url. The carrier
+  now takes the url as its third fact: `Sources::isPodcastSource` is replaced by
+  `isPodcastEpisode($source, $url)` at all four consumers (glyph, type word, Wish List rule,
+  move command), both Spotify spellings accepted so a pre-0.1.113 row is covered too. Anti-tested
+  both ways — 7+2 red reverted to the source-only predicate, 7+4 red on the positive controls if
+  widened to "spotify is always a podcast". README corrected (it documented the old asymmetry as
+  deliberate) and the ledger's section B entry reversed. **(3)** `_canClassifyTrack`'s comment
+  corrected: Spotify's absence is a measurement (Spotty's `getMetadataFor` returns the album as a
+  plain STRING on every path, so `trackAlbumId` can never answer) and adding it would also let a
+  podcast series be classified as a release; Deezer, which the old comment said could not yield
+  an id, can. **(4) A Spotify episode now stores what the service will report while it PLAYS.**
+  Spotty's browse row sends a date-prefixed title and the episode DESCRIPTION where the artist
+  goes, so the row read `<blurb> – 2026-01-05 - Mission Killer` and Played's metadata fallback
+  (`findSavedTrack`, which matches artist + album + title) could never find it.
+  `_saveSpotifyEpisode` asked `Plugins::Spotty::API::episode` for the show and publisher.
+  **(4) WAS REVERTED IN 0.1.127 — see below. The diagnosis was right; the fix was built on an
+  unmeasured guess about a third party's response shape, and its test stub was written from the
+  same guess.**
+
+- **0.1.127** — Thirteenth review round, and the one that fixed the METHOD rather than another
+  symptom. The Spotify/podcast work had produced a contradiction per round for four rounds, and
+  the cause was not any of the individual findings: **every Spotify fact in this file had been
+  derived by reading fragments of Spotty's source instead of observing a payload, and each test
+  stub was then written from the same assumption — so a stub could only ever confirm the guess
+  that produced it.** 0.1.126 shipped two instances of exactly that in one release (the
+  `plugin.state` fixture, caught; the episode-API stub, not).
+  **(1) The identity contract is now written down** — see *Identity: what Played actually
+  matches on*. A TRACK row is matched on its play URL (exact compare, `findTrackByUrl`); an
+  ALBUM row on its names. Both read straight out of `Played.pm`, both were being re-derived per
+  service, and neither is a judgement call.
+  **(2) `_saveSpotifyEpisode` and `SPOTIFY_EPISODE_TIMEOUT` are DELETED**, and with them LL's
+  only dependency on a Spotify API call. It was a 130-line per-service async subsystem with a
+  six-second timeout serving the FALLBACK match — while the primary URL match, which needs none
+  of it, already worked. Spotify additionally rate-limits the test account (`429`, measured), so
+  that lookup could never have succeeded there.
+  **(3) `_fillFromPlayingMeta` replaces it** — one carrier, no service named in it, that fills a
+  blank title/artist/album from `Sources::playingMeta`, the same reader Played falls back to. The
+  two ends now agree by construction instead of by prediction. Synchronous, cache-only, no HTTP,
+  nothing to hang the add. Scoped to podcast EPISODES: a music track's row is already its title
+  and artist, and widening it would change stored albums on Qobuz/Tidal/Deezer browse-track adds
+  for no reported defect. Deezer and Spotify episodes now take the identical path — pinned by a
+  Deezer case in the same test section.
+  **(4) Measured at last, and recorded in section C:** Spotty's `getMetadataFor` really does
+  return `url => "spotify://track:<id>"` (byte-identical to what LL stores, so the URL contract
+  holds), `album` as a plain string with no id, and EVERY artist credit joined — which
+  `spottyArtistName` does not store, so a multi-credit track's fallback cannot match. Harmless
+  under the URL contract, and the clearest available measure of how far naming may drift.
+  `isPodcastEpisode` and `stripEpisodeDatePrefix` are unchanged and still right.
+  **(5) VERIFIED LIVE on 0.1.127, 2026-09-04, by driving `listenlater addctx` over jsonrpc with a
+  real Spotty browse row** (`favorites_url: spotify:episode:0tQdtR5srOLPVaevOrLyhR`, whose `text`
+  really is `"2025-08-25 - Mission Killer: …\n<description>"` — the diagnosis confirmed from the
+  wire rather than from Spotty's source). The row stored as
+  `❝ Mission Killer: "Real Life Dexter" Manny Pardo / Podcast · Spotify`: date prefix stripped,
+  blurb kept out of the artist, ❝ glyph, "Podcast" type word, and the context menu offered only
+  Move to Played and Remove — no Wish List. A pre-existing Deezer episode renders identically,
+  which is the "no different from other services" requirement met.
+  **WHAT THE FILL ACTUALLY RETURNS — corrected 2026-09-04 after a first, overstated reading.**
+  The first observation was "it answers nothing" (the row stored with no show, and `songinfo`
+  returned no rows for the same url), and that was written up as an absolute. It is not: with
+  Spotty's cache WARM — browsing the episode list is enough — `getMetadataFor` supplies the
+  episode's own TITLE, proven by an add that SENT `name:2026-01-01 - Trailer` and STORED
+  `Mission Killer: "Real Life Dexter" Manny Pardo`. What it never supplies is the **show or the
+  publisher**, on either path. So: the fill works and is not a no-op; the missing show is a real
+  and permanent gap in what the browse row and the handler between them can say.
+  **Do not "fix" the missing show by reaching for a service API — that is the thing this round
+  removed.** README is correct as written: a streaming episode reads `Podcast · <Service>` with no
+  show; only the built-in Podcasts app has one, from the RSS feed.
+  *Recording the correction as well as the fact, because it is the third time in this area an
+  absolute has been written from a single observation.* One probe showing nothing means "nothing
+  here, now" — not "nothing, ever".
+  Tests: `t_addpath.pl` 204 → 205, the episode section rewritten against a handler stub modelled
+  on MEASURED output rather than on inferred API internals (5 red without the fill; the
+  "PLAYED finds it by url" case stays green either way, which is the contract working).
+
+- **0.1.128** — `DB::episodeKey`: a STREAMING podcast episode is keyed on its PLAY URL, not its
+  title. Same problem and the same answer as `playlistKey` two subs above — the title is not an
+  identity. A Deezer/Spotify episode row stores no artist and no show (measured on the live
+  server: the browse row carries an episode title and a description, and `getMetadataFor` supplies
+  a title once its cache is warm but never a show), so the plain track key collapsed to
+  `|||t:<title>` and two episodes called "Trailer" from different shows became ONE row —
+  confirmation toast shown, and the surviving row playing the other show's audio.
+  Keyed on the url because that is already the row's identity everywhere else
+  (`Played::_markPlayedTrack` matches `findTrackByUrl` on it first), so dedupe and matching now
+  agree instead of holding two notions of sameness; and it needs no per-service id parsing.
+  **Built-in Podcasts-app episodes are deliberately excluded** — they store the show in
+  `album_title` from the RSS feed, so their key already carries a discriminator and cannot
+  collide, and they DO exist in released builds (0.1.87, `main` is 0.1.93), so re-keying them
+  would owe a migration for no defect. The rule is "an episode with no show stored keys on its
+  url", which is exactly the set that lost its discriminator, and nothing released is re-keyed.
+  `_migrateRefold` keeps the `|e:` tail verbatim, like the playlist `|p:` tail, so a fold change
+  can never disturb an id. The metadata-fallback trade is recorded in the round entry above.
+  Tests: `t_addpath.pl` 205 → 208 (4 red without `episodeKey`); blast radius probed across all six
+  row shapes — album, music track, playlist, built-in podcast, Deezer episode, Spotify episode —
+  and only the two streaming-episode shapes change.
+
+- **0.1.129** — The knock-on pass the user asked for after 0.1.128, and it found two more of
+  the same class. **(1) `DB::_keyForRow` is now the ONE writer of a dedupe key**, replacing five
+  that had already drifted — `updateArtist`/`updateYear` rebuilt without the track segment and
+  would silently re-key a track row as an album. Unreachable today (both callers sit behind
+  `_finishAlbumAdd`, album-only — verified, not assumed), but the guard was in the caller, so it
+  was a trap armed for the next caller rather than a bug. The carrier prefers a stored `|p:`/`|e:`
+  id tail over a rebuild, which is what lets `_migrateRefold` share it instead of keeping its own
+  answer. **(2) `_insertTrackRow` now dedupes on the PLAY URL first**, with no artist gate. Both
+  existing guards require `length $artist` and fall back on a key that varies by add surface, so
+  an artist-less track added from two surfaces stored twice for one url — the add path was the
+  last place deciding sameness purely by name while Played had always matched the url first.
+  **(3)** Recorded as a known residual and then **DECLINED BY THE USER** (*"the chances of that
+  is very slight to occur"*): two artist-less music tracks sharing a title still collapse,
+  because `DB::add` dedupes on the name key before the url check is reached. Fixing it means
+  url-keying music tracks, which exist in released builds and so owe a migration — and no
+  service checked emits an artist-less track row. Pinned as a limitation, closed as a decision.
+  Also checked and CLEAN in the same pass: multi-artist albums, where Spotty joins every credit
+  at play time (`"Kygo, Khalid, Gryffin"`) while the row may store one — `_matchRecord`'s
+  `findByAlbum` + `_artistMatch` subset rescue matches in BOTH directions, so Played is not
+  affected. Tests: `t_addpath.pl` 208 → 213, `t_db.pl` 60 → 66 (4 red without the carrier).
 
 ## Regression tests — RUN THESE BEFORE ANY BUILD (added 2026-07-29)
 

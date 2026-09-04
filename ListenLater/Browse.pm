@@ -134,6 +134,17 @@ use constant GLYPH_PODCAST => "\x{275d}";
 use constant GLYPH_PLAYLIST => "\x{2261}";
 use constant SEP           => " \x{00b7} ";   # " · " subtitle separator
 
+# Is this stored row a podcast episode? The one carrier, asked with the two facts that
+# identify one — the source tag and the stored play url. Spotify's episodes have no source
+# tag of their own (they are 'spotify', like its music tracks) and are told apart only by
+# the url, so passing the url is not optional here: without it a Spotify episode renders
+# with the ♪ note and the word "Track". See Sources::isPodcastEpisode.
+sub _isPodcast {
+    my ($rec) = @_;
+    my $ref = (ref $rec->{ref} eq 'HASH') ? $rec->{ref} : {};
+    return Plugins::ListenLater::Sources::isPodcastEpisode($rec->{source}, $ref->{url});
+}
+
 # The glyph for a row: ❝ for a podcast episode, ♪ for one track, ♫ for more than one.
 #
 # The glyph answers "how many tracks", so it is driven by the MEASURED count whenever we
@@ -149,7 +160,7 @@ use constant SEP           => " \x{00b7} ";   # " · " subtitle separator
 # their type was classified from the real library count at add time, so it is already sound.
 sub _glyphFor {
     my ($rec) = @_;
-    return GLYPH_PODCAST  if Plugins::ListenLater::Sources::isPodcastSource($rec->{source});
+    return GLYPH_PODCAST  if _isPodcast($rec);
     return GLYPH_PLAYLIST if ($rec->{kind}   || '') eq 'playlist';
     return GLYPH_SINGLE   if ($rec->{kind}   || '') eq 'track';
 
@@ -177,7 +188,7 @@ sub _row {
 # relTypeFor).
 sub _typeLabel {
     my ($client, $rec) = @_;
-    return cstring($client, 'PLUGIN_LL_TYPE_PODCAST') if Plugins::ListenLater::Sources::isPodcastSource($rec->{source});
+    return cstring($client, 'PLUGIN_LL_TYPE_PODCAST') if _isPodcast($rec);
     return cstring($client, 'PLUGIN_LL_TYPE_PLAYLIST') if ($rec->{kind} || '') eq 'playlist';
     return cstring($client, 'PLUGIN_LL_TYPE_TRACK') if ($rec->{kind} || '') eq 'track';
     my $rt = $rec->{rel_type} || 'album';
@@ -274,8 +285,12 @@ sub _trackRow {
     $sub .= SEP . $rec->{album_title} if defined $rec->{album_title} && length $rec->{album_title};
     # The source segment is dropped for the BUILT-IN podcast source only: its type word
     # already reads "Podcast", so appending it again would give "Podcast · <show> · Podcast".
-    # A SERVICE's episode keeps it — "Podcast · <show> · Deezer" says something the type word
-    # does not, namely which service you will be streaming it from (0.1.124).
+    # A SERVICE's episode keeps it — "Podcast · <show> · Deezer", and equally
+    # "Podcast · <show> · Spotify" — because that says something the type word does not,
+    # namely which service you will be streaming it from (0.1.124, 0.1.126). This one really
+    # IS a source test rather than a podcast test, which is why it does not ask _isPodcast:
+    # the question here is "would the label repeat the type word", and only the built-in
+    # source's label does.
     $sub .= SEP . Plugins::ListenLater::Sources::sourceLabel($rec->{source})
         if $rec->{source} && $rec->{source} ne 'podcast';
 
