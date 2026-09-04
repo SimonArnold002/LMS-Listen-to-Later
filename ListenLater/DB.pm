@@ -622,13 +622,24 @@ sub playlistKey {
 
 # The dedupe key for a saved STREAMING podcast episode. Same problem as the playlist above and
 # the same answer: its TITLE is not an identity. "Trailer", "Episode 1", "Introduction" and
-# "Chapter I" are titles dozens of shows share, and a streaming episode row stores NO artist
-# and NO show to tell them apart — Deezer's and Spotify's browse rows carry an episode title
-# and a description, nothing naming the show (measured 2026-09-04: getMetadataFor supplies a
-# TITLE once Spotty's cache is warm, but never a show or publisher). So the plain track key
-# collapses to
-# '|||t:trailer' and DB::add swallows the second episode, leaving one row pointing at the
-# FIRST episode's url — the user gets a confirmation and a row that plays the wrong thing.
+# "Chapter I" are titles dozens of shows share.
+#
+# THE REASON THIS IS RIGHT IS THE COLD CACHE, not "the services never say what the show is" —
+# that was the stated justification until 0.1.132 and it is FALSE, checked against both
+# vendors' own source. Deezer's PodcastProtocolHandler::getMetadataFor sets
+# `$meta->{album} = $meta->{podcast}{title}` on a cache hit, and browsing a show warms that
+# cache for every one of its episodes; Spotty's API::Cache normalises an episode to
+# `album->{name} = show->{name}` AND `artists = [{ name => show->{publisher} }]`, which its
+# getMetadataFor maps straight to album/artist. So a warm handler DOES supply a show, and on
+# Spotify a publisher too.
+#
+# What it cannot do is supply them RELIABLY. _fillFromPlayingMeta is gated on a positive
+# `duration`, so on a COLD cache — the first add after a restart, or an episode reached from a
+# surface that never warmed it — nothing fills, the row keeps a bare browse-row title, and the
+# key collapses to '|||t:trailer'. DB::add then swallows the second episode and leaves one row
+# pointing at the FIRST episode's url: the user gets a confirmation and a row that plays the
+# wrong thing. A key that is only an identity when a third party's cache happens to be warm is
+# not an identity, which is what the url fixes.
 #
 #   '' | <normalised episode title> | '' | 'e:<source>:<play url>'
 #
@@ -648,8 +659,14 @@ sub playlistKey {
 # findAnyByKey is cross-source.
 #
 # BUILT-IN Podcasts-app episodes deliberately do NOT use this. They store the show in
-# album_title (read from the RSS feed), so their key already carries a discriminator and
-# cannot collide; and unlike the streaming sources they exist in released builds (0.1.87,
+# album_title (read from the RSS feed), so their key carries a discriminator against OTHER
+# SHOWS — but NOT against a sibling episode of the same show, and "cannot collide" was the
+# wording here until 0.1.132. Measured: same show + same normalised title + same YEAR still
+# collides and the second add is swallowed, and so does a feed that publishes no pubDate (the
+# year segment goes empty). Population across five real feeds: 3 of 2,968 in The Daily, 0 in
+# the other four. Left as-is DELIBERATELY — url-keying these would owe a migration, since they
+# ship from 0.1.87 and `main` is 0.1.93, and a permanent rung on a UNIQUE column is not worth
+# 0.1% (this file's most expensive bugs all live in that rung). Re-raise only with a real row; and unlike the streaming sources they exist in released builds (0.1.87,
 # where `main` is 0.1.93), so re-keying them would owe a migration for no defect. The rule is
 # therefore "an episode with no show stored keys on its url", which is exactly the set that
 # lost its discriminator.

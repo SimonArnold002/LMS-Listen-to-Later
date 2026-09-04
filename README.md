@@ -99,7 +99,7 @@ Podcast **episodes** can be saved to *Listen Later* — which is, after all, exa
 | **Deezer** | Saved directly from its own play link | **Podcast** · **Deezer** |
 | **Spotify** (via Spotty) | Saved directly from its own play link | **Podcast** · **Spotify** |
 
-A Podcasts-app episode shows its **show name**, because the plugin reads it from the RSS feed while identifying the episode. A Deezer or Spotify episode doesn't: the browse row those services hand over carries the episode title and a description, and nothing that names the show. The episode still saves, plays and marks itself Played exactly the same way — it's the subtitle that's shorter.
+A Podcasts-app episode always shows its **show name**, because the plugin reads it from the RSS feed while identifying the episode. A Deezer or Spotify episode shows one only *sometimes*: the browse row those services hand over carries just the episode title and a description, so the show has to come from the service's own metadata cache — which is filled if you reached the episode by browsing its show, and empty if you didn't. Either way the episode saves, plays and marks itself Played exactly the same; it's only the subtitle that may be shorter.
 
 Qobuz, Tidal and Bandcamp have no podcasts, so there's nothing to save there.
 
@@ -109,7 +109,7 @@ There's no *Add to Wish List* for a podcast — you don't buy podcast episodes. 
 
 **Whole shows can't be saved — only episodes.** A podcast series isn't a release: it has no end, and it changes under you, so "have you finished it" has no answer. Adding a *show* rather than an episode is refused, on every source — the Podcasts app, Deezer and Spotify alike.
 
-**Podcasts-app episodes are matched against the podcasts you subscribe to.** A row in that app carries no playable link of its own, so the plugin identifies the episode by its artwork and title in your subscribed feeds. That means an episode from a show you've subscribed to can be saved from anywhere — the Podcasts app, a favourited feed, the home screen — but an episode you found through **Search feeds** on a show you *haven't* subscribed to can't be, and is refused rather than saved as something that would never play. Subscribe to the show first. **This limit is specific to that app**: a Deezer or Spotify episode carries its own play link, so it saves whether you follow the show or not.
+**Podcasts-app episodes are matched against the podcasts you subscribe to.** A row in that app carries no playable link of its own, so the plugin identifies the episode by weighing its title and its artwork together against your subscribed feeds — the title tells episodes of one show apart, and the artwork tells the shows apart. That means an episode from a show you've subscribed to can be saved from anywhere — the Podcasts app, a favourited feed, the home screen — but an episode you found through **Search feeds** on a show you *haven't* subscribed to can't be, and is refused rather than saved as something that would never play. Subscribe to the show first. **This limit is specific to that app**: a Deezer or Spotify episode carries its own play link, so it saves whether you follow the show or not.
 
 ### The three lists
 Open **Apps → Listen Later** and you'll see one page with three headed sections, each showing a live count:

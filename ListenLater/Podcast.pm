@@ -4,19 +4,38 @@ package Plugins::ListenLater::Podcast;
 #
 # THE PROBLEM (measured, not assumed — see CLAUDE.md "Podcast episodes"): a row in the
 # built-in Podcasts app exposes NO presetParams, NO favorites_url and NO metadata — only a
-# positional item_id ("3.0") that Material never passes on, and which is not durable anyway
-# (today's 3.0 becomes 3.1 when the next episode drops). Its "… → More" is the Podcast
-# plugin's own OPML info window, not a trackinfo menu, so the info-provider can't reach it
-# either. So an add arrives with just: episode TITLE, the date/duration subtitle, $SERVICE
-# and the episode ARTWORK URL.
+# positional item_id ("3.0"), which is not durable (today's 3.0 becomes 3.1 when the next
+# episode drops: XMLBrowser builds it as '<parent>.<index>', and Slim::Formats::XML copies no
+# `id` and drops <guid> entirely). Its "… → More" is the Podcast plugin's own OPML info
+# window, not a trackinfo menu, so the info-provider can't reach it either. So an add arrives
+# with just: episode TITLE, the date/duration subtitle, $SERVICE and the episode ARTWORK URL.
+#
+# MATERIAL *DOES* PASS THE ITEM ID ON, and the claim here that it "never" does was wrong until
+# 0.1.132: `$ITEMID` is in customactions.js's ACTION_KEYS and is substituted at line 156.
+# $podcastCmd simply does not ask for it. Not used, and the reason is not durability —
+# durability governs what you STORE, while resolution happens at add time against the feed on
+# screen, where a positional index is exact. It is that the index does not ALIGN: _parseFeed
+# drops items with no <enclosure> while the server keeps every <item>, so the two lists skew
+# the moment a feed carries a sponsor notice (measured), and the id's leading segments are
+# offset by however many search providers are registered ahead of the subscriptions. Taking
+# that route means unfiltering _parseFeed first. Recorded so the next round starts here.
 #
 # THE RESOLUTION: the Podcast plugin keeps the user's subscriptions — with their real RSS
-# urls — in its own prefs (plugin.podcast:feeds). Fetch those feeds and find the episode.
-# The artwork url is the primary key: it appears verbatim in the RSS as <itunes:image href>
-# and is unique per episode (the same trick 0.1.44 used to recover Qobuz album ids from
-# cover urls). Title is the fallback. The matched <enclosure url> is the durable play url;
-# it's stored podcast://-prefixed so the Podcast plugin's own protocol handler plays it and
-# keeps its resume-position tracking.
+# urls — in its own prefs (plugin.podcast:feeds). Fetch those feeds and find the episode by
+# scoring both signals together (see resolveEpisode). The matched <enclosure url> is the
+# durable play url; it's stored podcast://-prefixed so the Podcast plugin's own protocol
+# handler plays it and keeps its resume-position tracking.
+#
+# NEITHER SIGNAL IS AN IDENTITY ON ITS OWN, which is why this is a score and not an order.
+# The artwork url was called "the primary key … unique per episode" here until 0.1.132 and
+# it is NOT: Slim::Formats::XML::parseXMLIntoFeed gives every item the CHANNEL image and
+# overrides it only where the item carries its own <itunes:image> — and _parseFeed mirrors
+# that fallback deliberately, so it agrees with what the browse row displays. On a feed with
+# no per-episode art every episode therefore has the SAME image. Measured across five real
+# feeds 2026-09-04: "Tech Won't Save Us" 351 of 360 episodes share one image, "The Daily"
+# ~1,120 of 2,968; Darko.Audio, Joe Rogan and Planet Money are one-image-per-episode. The
+# 0.1.44 Qobuz trick this was modelled on is a different shape — it EXTRACTS an id from one
+# url by regex, with no candidate list and nothing to be ambiguous between.
 #
 # LIMIT: only episodes of SUBSCRIBED feeds can resolve. An episode found via "Search feeds"
 # on a show you haven't subscribed to has nothing to match against, and is rejected rather
@@ -40,7 +59,7 @@ my $cache = Slim::Utils::Cache->new();
 use constant FEED_TTL          => 3600;        # 1h
 use constant FEED_FALLBACK_TTL => 7 * 86400;   # 7d
 use constant HTTP_TIMEOUT      => 20;
-use constant CACHE_VER         => 36;           # bump to invalidate parsed feeds
+use constant CACHE_VER         => 39;           # bump to invalidate parsed feeds
 
 # The user's subscribed podcasts, read from the Podcast plugin's OWN prefs — the only
 # place the durable feed urls exist. Each entry is { name => <show>, value => <rss url> }.
@@ -56,8 +75,32 @@ sub hasFeeds { return scalar @{ feeds() } ? 1 : 0 }
 
 # resolveEpisode($title, $image, $cb) -> $cb->($episode | undef)
 #   $episode = { url, title, show, image, duration, year }
-# Walks the subscribed feeds in order and calls back with the first match. Feeds are
-# fetched at most once per FEED_TTL, so a second add in the same session is instant.
+#
+# SCORES every candidate across the subscribed feeds and calls back with the best, rather
+# than returning the first episode matching either signal. Feeds are fetched at most once per
+# FEED_TTL, so a second add in the same session is instant.
+#
+# THE TWO SIGNALS, and what each can actually prove (0.1.132 — the old order got both wrong):
+#   * a TITLE identifies an episode WITHIN a feed, and can collide ACROSS feeds. "Trailer",
+#     "Introduction" and "Episode 1" are titles dozens of shows share.
+#   * an IMAGE identifies the FEED always, and the EPISODE only when it occurs ONCE in it
+#     (see the header: a feed with no per-episode art gives every episode the channel image).
+# So:
+#   3  title AND image        — decisive: right feed, right episode. Stops the walk.
+#   2  image, unique in feed  — decisive within that feed; survives a decorated title.
+#   1  title only             — right episode IF this is the right feed. Can be beaten.
+#   0  image, shared in feed  — names the SHOW, not an episode. NOT a candidate.
+# Ties keep the earliest subscription, which is what makes "two feeds, same title, no image"
+# resolve to the first feed rather than at random (pinned in t_podcast_resolve.pl §5).
+#
+# WHY THE 0-SCORE CASE MATTERS MOST: it is what refuses a SHOW row. A show row carries the
+# channel image and the show's name, so it matches no episode title and its image is shared —
+# no candidate, rejected. Under the old order it scored an image hit on episode 1 and stored
+# it, which is the "the Podcasts app already refuses a series" claim in Sources.pm silently
+# failing on every feed without per-episode art.
+#
+# The walk still SHORT-CIRCUITS on a 3, so the common case costs exactly what it did before:
+# one feed fetch. Only an imperfect match pays for the remaining feeds, and they are cached.
 sub resolveEpisode {
     my ($title, $image, $cb) = @_;
 
@@ -75,23 +118,49 @@ sub resolveEpisode {
     }
     $log->warn("LL: podcast resolve '" . ($title // '?') . "' across " . scalar(@queue) . ' feed(s)');
 
-    my $step;
-    $step = sub {
-        my $feed = shift @queue;
-        unless ($feed) {
+    my ($best, $bestScore, $bestWhy) = (undef, 0, '');
+    my $finish = sub {
+        unless ($best) {
             $log->warn("LL: podcast resolve — no feed contained '" . ($title // '?') . "'");
             return $cb->(undef);
         }
+        $log->warn("LL: podcast resolved by $bestWhy -> " . ($best->{url} // '?'));
+        return $cb->($best);
+    };
+
+    my $step;
+    $step = sub {
+        my $feed = shift @queue;
+        return $finish->() unless $feed;
+
         _feedEpisodes($feed->{value}, sub {
             my ($eps, $show) = @_;
+
+            # How many episodes in THIS feed carry each image. Counted per feed rather than
+            # once overall, because "is this image an episode's or the show's" is a question
+            # about the feed it came from — the same url is unique in one feed and shared in
+            # another, and a single-episode feed's channel image IS that episode's.
+            my %imgCount;
+            $imgCount{ $_->{image} // '' }++ for @$eps;
+
             for my $e (@$eps) {
-                my $hit = (length $wantImage && ($e->{image} // '') eq $wantImage)          ? 'image'
-                        : (length $wantTitle && _normTitle($e->{title}) eq $wantTitle)      ? 'title'
-                        : '';
-                next unless $hit;
-                $log->warn("LL: podcast resolved by $hit -> " . ($e->{url} // '?'));
-                return $cb->({ %$e, show => ($show || $feed->{name}) });
+                my $img    = $e->{image} // '';
+                my $imgHit = (length $wantImage && $img eq $wantImage) ? 1 : 0;
+                my $ttlHit = (length $wantTitle && _normTitle($e->{title}) eq $wantTitle) ? 1 : 0;
+
+                # See the header for the table. `>` and not `>=`, so a tie keeps the earlier
+                # subscription instead of drifting to the last feed that matched.
+                my $score = $ttlHit ? ($imgHit ? 3 : 1)
+                          : ($imgHit && $imgCount{$img} == 1) ? 2 : 0;
+                next unless $score > $bestScore;
+
+                ($best, $bestScore) = ({ %$e, show => ($show || $feed->{name}) }, $score);
+                $bestWhy = $ttlHit ? ($imgHit ? 'title+image' : 'title') : 'unique image';
             }
+
+            # Nothing can beat a title and an image agreeing, so stop fetching feeds. This is
+            # what keeps the ordinary add at one fetch, exactly as before.
+            return $finish->() if $bestScore == 3;
             $step->();
         });
     };

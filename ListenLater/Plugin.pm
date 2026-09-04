@@ -2214,13 +2214,27 @@ sub _saveTrackRecord {
 # for `deezerpodcast://<id>`.
 #
 #   Spotty ProtocolHandler::getMetadataFor
-#     cache HIT    -> title/artist/album real, duration = duration_ms/1000  (> 0)
+#     cache HIT    -> title, album = the SHOW's name, artist = the show's PUBLISHER, and
+#                     duration = duration_ms/1000 (> 0). API/Cache.pm normalises an episode
+#                     to `album->{name} ||= show->{name}` and
+#                     `artists ||= [{ name => show->{publisher} }]`, re-checked 0.1.132.
 #     cache MISS   -> $meta = {}; title undef                               (no duration)
 #     NO CREDENTIALS -> EARLY RETURN with artist AND title both set to
 #                       cstring('PLUGIN_SPOTTY_NOT_AUTHORIZED_HINT'), duration => 0
 #     NO SSL         -> the same shape with PLUGIN_SPOTTY_MISSING_SSL
+#     NO ARTISTS AT ALL -> `join(', ', map { $_->{name} } @{ $cached->{artists} })` answers
+#                     the EMPTY STRING, and that is the whole story. It is NOT a die: an
+#                     rvalue deref of undef yields an empty list, strict or not — checked by
+#                     running it, and already recorded once in this repo's ledger (0.1.130,
+#                     where the same wrong reasoning was raised and withdrawn). `artist` then
+#                     fails the `length` test in the fill and nothing is written, which is
+#                     correct. The eval around playingMeta stays for a handler that genuinely
+#                     dies; it is NOT load-bearing for this shape.
 #   Deezer PodcastProtocolHandler::getMetadataFor
-#     cache HIT    -> title + album (the show) + duration from the API      (> 0)
+#     cache HIT    -> title + album (the SHOW, via `$meta->{album} = $meta->{podcast}{title}`)
+#                     + duration from the API (> 0). NO artist key at all, ever.
+#                     API::cacheEpisodeMetadata warms this for every episode of a show the
+#                     moment its episode list is browsed, with `_complete => 1`.
 #     cache MISS   -> $defaultMeta: bitrate/type/icon/cover only            (no title)
 #
 # SO THE GUARD IS A POSITIVE `duration`, AND IT GUARDS THE WHOLE FILL, not just the title.
@@ -2437,11 +2451,16 @@ sub _insertTrackRow {
     # handed `ref->{playlist_id}` for a playlist.
     #
     # 'podcast' (the built-in app) is excluded deliberately, and it is not an inconsistency:
-    # that source stores the SHOW in album_title from the RSS feed, so its key already carries
-    # a discriminator and cannot collide — while Deezer and Spotify store no show at all, which
-    # is what collapses their keys to '|||t:<title>'. The rule is "an episode with no show
-    # stored keys on its url". Excluding it also means no released row is re-keyed (built-in
-    # episodes ship from 0.1.87; `main` is 0.1.93), so nothing here owes a migration.
+    # that source stores the SHOW in album_title from the RSS feed — which it reads itself and
+    # always has — so its key carries a discriminator against other SHOWS. NOT against a sibling
+    # episode of the same show with the same title and year, which still collides; see
+    # DB::episodeKey for the measurement and why that is accepted rather than fixed. Deezer and
+    # Spotify get their show from a service handler's CACHE if at all, so theirs is present or
+    # absent depending on what happened before the add (see DB::episodeKey — the older claim
+    # here that they "store no show at all" is false, and the cold cache is the real reason).
+    # The rule is "an episode whose show is not guaranteed keys on its url". Excluding the
+    # built-in app also means no released row is re-keyed (built-in episodes ship from 0.1.87;
+    # `main` is 0.1.93), so nothing here owes a migration.
     my $isStreamingEpisode = ($source ne 'podcast')
         && Plugins::ListenLater::Sources::isPodcastEpisode($source, $url);
 

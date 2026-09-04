@@ -125,10 +125,15 @@ subsystem.
   stores an episode under plain `spotify`, identical to a music track, and says `episode:`
   only in the url. A source-only predicate therefore cannot answer for a third of the
   sources, which is exactly how a Spotify episode kept the ♪ glyph, the word "Track" and a
-  Wish List entry after 0.1.125 closed the identical Deezer hole. The Podcasts app has always refused a series:
+  Wish List entry after 0.1.125 closed the identical Deezer hole. The Podcasts app refuses a series:
   a feed row arrives as `kind:podcast` with the FEED name as `$TITLE`, `Podcast::resolveEpisode`
   finds no episode containing it, and `_rejectAdd` says so (verified live 2026-09-03 on
-  "Darko.Audio podcast" — nothing stored). The STREAMING side did not, because the two gates it
+  "Darko.Audio podcast" — nothing stored). **"Has ALWAYS refused" was the wording here until
+  0.1.132 and it was not true.** That live check passed because Darko.Audio gives every episode
+  its own artwork; on a feed that does not, the show row's channel image matched episode 1 and the
+  SHOW STORED AS AN EPISODE. Now unconditional, and pinned on both feed shapes in
+  `t_podcast_resolve.pl` — a claim about the podcast app has to be tested against a feed WITHOUT
+  per-episode art, because that is the shape the defect needs and this box does not have one. The STREAMING side did not, because the two gates it
   has answer different questions: `_serviceCan` asks about the SERVICE (Spotty is installed, so
   `spotify` says yes whatever the favurl points at) and `favurlIsTrack` asks album-vs-TRACK,
   which presumes the row is one of the two. So a Spotify show stored as an ALBUM and a Deezer
@@ -1184,14 +1189,23 @@ refused add, and the toast is what hides it.
 
 **THE TRADE THE FIX MAKES, recorded so it is not later reported as a defect.** A url-keyed episode
 has no `|t:<title>` segment, so `DB::findSavedTrack` — Played's METADATA fallback — can never
-match it. That costs nothing real, for two measured reasons: (1) it could not match in the field
-anyway, because a streaming episode stores no artist and no show while the handler reports a
-publisher and a show at play time, so the two sides never lined up (the pre-0.1.128 test only
-passed because the STUB supplied values the real path does not have); and (2) the fallback exists
-for url DRIFT, which episode URIs do not have — `spotify://episode:<id>` and
-`deezerpodcast://<id>` are stable ids, not signed or expiring stream urls. The primary
-`findTrackByUrl` route is the whole story for an episode, and `t_addpath.pl` asserts the absence
-explicitly so it cannot be "fixed" back.
+match it. **The CONCLUSION stands and the fix must not be reverted; reason (1) as first written
+was WRONG and was corrected in 0.1.132 — read the correction, not the original.** It said the
+fallback "could not match in the field anyway, because a streaming episode stores no artist and no
+show while the handler reports a publisher and a show at play time". Checked against both vendors'
+source: a WARM handler reports the show on both services and the publisher on Spotify, and
+`_fillFromPlayingMeta` stores exactly what that same reader answers — so on a warm cache the two
+sides line up perfectly and the fallback WOULD have matched. Proved by running it: a Deezer episode
+keyed the pre-0.1.128 way is found by `findSavedTrack`; keyed the new way it is not.
+What actually makes the trade free is reason (2), which is unaffected: the fallback exists for url
+DRIFT, and episode URIs do not drift — `spotify://episode:<id>` and `deezerpodcast://<id>` are
+stable ids, not signed or expiring stream urls, and each service builds its favurl and its play url
+from the same id (verified in `_renderEpisode` and `OPML::episodesList`). So `findTrackByUrl` is the
+whole story for an episode and the fallback is redundant rather than lost. `t_addpath.pl` asserts
+the absence explicitly so it cannot be "fixed" back.
+**The lesson, and it is the ninth round's lesson again: a withdrawal is only as durable as its
+REASON.** This entry carried a plausible-sounding wrong reason for four days and it is exactly what
+made the 2026-09-04 audit re-open a settled decision. Reason (2) alone was always sufficient.
 
 *Not investigated further, by the user's instruction:* Spotify playback does not work on the
 test rig. Established this round: the helper exists and is current (spotty 2.1.2 / librespot
@@ -4272,6 +4286,120 @@ The "Add to Listen Later"/"Add to Wish List" custom actions appear on streaming 
   either on the live list — read back over jsonrpc 2026-09-04, 44 rows, 38 non-ASCII, all albums
   from already-decoded producers and **0 showing mojibake**.
 
+- **0.1.132 — a tapped podcast episode resolves by SCORING both signals, not by trying one and
+  then the other.** Fixes the two defects the 2026-09-04 podcast audit found in
+  `Podcast::resolveEpisode`, the built-in Podcasts-app path. Neither had ever fired on this box,
+  and the measurement is why: resolution needs a feed that REUSES artwork, and Darko.Audio — the
+  only subscription here — carries a unique image on all 129 episodes.
+
+  **1. Artwork is not an episode identity.** The header called it "the primary key … unique per
+  episode"; `Slim::Formats::XML::parseXMLIntoFeed` gives every item the CHANNEL image and overrides
+  it only where the item has its own `<itunes:image>`, and `_parseFeed` mirrors that fallback
+  deliberately. So on a feed with no per-episode art every image is identical, and an order that
+  tried image FIRST and returned on either signal answered **episode 1 for every tap** — including
+  a tapped SHOW row, which is what `Sources.pm`'s "the Podcasts app already refuses a series"
+  rests on. Measured across five real feeds: *Tech Won't Save Us* 351 of 360 episodes share one
+  image, *The Daily* ~1,120 of 2,968.
+
+  **2. An earlier feed's title collision beat a later feed's exact match.** Feeds were walked in
+  subscription order and ANY signal returned immediately, so per-episode artwork did not protect
+  you — "Trailer", "Introduction" and "Episode 1" are titles many shows share.
+
+  **The fix is a SCORE because neither signal is an identity on its own**, so no fixed order of
+  two `elsif`s can be right: 3 = title AND image, 2 = image unique within its feed, 1 = title only,
+  **0 = image shared within its feed, which is not a candidate at all** — it names the show. Ties
+  keep the earlier subscription. The walk short-circuits on a 3, so the ordinary add still costs
+  one feed fetch; only an imperfect match pays for the rest, and they are cached.
+
+  **The failure mode was the bad one, not a refused add:** a wrong row is internally consistent —
+  the resolved episode's own title AND url — so it renders correctly, plays the wrong audio, and
+  **cannot be identified after the fact**. There is no repair migration to write and none is owed:
+  no schema change, no stored-shape change, same `podcast://<enclosure>` row, only which episode.
+
+  **Why a full podcast rewrite did not surface it: `resolveEpisode` had no coverage at all.** Its
+  only appearance was `t_addpath.pl`'s stub, which returns the tapped title as the resolved title —
+  correct by construction, so no assertion in 1,315 could fail for this reason. Fourth entry in this
+  file's stub-written-from-the-same-assumption series (0.1.94 prefs, 0.1.98 RemoteTrack, 0.1.126
+  `plugin.state`). New `tools/t_podcast_resolve.pl`, **23 assertions** (1,338 across 16 suites).
+  Anti-tested three ways and the numbers are MEASURED against copies of the tree, not asserted:
+  the pre-fix sub 10 red, dropping the per-feed image-uniqueness test 3 red (all three are the
+  series refusal), returning on the first feed with any candidate 3 red (every cross-feed case).
+
+  **Also corrected in the same pass, comment-only:** `DB::episodeKey` and `_insertTrackRow` justify
+  URL-keying a streaming episode with "a streaming episode row stores NO artist and NO show …
+  never a show or publisher". That is false — Deezer's `getMetadataFor` sets
+  `album = podcast->title`, and Spotty's `API/Cache.pm` sets `album->name = show->name` AND
+  `artists = [show->publisher]`. **The DECISION stands and must not be reverted**; its real
+  justification is the one already beside it — on a cold handler cache nothing fills and the key
+  collapses to `|||t:<title>`, which collides across shows. And `Podcast.pm`'s "a positional
+  item_id that Material never passes on" is wrong on the second half: `$ITEMID` is in Material's
+  `ACTION_KEYS` and is substituted at `customactions.js:156`. It is genuinely positional
+  (`XMLBrowser` builds `<parent>.<index>`; `Slim/Formats/XML` copies no `id` and drops `<guid>`),
+  but durability governs what you STORE, and resolution happens at add time against the feed on
+  screen. Using it was **considered and not taken here**: `_parseFeed` drops enclosure-less items
+  so the indices skew (measured), and the feed segment is offset by however many search providers
+  are registered. Recorded so the next round starts from the measurement rather than the comment.
+
+- **0.1.132 audit residue — two podcast facts checked and recorded, neither fixed. Do not
+  re-raise either without a real row.**
+
+  **1. A BUILT-IN podcast episode CAN still collide, and "cannot collide" was too strong.**
+  `DB::episodeKey` excludes the built-in app because those rows store the show, and the comment
+  concluded their key "cannot collide". It carries a discriminator against other SHOWS; it does
+  not against a sibling episode of the SAME show. Measured against a real SQLite DB:
+
+      same show + same title + same YEAR   -> COLLIDES, second add swallowed, row keeps ep1's url
+      same show + same title, diff year    -> distinct (the year segment separates them)
+      same title, different shows          -> distinct (the show segment separates them)
+      no <pubDate> in the feed             -> COLLIDES (year segment empty)
+
+  **Population, read from real feeds rather than estimated:** 3 of 2,968 episodes in *The Daily*,
+  and 0 in *Joe Rogan* (2,747), *Planet Money* (355), *Tech Won't Save Us* (360) and Darko.Audio
+  (129). No feed sampled omits `<pubDate>`. **Left as-is deliberately:** the fix is url-keying
+  these too, which owes a `user_version` rung because built-in episodes ship from 0.1.87 while
+  `main` is 0.1.93 — and a permanent rung rewriting a UNIQUE column is where this file's most
+  expensive bugs have all lived, for 0.1% of one feed.
+
+  **CLOSED BY THE USER 2026-09-04 — do not re-raise this, and do not re-propose the "tell the
+  user it is a different episode" mitigation that was offered alongside it.** *"Enough time been
+  wasted on stuff for podcasts that won't likely bite a user, and if they did it's not the end of
+  the world."* Two corrections that support that call and were overstated when this was first
+  written: (1) **the damage is NOT a wrong row.** No row is created; the existing row is correct
+  and plays correctly, and what is lost is the SECOND save plus a misleading "Already in your
+  list" toast. The wrong-audio framing was carried over from the ARTWORK defect, which is a
+  different bug with a different outcome — do not conflate them again. (2) **It has nothing to do
+  with caching.** The play url is resolved once at add time into `ref_json` and never re-derived,
+  so no `CACHE_VER` bump, `FEED_TTL` expiry or feed rotation can touch a saved row — which is also
+  why the resolver fix owed no migration.
+
+  **2. Played's METADATA FALLBACK IS DEAD FOR ALL THREE PODCAST SOURCES, the built-in one
+  included — so the exclusion above buys nothing on the Played side.** The built-in handler has
+  no `getMetadataFor` of its own and inherits `Slim::Player::Protocols::HTTP`'s, which answers
+  remote-metadata-provider/WMA data and never a show. So at play time album is `''` while the row
+  stores the show, and `findSavedTrack` misses — measured: it MISSES with `album=''` and would
+  HIT if the show were published. The url is the only working route on every source, which is the
+  contract already at the top of this file. **The consequence worth keeping:** the built-in
+  exclusion is justified ONLY by "no released row is re-keyed", never by the fallback still
+  working there. It does not.
+
+  **3. RAISED AND WITHDRAWN — the Spotty `@{undef}` "fatal deref". THE LEDGER ALREADY SAID SO
+  AND WAS NOT READ.** The 0.1.132 audit reported `join(', ', map { $_->{name} } @{ $cached->{artists} })`
+  in Spotty's `getMetadataFor` as a die under `use strict` for an episode with no publisher, and
+  that claim was written into `Plugin.pm`'s handler table as fact before anyone ran it. **It is
+  wrong**: an rvalue deref of undef yields an EMPTY LIST, strict or not, so the branch answers
+  `artist => ''`, the fill's `length` test rejects it, and nothing is written — the correct
+  outcome, reached with no exception at all. Section C's 0.1.130 entry records this exact
+  reasoning being raised and withdrawn, with "Ran it" against it. **The gate at the top of this
+  file — read A and B, and check C's closed findings, BEFORE reporting — exists for precisely
+  this, and skipping it cost a version.** Corrected in 0.1.134. Do not re-raise it a third time.
+
+  **4. NOT a risk, measured so it is not raised as one:** the scoring walk's cost. On the largest
+  real feed sampled (*The Daily*, 19 MB, 2,968 episodes) `_parseFeed` takes 0.160s, the per-feed
+  image-uniqueness count 0.5 ms, and a full no-early-exit score sweep 18 ms. The parse is linear,
+  not quadratic, so 0.1.131's decode-to-characters did not introduce that trap. The only real
+  cost of walking further is the HTTP fetch of additional feeds, which is cached for FEED_TTL and
+  only happens when no candidate scores 3.
+
 ## Regression tests — RUN THESE BEFORE ANY BUILD (added 2026-07-29)
 
     sh tools/t_all.sh          # one line per suite, non-zero exit on any failure
@@ -4308,6 +4436,7 @@ session scratchpads and are gone — so nothing carried forward. Anything worth 
 | `t_refold.pl` | 0.1.112's fleet fold and the migration it owes: apostrophe elision (and the `'n'` guard) plus `%FOLD` in ALL THREE normalisers, that the three punctuation passes still differ where they must (the key keeps "(Deluxe)", the gate strips it, the ranker keeps "(LP4)"), that the lenient empty-artist gates are untouched, and `_migrateRefold` end to end against real SQLite — a stale key rewritten, same-status duplicates collapsed into the earliest save with the loser's `ref` carried across, MIXED-status rows left alone on their old keys, track `|t:` and playlist `|p:<svc>:<id>` identity segments preserved, and idempotence. Plus, at source level, that the fold lives in `DB.pm` and that `DB::_norm` calls it DIRECTLY while `Sources` goes through `->can` — the failure that guards is a permanent wrong key in a UNIQUE column, which no passing call can show. Plus §4i (0.1.119): a rollback that ITSELF fails must not poison the handle — `AutoCommit` restored, a later transaction still openable, the failed pass still withholding the ladder stamp, and the assertion that actually matters, that an ordinary write made AFTER the failure is durable rather than discarded at shutdown. DBD::SQLite will not fail a rollback on demand, so only the rollback is injected (a `RootClass` subclass); the failing GROUP is 4h's planted collision. Its squatter pair differs by an apostrophe rather than reusing 4h's accented one — that is fixture history, not a hazard in accents |
 | `t_query_enc.pl` | 0.1.120's per-branch query encoding in `_searchService`: that Qobuz, Tidal and Spotty (0.1.121) are handed CHARACTERS and Deezer OCTETS, and the CONSEQUENCE rather than just the flag — the URL `uri_escape_utf8` actually builds (called for real) and the name Unidecode actually transliterates to (modelled, since Text::Unidecode is not a dependency here). Plus the fail-safe cases in both directions, since a raw-CLI add arrives as octets and must not be corrupted on the way out. **Its fixture is the fragile part and is asserted rather than assumed:** a `"\x{f3}"` literal is stored latin-1 with `utf8::is_utf8` FALSE, so the encode never fires and every branch looks correct — `utf8::upgrade` models what `sqlite_unicode`/JSON::XS really hand back, and the first assertion fails loudly if it is ever dropped. The ASCII positive control is what stops the suite being satisfied by a change that mangles every query equally. **Bandcamp (0.1.122) is in NEITHER camp and is tested for exactly that**, because "exempt by an invariant" and "nobody checked" look identical from outside: its branch sends the combined `_norm("$artist $album")`, which `s/[^a-z0-9]+/ /g` makes ASCII-only, so the two encodings are byte-identical there and no conversion applies. The assertions pin that INVARIANT — ASCII out for character, octet and latin-1 in, the two encodings identical, and the album half still in the query — so a refactor that sends a raw artist or title down that branch goes red and has to pick a camp (5 red without them) |
 | `t_podcast_enc.pl` | 0.1.131's feed decode: that an episode title keys the same whichever way a real feed spells it (raw UTF-8, latin-1-range numeric entities, a declared iso-8859-1 body, no declaration at all, and a mislabelled one), that the stored title is CHARACTERS holding the real codepoint rather than the two bytes `sqlite_unicode` would double-encode into "BjÃ¶rk", and that a WIDE entity beside raw UTF-8 no longer rereads those bytes as latin-1. Section 3 is the reason the suite exists as much as the other two: it pins that the play url and the image url are still OCTETS and byte-identical to the feed, because both are compared `eq` against a value that reaches them as octets — the play url round-tripped through `ref_json` against the PLAYING url, and the image against `_realImageUrl` of Material's escaped `$IMAGE`. Decode either and an accented episode silently stops being marked played. Section 4 pins what did NOT move (duration, year, an `&amp;` in a url) and that `_normTitle` is blind to the representation, which is WHY the fix could not have broken episode resolution and is not obvious from reading the sub |
+| `t_podcast_resolve.pl` | 0.1.132's episode scoring — WHICH episode a tapped Podcasts-app row resolves to, which is the stored row's whole identity. That a shared channel image no longer answers episode 1 for every tap; that a SHOW row is refused on a feed with AND without per-episode art (the claim `Sources.pm` rests on, which was only true of the second shape); that a unique image still resolves an episode whose title Material decorated; that an earlier subscription's title collision no longer beats a later feed's exact match; and that a shared image still names the right FEED when paired with a title. §5 pins the one genuine ambiguity — same title, two feeds, no image — as a documented limit rather than leaving it to be found as a bug. §6 pins the record's shape at the CONSUMING end (`_savePodcastEpisode` reads url/title/show/year), so a change here that satisfies the matcher but starves the caller still fails. The stub cache is a no-op, so the suite installs a real one and primes it — that is what keeps it offline and deterministic |
 | `t_load.pl` | every shipped module compiles AND loads, plus a called-vs-defined sweep — `perl -c` passes on a call to a sub that doesn't exist, which nearly shipped a runtime crash in 0.1.83 |
 
 Two rules that follow from how this suite is built:
@@ -4649,11 +4778,11 @@ for BOTH a search result and a SUBSCRIBED feed — they are identical:
 
 **Resolution.** The Podcast plugin keeps subscriptions — with their real RSS urls — in its own prefs
 (`plugin.podcast:feeds` → `[{name, value}]`). `Podcast.pm` fetches those feeds (SimpleAsyncHTTP +
-`Slim::Utils::Cache`, 1h TTL / 7d fallback, the PFR API.pm idiom) and finds the episode. **The artwork url is
-the primary key** — it appears verbatim in the RSS as `<itunes:image href>` and is unique per episode; the
-Material `$IMAGE` is the LMS image proxy wrapping it (`/imageproxy/<escaped>/image.png`), so `_realImageUrl`
-unwraps it back. Normalised title is the fallback. The matched `<enclosure url>` is stored **podcast://-
-prefixed**, so the Podcast plugin's own protocol handler plays it AND keeps its resume-position tracking. RSS
+`Slim::Utils::Cache`, 1h TTL / 7d fallback, the PFR API.pm idiom) and finds the episode by **SCORING both
+signals together (0.1.132)**. The Material `$IMAGE` is the LMS image proxy wrapping the RSS url
+(`/imageproxy/<escaped>/image.png`), so `_realImageUrl` unwraps it back. The matched `<enclosure url>` is
+stored **podcast://-prefixed**, so the Podcast plugin's own protocol handler plays it AND keeps its
+resume-position tracking. RSS
 is DECODED TO CHARACTERS FIRST (0.1.131 — the body arrives as raw bytes and `_clean`'s
 `chr()` entity pass would otherwise mix codepoints into them; the urls stay octets on purpose, see
 that entry), then parsed with a tolerant regex scan, not an XML parser — podcast feeds are
@@ -4667,6 +4796,19 @@ command). Material prefers a PRESENT per-command category over `online-*`, so wr
 `podcasts-album` is what swaps the generic "Add album …" for "Add podcast …" there and nowhere else — the same
 per-app override used EMPTY for suppression elsewhere (0.1.55); populated, it can only add, never hide.
 `podcasts-track` is written with the same pair as insurance if a future Material reclassifies these rows.
+
+**ARTWORK IS NOT AN EPISODE IDENTITY, and the line above used to say it was — corrected 0.1.132.**
+`Slim::Formats::XML::parseXMLIntoFeed` gives every item the CHANNEL image and overrides it only where the item
+carries its own `<itunes:image>`; `_parseFeed` mirrors that fallback on purpose, so it agrees with what the
+browse row displays. On a feed with no per-episode art **every episode has the same image**. Measured across
+five real feeds 2026-09-04: *Tech Won't Save Us* 351 of 360 sharing one image, *The Daily* ~1,120 of 2,968;
+Darko.Audio (the test box's only subscription), Joe Rogan and Planet Money one-per-episode — which is exactly
+why this never bit here and why the 2026-09-03 live series-refusal check passed. **The rule now:** a TITLE
+identifies an episode within a feed and can collide across feeds; an IMAGE identifies the FEED always and the
+EPISODE only when it occurs once in that feed. So the two are scored together (3 = both, 2 = unique image,
+1 = title, 0 = shared image alone → not a candidate) and the walk stops on a 3, which keeps the ordinary add
+at one feed fetch. **Do not "simplify" this back into an ordered pair of `elsif`s** — no fixed order of two
+signals that are each individually ambiguous can be right, and the 0-score row is what refuses a SHOW row.
 
 **Limits (accepted, by measurement not choice):**
 - **Only SUBSCRIBED feeds resolve.** An episode found via "Search feeds" on an unsubscribed show has nothing
