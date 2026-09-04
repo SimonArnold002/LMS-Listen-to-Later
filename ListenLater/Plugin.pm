@@ -425,18 +425,60 @@ sub _materialActionsFile {
     return File::Spec->catfile($dir, 'actions.json');
 }
 
-# Read the shared actions.json into a hashref (empty on missing/corrupt).
+# Read the shared actions.json. THREE outcomes, and the difference between the last two is
+# the only thing standing between a file we cannot parse and a file we destroy:
+#
+#   * absent, or present and empty/whitespace  -> {}      nothing there. Safe to write over,
+#                                                         and safe to remove as a husk.
+#   * present and a JSON object                -> its contents
+#   * present but UNREADABLE                   -> undef   we could not open it, or its bytes
+#                                                         are not a JSON object.
+#
+# Those last two used to collapse together, and every caller then read "I could not read your
+# file" as "your file is empty": the tier-0/1 writers overwrote it and the tier-2 prune
+# UNLINKED it. Reproduced — a truncated actions.json holding another plugin's actions, and a
+# readable-JSON one left root-owned/0600 (we run as the server user, not root), were both
+# deleted at the next tier-2 startup, taking every other plugin's custom actions with them,
+# and logging "removed the now-empty" file about a file that was not empty. The file is
+# SHARED with Material and with every other plugin, so the only safe answer to "I cannot read
+# this" is to leave it exactly as it is; all three callers bail out without writing.
+#
+# Bailing out cannot double anyone's menu, which is the standing hazard on the prune path:
+# Material streams THIS FILE for /material/customactions.json (MaterialSkin::Plugin
+# ::_customActionsHandler) and the client does `customActions = eval(resp.data)` inside a
+# .then (customactions.js). A file we cannot open does not stream; one we cannot parse does
+# not eval. Either way `customActions` stays undefined and getSectionActions skips it — so
+# there are no file entries there to appear beside the registered ones.
+#
+# An empty file is deliberately NOT unreadable: it holds nothing of anyone's, so the husk
+# removal below it is still the right answer.
 sub _readMaterialActions {
     my ($file) = @_;
-    my $data = {};
-    if (-e $file) {
+    return {} unless -e $file;
+
+    my $raw = do {
         local $/;
-        if (open my $fh, '<:raw', $file) {
-            my $raw = <$fh>;
-            close $fh;
-            $data = eval { JSON::XS->new->utf8->decode($raw) } || {};
-            $data = {} unless ref $data eq 'HASH';
-        }
+        open my $fh, '<:raw', $file or do {
+            $log->error("LL: cannot open the shared $file ($!) — leaving it untouched. "
+                . 'Nothing of ours can be written to it or taken out of it until that is fixed.');
+            return undef;
+        };
+        my $c = <$fh>;
+        close $fh;
+        $c;
+    };
+
+    return {} unless defined $raw && $raw =~ /\S/;
+
+    my $data = eval { JSON::XS->new->utf8->decode($raw) };
+    unless (ref $data eq 'HASH') {
+        my $why = $@ ? do { (my $e = $@) =~ s/\s+\z//; $e }
+                     : 'it decoded as ' . (ref($data) ? lc(ref $data) . ' ref' : 'a scalar')
+                       . ', not an object';
+        $log->error("LL: cannot parse the shared $file ($why) — leaving it untouched. "
+            . 'Nothing of ours can be written to it or taken out of it until it is fixed '
+            . 'or deleted.');
+        return undef;
     }
     return $data;
 }
@@ -559,6 +601,15 @@ sub _clearMaterialActions {
     # "Add" off our own rows.
     return unless $live || -e $file;
     my $data = _readMaterialActions($file);
+    # Unreadable: our entries stay in the file. Worse than that would be the write below,
+    # which on an unreadable read has an empty $data and would blank the whole shared file.
+    # The user asked for our entries to GO, so say plainly why they have not.
+    unless (defined $data) {
+        $log->error('LL: material_action is off, but our entries could NOT be removed from '
+            . "$file — see the line above. They stay in Material's menus until the file is "
+            . 'fixed or deleted and the server restarts.');
+        return;
+    }
 
     for my $cat (keys %$data) {
         next unless ref $data->{$cat} eq 'ARRAY';
@@ -1077,6 +1128,15 @@ sub _writeMaterialActions {
     File::Path::make_path($dir) unless -d $dir;
 
     my $data = _readMaterialActions($file);
+    # Unreadable: write nothing. This is the pass that DELIVERS our entries on tier 0/1, so
+    # bailing out is a visible loss — but the alternative is writing our set over a shared
+    # file whose contents we could not read, which loses another plugin's actions for good.
+    unless (defined $data) {
+        $log->error("LL: cannot deliver our Material custom actions — $file is unreadable "
+            . '(see the line above). No "Add to Listen Later" entry will appear until the '
+            . 'file is fixed or deleted.');
+        return;
+    }
 
     my ($positive, $fileOnly) = _materialActionSet($tier);
 
@@ -1269,7 +1329,10 @@ sub _writeMaterialActions {
 # `getCustomActions` tests `if (customActions || pluginCustomActions)` and `getSectionActions`
 # tests `if (list && list[section])`. A missing file and an empty one are the same thing to
 # Material. Anything foreign in the file keeps it alive, so "remove ours" and "leave theirs
-# alone" never come into conflict.
+# alone" never come into conflict — but only as far as the file can be READ. "Foreign content
+# keeps it alive" was true of a file we could parse and false of one we could not, which is
+# how a truncated or unopenable actions.json came to be deleted here; _readMaterialActions
+# now answers undef for that and the guard below returns before the delete.
 #
 # **The ordering that must hold: registration comes FIRST, in the same run.** The empty
 # suppressors in the file are load-bearing until the equivalent sections are registered — they
@@ -1353,6 +1416,23 @@ sub _pruneMaterialActions {
     }
 
     my $data = _readMaterialActions($file);
+    # Unreadable: prune nothing, unlink nothing. THIS is the path that used to delete the
+    # file outright — the strip pass below finds nothing to strip in an empty $data, the two
+    # fallback pushes add nothing when registration succeeded, and the "nothing left"
+    # branch at the end then unlinks a file that was full of someone else's actions.
+    #
+    # The diagnostics are skipped with it, deliberately: every file-derived line in the dump
+    # ("category 'online-album' = MISSING (!)", the shadow-category scan, the per-service
+    # verdicts) would be asserted from an empty $data and read as fact. An error naming the
+    # file is the honest answer, and $log->error reaches server.log whether or not debug_log
+    # is on — which the dump does not. The ownership ledger is left alone too: it records
+    # what a previous run put in the file, and that is still exactly what is in there.
+    unless (defined $data) {
+        $log->error("LL: cannot prune our Material custom actions from $file — it is "
+            . 'unreadable (see the line above). Anything an earlier build left in it stays '
+            . 'until the file is fixed or deleted.');
+        return;
+    }
 
     # Strip our entries from every category. %emptied records the ones this took from non-empty
     # to empty — provenance, exactly as on the write path: an empty that ARRIVED empty was never
@@ -1750,6 +1830,38 @@ sub _wantedList {
     return (defined $v && $v eq 'wishlist') ? 'wishlist' : 'later';
 }
 
+# Could you BUY this? The Wish List is for things you mean to buy, and two kinds of row
+# never are: a podcast episode — from EITHER source, which is the whole reason this asks
+# Sources::isPodcastSource rather than testing one spelling — and a curated playlist.
+#
+# ONE carrier for the rule, because it has four consumers and they used to answer it
+# separately: _savePodcastEpisode and _savePlaylistRecord each carried their own
+# `if ($list eq 'wishlist')`, _saveTrackRecord carried none, and _contextMenuQuery tested
+# `kind eq 'playlist'` on its own. That is exactly how the Deezer episodes added in 0.1.124
+# came to land in the Wish List while the built-in ones could not — they store through
+# _saveTrackRecord, the one path with no redirect — and how BOTH podcast sources went on
+# offering "Move to Wish List" on the saved row, undoing the redirect in one tap.
+#
+# Asked of the STORED shape (kind + source), never of the menu the row was tapped in:
+# Material builds a menu per surface, not per row, so a mixed list (Favourites) offers
+# "Add to Wish List" over rows of every kind and the menu cannot be the guard.
+sub _wishListable {
+    my ($kind, $source) = @_;
+    return 0 if defined $kind && $kind eq 'playlist';
+    return 0 if Plugins::ListenLater::Sources::isPodcastSource($source);
+    return 1;
+}
+
+# The add-side half: redirect a Wish List add to Listen Later rather than dropping it, and
+# say so. $what names the thing for the log line, which is the only place the user sees why
+# the confirmation toast named a list they did not pick.
+sub _redirectWishList {
+    my ($list, $kind, $source, $what) = @_;
+    return $list unless $list eq 'wishlist' && !_wishListable($kind, $source);
+    $log->warn("LL: $what sent to the Wish List — saving to Listen Later instead");
+    return 'later';
+}
+
 # The confirmation toast, varying by list and whether it was already present.
 # When it's already saved from a DIFFERENT service, name that service so it's
 # clear why the add was a no-op (e.g. "Already saved from Qobuz").
@@ -1996,6 +2108,12 @@ sub _saveTrackRecord {
           :                                   'no track title');
     }
 
+    # Placed HERE, after the scheme/track-id/now-playing branches above have settled
+    # $source, because that is the first point the rule can be asked: a Deezer episode
+    # arrives as a bare 'deezerpodcast://<id>' favurl with no kind:podcast param, so its
+    # being a podcast is knowable only from the resolved source.
+    $list = _redirectWishList($list, 'track', $source, 'podcast episode');
+
     my %tf = (
         source => $source, url  => $url,  track   => $track,   artist  => $artist,
         album  => $album,  year => $year, artwork => $artwork, trackId => $trackId,
@@ -2041,15 +2159,10 @@ sub _savePodcastEpisode {
         return _rejectAdd($request, $rejectSource, undef, 'no episode title');
     }
 
-    # The Wish List is for things you might BUY — which a podcast episode never is. The
-    # podcast action therefore offers no Wish List entry at all; this only fires when the
+    # The podcast action offers no Wish List entry at all, so this only fires when the
     # episode came in through a GENERIC container's "Add to Wish List" (Favourites etc.),
-    # where the menu can't know it's a podcast. Save it to Listen Later rather than drop it
-    # into a list where it makes no sense.
-    if ($list eq 'wishlist') {
-        $log->warn("LL: podcast episode sent to the Wish List — saving to Listen Later instead");
-        $list = 'later';
-    }
+    # where the menu can't know it's a podcast. The rule itself lives in _wishListable.
+    $list = _redirectWishList($list, 'track', 'podcast', 'podcast episode');
 
     # Same gate every other add path runs: don't store what we can't replay. This path
     # inserts via _insertTrackRow directly (it doesn't go through _saveTrackRecord), so the
@@ -2200,12 +2313,9 @@ sub _savePlaylistRecord {
         return _rejectAdd($request, $source, $title, 'service has no playlist call');
     }
 
-    # The Wish List is for things you might BUY, which a curated playlist never is — the
-    # same rule, and the same reason, as a podcast episode (_savePodcastEpisode).
-    if ($list eq 'wishlist') {
-        $log->warn('LL: playlist sent to the Wish List — saving to Listen Later instead');
-        $list = 'later';
-    }
+    # A curated playlist is not something you buy — the same rule, and the same carrier,
+    # as a podcast episode (_wishListable).
+    $list = _redirectWishList($list, 'playlist', $source, 'playlist');
 
     # No rel_type and no track_count, ever: a playlist is not a release, and a curated one
     # changes under you. Leaving both NULL is also what keeps it out of Played (every Played
@@ -2411,10 +2521,14 @@ sub _contextMenuQuery {
 
     for my $target (qw(later wishlist played)) {
         next if $target eq $status;
-        # A playlist is never a Wish List item (you don't buy one) — the add path already
-        # redirects "Add to Wish List" on a playlist to Listen Later, so don't offer the
-        # move that would undo that.
-        next if $target eq 'wishlist' && ($rec && ($rec->{kind} || '') eq 'playlist');
+        # Don't offer the Move that would undo the add path's redirect. Same rule, same
+        # carrier — and it covers podcast episodes as well as playlists, which the old
+        # `kind eq 'playlist'` test did not: an episode is kind='track', so both podcast
+        # sources offered a one-tap route straight back into the list the add refused.
+        # Still gated on having a record: with none we cannot say, and hiding a Move on a
+        # row we failed to read would be the worse guess.
+        next if $target eq 'wishlist'
+             && $rec && !_wishListable($rec->{kind}, $rec->{source});
         push @entries, {
             text   => cstring($client, $moveStr{$target}),
             cmd    => [ 'listenlater', 'move' ],
@@ -3532,6 +3646,23 @@ sub _moveCommand {
     my $id     = $request->getParam('id');
     my $status = $request->getParam('status') || 'later';
     $status = 'later' unless $status =~ /^(?:later|played|wishlist)$/;
+
+    # The same rule the add path and the menu use (_wishListable) — asked HERE too, because
+    # the menu is presentation and this is the enforcement. Material replays a history page
+    # without re-querying it, so a "Move to Wish List" rendered before this build (or before
+    # the row was saved) is still tappable on a stale page, and a direct CLI caller never saw
+    # a menu at all. Without this the redirect the add path just made is undone in one tap.
+    if ($status eq 'wishlist') {
+        my $rec = eval { Plugins::ListenLater::DB::get($id) };
+        if ($rec && !_wishListable($rec->{kind}, $rec->{source})) {
+            $log->warn('LL: refusing to move a ' . ($rec->{kind} // 'kind-less')
+                . ' row (source ' . ($rec->{source} // '?')
+                . ') to the Wish List — left where it was');
+            $request->setStatusDone;
+            return;
+        }
+    }
+
     eval { Plugins::ListenLater::DB::setStatus($id, $status); 1 } or $log->error("LL: move failed: $@");
     $request->setStatusDone;
 }

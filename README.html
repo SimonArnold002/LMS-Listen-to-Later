@@ -116,7 +116,7 @@
   <h1>Listen Later — LMS Plugin</h1>
   <p class="tagline">A plugin for <strong>Lyrion Music Server (LMS)</strong> that lets you save an album, an individual track, a curated playlist or a podcast episode — from your <strong>local library</strong>, any <strong>streaming service</strong> (Qobuz, Tidal, Bandcamp, Deezer, Spotify) or your <strong>podcast subscriptions</strong> — into a curated list, browse it like a playlist, and have things move to a <strong>Played</strong> section once you've heard them. A separate <strong>Wish List</strong> sits alongside for things you mean to buy, and items move freely between the three lists.</p>
   <div class="badges">
-    <span class="badge accent">v0.1.124</span>
+    <span class="badge accent">v0.1.125</span>
     <span class="badge">LMS 9.0.0+</span>
     <span class="badge">Material Skin</span>
     <span class="badge">Library + Streaming</span>
@@ -197,7 +197,7 @@ sudo systemctl restart lyrionmusicserver</code></pre>
 <p>A <strong>curated or service playlist</strong> — a Qobuz or Deezer editorial list, a TIDAL or Spotify playlist — can be saved whole, from its <strong>"…"</strong> menu like anything else. It's stored as a playlist rather than as its tracks, so it stays live: open it later and you get whatever the playlist holds <em>now</em>, replayed through the service it came from. Needs the matching plugin installed: <strong>Qobuz</strong>, <strong>TIDAL</strong>, <strong>Deezer</strong> or <strong>Spotify</strong> (via Spotty).</p>
 <p>Playlists end up under the same two rules as podcast episodes, for the same reason — a playlist isn't a release you buy, and it isn't a fixed thing you can finish:</p>
 <ul>
-<li>**A playlist never lands in the <em>Wish List</em>.** Unlike a podcast episode, a playlist row still <em>shows</em> <strong>Add to Wish List</strong> — Material builds a menu per surface, not per row — but pressing it saves to <em>Listen Later</em>, and the confirmation tells you which list it went to. <strong>Move to Wish List</strong> isn't offered on a saved playlist at all.
+<li>**A playlist never lands in the <em>Wish List</em>.** A playlist row can still <em>show</em> <strong>Add to Wish List</strong> — Material builds a menu per surface, not per row — but pressing it saves to <em>Listen Later</em>, and the confirmation tells you which list it went to. <strong>Move to Wish List</strong> isn't offered on a saved playlist either, and is refused if something asks for it anyway. Podcast episodes follow exactly the same three rules.
 </li>
 <li>**It never moves itself to <em>Played</em>.** A curated playlist changes under you, so "most of it heard" has no meaning. You can still move it to <em>Played</em> by hand.
 </li></ul>
@@ -217,7 +217,8 @@ sudo systemctl restart lyrionmusicserver</code></pre>
 </tbody></table>
 <p>Qobuz, Tidal and Bandcamp have no podcasts, so there's nothing to save there.</p>
 <p>A Podcasts-app episode plays back through the Podcasts plugin, so its resume position keeps working. A Deezer or Spotify episode plays through that service, exactly as it would if you'd started it from the service's own menu.</p>
-<p>There's no <em>Add to Wish List</em> for a podcast — you don't buy podcast episodes. (In a mixed list such as Favourites the entry can still appear, because the menu is built per list rather than per row; saving from it puts the episode in <em>Listen Later</em> anyway.)</p>
+<p>There's no <em>Add to Wish List</em> for a podcast — you don't buy podcast episodes. The entry can still <em>appear</em> over an episode, because Material builds a menu per surface rather than per row: in a mixed list such as Favourites, and on a Deezer episode browsed inside the Deezer app. Pressing it saves the episode to <em>Listen Later</em> instead, and the confirmation says so; <strong>Move to Wish List</strong> isn't offered on the saved row either.</p>
+<p><em>Spotify episodes are the exception, deliberately.</em> Spotty plays them through <code>spotify://episode:&lt;id&gt;</code>, so they're stored and shown as <strong>Spotify tracks</strong> rather than as podcasts — which is what they are to everything downstream, from the row's icon to its subtitle. They can therefore go in the <em>Wish List</em> like any other Spotify track.</p>
 <p><strong>Whole shows can't be saved — only episodes.</strong> A podcast series isn't a release: it has no end, and it changes under you, so "have you finished it" has no answer. Adding a <em>show</em> rather than an episode is refused, on every source — the Podcasts app, Deezer and Spotify alike.</p>
 <p><strong>Podcasts-app episodes are matched against the podcasts you subscribe to.</strong> A row in that app carries no playable link of its own, so the plugin identifies the episode by its artwork and title in your subscribed feeds. That means an episode from a show you've subscribed to can be saved from anywhere — the Podcasts app, a favourited feed, the home screen — but an episode you found through <strong>Search feeds</strong> on a show you <em>haven't</em> subscribed to can't be, and is refused rather than saved as something that would never play. Subscribe to the show first. <strong>This limit is specific to that app</strong>: a Deezer or Spotify episode carries its own play link, so it saves whether you follow the show or not.</p>
 <h3>The three lists</h3>

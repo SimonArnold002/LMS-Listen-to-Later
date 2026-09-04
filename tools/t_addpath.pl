@@ -951,5 +951,128 @@ is('...while plain deezer is not a podcast source',
 $r = add(name => 'The Minimalists', svc => 'deezer', favurl => 'deezer://podcast:19887');
 is('the Deezer SERIES is still refused', (defined $r ? "stored as $r->{kind}" : 'rejected'), 'rejected');
 
+# ---------------------------------------------------------------------------
+# The Wish List is for things you mean to BUY, so two kinds of row are redirected out of it:
+# a podcast episode and a curated playlist. That rule had four consumers answering it
+# separately — _savePodcastEpisode and _savePlaylistRecord each with their own
+# `if ($list eq 'wishlist')`, _saveTrackRecord with none, and _contextMenuQuery testing
+# `kind eq 'playlist'` — and the gaps between them were real: a DEEZER episode
+# ('deezerpodcast://<id>', 0.1.124) stores through _saveTrackRecord, so it landed in the
+# Wish List that the identical built-in episode was redirected out of, and the saved row
+# then offered "Move to Wish List" on BOTH podcast sources, undoing the redirect in one tap.
+#
+# Everything below asks the ONE carrier (_wishListable) through the four paths that consult
+# it, and the anti-tests either side pin what it must NOT catch — an ordinary streaming
+# track and album still reach the Wish List, which is what the list is for.
+section('nothing you cannot buy reaches the Wish List — by any route');
+
+# Which list did it actually land in? add() only ever watches 'later', which is the right
+# answer for a redirect but cannot tell "redirected" from "refused".
+sub landed_in {
+    my (%params) = @_;
+    my %before = map { my $l = $_;
+        ($l => { map { $_->{id} => 1 } @{ Plugins::ListenLater::DB::list($l, 'added') } }) }
+        qw(later wishlist);
+    Plugins::ListenLater::Plugin::_addCtxCommand(FakeRequest->new(%params));
+    for my $l (qw(later wishlist)) {
+        my ($new) = grep { !$before{$l}{ $_->{id} } }
+                         @{ Plugins::ListenLater::DB::list($l, 'added') };
+        return ($l, $new) if $new;
+    }
+    return ('nothing stored', undef);
+}
+
+# The built-in Podcasts path resolves an episode against the subscribed feeds before it
+# stores anything, so it needs a feed to get as far as the list decision. Installed HERE,
+# at the end of the file, so every "no feeds" assertion above runs in the world it expects.
+{
+    no strict 'refs'; no warnings 'redefine';
+    # The section above answers handlerForURL for 'deezerpodcast://' ONLY, which is right for
+    # it and leaves the built-in 'podcast://' unplayable — so an episode added here would be
+    # turned away by _isReplayableSource before it ever reached the list decision. Answer for
+    # both schemes now. Defined fresh, NOT chained onto the existing glob: capturing
+    # \&handlerForURL here resolves to THIS sub at call time and recurses (see above).
+    *{'Slim::Player::ProtocolHandlers::handlerForURL'} = sub {
+        return ($_[1] // '') =~ m{^(?:deezer)?podcast://} ? 'Plugins::Deezer::ProtocolHandler'
+                                                          : undef;
+    };
+    *{'Plugins::ListenLater::Podcast::hasFeeds'} = sub { 1 };
+    *{'Plugins::ListenLater::Podcast::resolveEpisode'} = sub {
+        my ($title, $img, $cb) = @_;
+        $cb->({ url => 'podcast://https://example.com/ep.mp3', title => $title,
+                show => 'Some Show' });
+    };
+}
+
+my ($where) = landed_in(name => 'Built-in Ep', list => 'wishlist', kind => 'podcast',
+                        svc => 'podcasts');
+is('a built-in podcast episode is redirected out of the Wish List', $where, 'later');
+
+($where) = landed_in(kind => 'track', trackname => 'Deezer Ep', artist => 'Someone',
+                     svc => 'deezer', favurl => 'deezerpodcast://5551212',
+                     list => 'wishlist');
+is('a DEEZER episode is redirected too — it stores through _saveTrackRecord', $where, 'later');
+
+# ANTI-TESTS. The redirect keys on what the row IS, not on the word "wishlist", so an
+# ordinary track and an ordinary album must still get there.
+# Identities unused anywhere else in this file: the cross-kind single dedupe is live here,
+# and re-adding a title the suite already stored reads as 'nothing stored', not as a refusal.
+($where) = landed_in(kind => 'track', trackname => 'Buyable Track', artist => 'Some Band',
+                     svc => 'qobuz', favurl => 'qobuz://93012480.flac', list => 'wishlist');
+is('an ordinary streaming TRACK still reaches the Wish List', $where, 'wishlist');
+($where) = landed_in(name => 'Buyable Album', svc => 'qobuz', list => 'wishlist',
+                     favurl => 'qobuz://album:wish-album-1?a=Some%20Band&rt=album');
+is('...and an ordinary ALBUM does too', $where, 'wishlist');
+
+# The rule on its own, at the two ends that matter: both podcast SOURCES, not one spelling.
+is('_wishListable: a built-in podcast episode',
+    Plugins::ListenLater::Plugin::_wishListable('track', 'podcast'), 0);
+is('_wishListable: a Deezer podcast episode',
+    Plugins::ListenLater::Plugin::_wishListable('track', 'deezerpodcast'), 0);
+is('_wishListable: a playlist',
+    Plugins::ListenLater::Plugin::_wishListable('playlist', 'tidal'), 0);
+is('_wishListable: an ordinary streaming track',
+    Plugins::ListenLater::Plugin::_wishListable('track', 'deezer'), 1);
+is('_wishListable: an album',
+    Plugins::ListenLater::Plugin::_wishListable('album', 'qobuz'), 1);
+is('_wishListable: no record to judge (kind undef) fails OPEN',
+    Plugins::ListenLater::Plugin::_wishListable(undef, undef), 1);
+
+# --- the saved row's own menu, and the command behind it ---------------------
+# The menu is presentation; the command is the enforcement. Both are asked, because Material
+# replays a history page without re-querying it — a "Move to Wish List" rendered before this
+# build is still tappable — and a CLI caller never saw a menu at all.
+sub menu_titles {
+    my ($id) = @_;
+    my $req = FakeRequest->new(id => $id);
+    Plugins::ListenLater::Plugin::_contextMenuQuery($req);
+    return join ' ', map { $_->[3] } grep { $_->[2] eq 'text' } @{ $req->{loop} || [] };
+}
+sub move_to {
+    my ($id, $status) = @_;
+    Plugins::ListenLater::Plugin::_moveCommand(FakeRequest->new(id => $id, status => $status));
+    my $rec = Plugins::ListenLater::DB::get($id);
+    return $rec ? $rec->{status} : '(gone)';
+}
+
+for my $c ( [ 'a built-in podcast episode', 'podcast',      'track',    0 ],
+            [ 'a Deezer podcast episode',   'deezerpodcast','track',    0 ],
+            [ 'a playlist',                 'tidal',        'playlist', 0 ],
+            [ 'an ordinary album',          'qobuz',        'album',    1 ] ) {
+    my ($what, $source, $kind, $allowed) = @$c;
+    my ($id) = Plugins::ListenLater::DB::add({
+        source => $source, kind => $kind, artist => 'A',
+        track_title => ($kind eq 'track' ? "T-$source" : undef),
+        album_title => "Al-$source", ref_kind => 'search', ref => {},
+    }, 'later');
+    is("menu on $what: Move to Wish List " . ($allowed ? 'offered' : 'withheld'),
+        (menu_titles($id) =~ /PLUGIN_LL_MOVE_WISHLIST/ ? 'offered' : 'withheld'),
+        ($allowed ? 'offered' : 'withheld'));
+    is("...and the move command " . ($allowed ? 'allows it' : 'refuses it'),
+        move_to($id, 'wishlist'), ($allowed ? 'wishlist' : 'later'));
+    # Whatever the verdict, the OTHER moves are untouched — the guard is Wish-List-only.
+    is('...while Move to Played is unaffected', move_to($id, 'played'), 'played');
+}
+
 printf "\n%d passed, %d failed\n", $pass, $fail;
 exit($fail ? 1 : 0);

@@ -1639,5 +1639,115 @@ is('...and ticking the box afterwards registers the podcasts override',
     (grep { $_->[0] eq 'podcasts-album' } @REG) ? 'registered' : 'MISSING', 'registered');
 Slim::Utils::Prefs::set_test_pref_ns('plugin.podcast', 'feeds', []);
 
+# ---------------------------------------------------------------------------
+# An actions.json we cannot READ is not an empty one. Every pass that touches the shared
+# file used to treat the two as the same thing, because _readMaterialActions answered {} for
+# "absent", "could not open" and "could not parse" alike — so a file with a hand-edit syntax
+# error, or one left root-owned/0600 (we run as the server user, not root), was OVERWRITTEN
+# by the tier-0/1 writers and UNLINKED by the tier-2 prune, taking every other plugin's
+# custom actions with it. The prune even logged "removed the now-empty" file about it.
+#
+# The rule these pin: when the content cannot be established, the file is left EXACTLY as it
+# was, byte for byte, and nothing of ours is written. Every case here is asserted on the
+# RAW BYTES on disk, not on a re-read through the plugin's own reader — a reader that cannot
+# parse the file cannot be the witness to whether the file survived it.
+section('an UNREADABLE actions.json is never written over, and never deleted');
+
+sub raw_on_disk {
+    my $f = actions_file();
+    return undef unless -e $f;
+    open my $fh, '<:raw', $f or return '(unopenable)';
+    local $/; my $c = <$fh>; close $fh;
+    return defined $c ? $c : '';
+}
+# Lay down a shared file in whatever state, then run one delivery pass over it.
+sub with_file {
+    my ($content, $mode, $run) = @_;
+    reset_all();
+    File::Path::make_path("$tmp/material-skin");
+    open my $fh, '>:raw', actions_file() or die $!;
+    print $fh $content; close $fh;
+    chmod $mode, actions_file() if defined $mode;
+    $run->();
+    my $got = raw_on_disk();
+    chmod 0644, actions_file() if defined $mode && -e actions_file();
+    return $got;
+}
+# Someone else's actions, and our own entries alongside them — so a pass that DID go through
+# would visibly change the file either way (stripping ours, or blanking the lot).
+my $shared = $JSON->encode({
+    'album'             => [ { title => 'Their Thing', command => [ 'their', 'cmd' ] } ],
+    'otherplugin-album' => [],
+});
+my $damaged = ($shared =~ s/\}\s*\z//r);      # truncated mid-object, as a bad hand-edit is
+
+# --- tier 2: the prune, which is the pass that used to unlink ---
+my $t2 = sub { install_api(); set_material_version('6.4.9');
+               Plugins::ListenLater::Plugin::_registerMaterialActions();
+               Plugins::ListenLater::Plugin::_writeMaterialActions(); };
+
+is('tier 2 prune: a malformed file is not deleted',
+    (defined with_file($damaged, undef, $t2) ? 'kept' : 'DELETED'), 'kept');
+is('...and not altered by so much as a byte',
+    with_file($damaged, undef, $t2), $damaged);
+is('tier 2 prune: an unopenable file is not deleted',
+    (defined with_file($shared, 0000, $t2) ? 'kept' : 'DELETED'), 'kept');
+is('...and its contents are intact',
+    with_file($shared, 0000, sub { $t2->(); chmod 0644, actions_file() }), $shared);
+is('tier 2 prune: valid JSON that is not an OBJECT is left alone too',
+    with_file('[1,2,3]', undef, $t2), '[1,2,3]');
+
+# The husk case the {} answer was RIGHT about, and which must keep working: a file holding
+# nothing at all belongs to nobody, so the prune still removes it.
+is('tier 2 prune: an EMPTY file is still removed as a husk',
+    (defined with_file('', undef, $t2) ? 'kept' : 'removed'), 'removed');
+is('...whitespace only, the same', 
+    (defined with_file("\n  \n", undef, $t2) ? 'kept' : 'removed'), 'removed');
+
+# --- tier 0/1: the write and clear passes, which used to overwrite ---
+my $t01 = sub { remove_api(); set_material_version(undef);
+                Plugins::ListenLater::Plugin::_writeMaterialActions(); };
+is('tier 0 write: a malformed file is not overwritten with our set',
+    with_file($damaged, undef, $t01), $damaged);
+is('tier 0 write: an unopenable file is not overwritten',
+    with_file($shared, 0000, sub { $t01->(); chmod 0644, actions_file() }), $shared);
+
+my $clear = sub { remove_api(); set_material_version(undef);
+                  Plugins::ListenLater::Plugin::_clearMaterialActions(); };
+is('tier 0 clear: a malformed file is not blanked',
+    with_file($damaged, undef, $clear), $damaged);
+is('tier 0 clear: an unopenable file is not blanked',
+    with_file($shared, 0000, sub { $clear->(); chmod 0644, actions_file() }), $shared);
+
+my $uninstall = sub { install_api(); set_material_version('6.4.9');
+                      Plugins::ListenLater::Plugin::_registerMaterialActions();
+                      Plugins::ListenLater::Plugin::_clearMaterialActions(1) };
+is('uninstall: a malformed file survives the departing clean',
+    with_file($damaged, undef, $uninstall), $damaged);
+
+# And the healthy file still goes through all of it, so none of the guards above is just
+# switching the passes off. Our own entries are put in it by a tier-0 write first, so there
+# is something for the prune to actually do.
+reset_all();
+remove_api(); set_material_version(undef);
+Plugins::ListenLater::Plugin::_writeMaterialActions();          # tier 0: ours land in the file
+{
+    my $d = read_file();
+    $d->{'album'} = [ @{ $d->{'album'} || [] },
+                      { title => 'Their Thing', command => [ 'their', 'cmd' ] } ];
+    open my $fh, '>:raw', actions_file() or die $!;
+    print $fh $JSON->encode($d); close $fh;
+}
+is('a readable file really does hold our entries at this point',
+    (ours_in_file(read_file()) > 0 ? 'yes' : 'no'), 'yes');
+install_api(); set_material_version('6.4.9');
+Plugins::ListenLater::Plugin::_registerMaterialActions();
+Plugins::ListenLater::Plugin::_writeMaterialActions();
+is('a READABLE shared file is still pruned — the guards gate on damage, not on sharing',
+    ours_in_file(read_file()), 0);
+is('...and the third party is still in it', scalar @{ read_file()->{'album'} || [] }, 1);
+set_material_version(undef);
+reset_all();
+
 printf "\n%d passed, %d failed\n", $pass, $fail;
 exit($fail ? 1 : 0);

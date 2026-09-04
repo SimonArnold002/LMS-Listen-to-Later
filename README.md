@@ -85,7 +85,7 @@ A **curated or service playlist** — a Qobuz or Deezer editorial list, a TIDAL 
 
 Playlists end up under the same two rules as podcast episodes, for the same reason — a playlist isn't a release you buy, and it isn't a fixed thing you can finish:
 
-- **A playlist never lands in the *Wish List*.** Unlike a podcast episode, a playlist row still *shows* **Add to Wish List** — Material builds a menu per surface, not per row — but pressing it saves to *Listen Later*, and the confirmation tells you which list it went to. **Move to Wish List** isn't offered on a saved playlist at all.
+- **A playlist never lands in the *Wish List*.** A playlist row can still *show* **Add to Wish List** — Material builds a menu per surface, not per row — but pressing it saves to *Listen Later*, and the confirmation tells you which list it went to. **Move to Wish List** isn't offered on a saved playlist either, and is refused if something asks for it anyway. Podcast episodes follow exactly the same three rules.
 - **It never moves itself to *Played*.** A curated playlist changes under you, so "most of it heard" has no meaning. You can still move it to *Played* by hand.
 
 **One kind that can't be saved as a playlist: a Qobuz *personal* playlist with no cover of its own.** Qobuz gives those a constituent track's album art and no identifiable link, which makes them indistinguishable from an album row — so they're saved the way they always were rather than as a playlist. Editorial Qobuz playlists, which have their own artwork, are fine.
@@ -103,7 +103,9 @@ Qobuz, Tidal and Bandcamp have no podcasts, so there's nothing to save there.
 
 A Podcasts-app episode plays back through the Podcasts plugin, so its resume position keeps working. A Deezer or Spotify episode plays through that service, exactly as it would if you'd started it from the service's own menu.
 
-There's no *Add to Wish List* for a podcast — you don't buy podcast episodes. (In a mixed list such as Favourites the entry can still appear, because the menu is built per list rather than per row; saving from it puts the episode in *Listen Later* anyway.)
+There's no *Add to Wish List* for a podcast — you don't buy podcast episodes. The entry can still *appear* over an episode, because Material builds a menu per surface rather than per row: in a mixed list such as Favourites, and on a Deezer episode browsed inside the Deezer app. Pressing it saves the episode to *Listen Later* instead, and the confirmation says so; **Move to Wish List** isn't offered on the saved row either.
+
+*Spotify episodes are the exception, deliberately.* Spotty plays them through `spotify://episode:<id>`, so they're stored and shown as **Spotify tracks** rather than as podcasts — which is what they are to everything downstream, from the row's icon to its subtitle. They can therefore go in the *Wish List* like any other Spotify track.
 
 **Whole shows can't be saved — only episodes.** A podcast series isn't a release: it has no end, and it changes under you, so "have you finished it" has no answer. Adding a *show* rather than an episode is refused, on every source — the Podcasts app, Deezer and Spotify alike.
 

@@ -297,6 +297,17 @@ does not cover. Say which ledger entry you are challenging and what changed.
   stub now models `album`/`albumname` as the separate accessors they are; the suite stays green
   through the correction, which is what shows behaviour never depended on it.
 
+- **A SPOTIFY podcast episode CAN go in the Wish List; a Deezer or Podcasts-app one cannot.
+  Deliberate, VERIFIED 2026-09-04, and not an oversight in the 0.1.125 fix.** `_wishListable`
+  asks `Sources::isPodcastSource`, which answers for `podcast` and `deezerpodcast` and
+  deliberately NOT for `spotify`: Spotty plays an episode through `spotify://episode:<id>`, so
+  it is stored under source `spotify` and is a Spotify TRACK to everything downstream — the
+  Browse glyph, the type word, the source segment and the replay path all read it that way.
+  Confirmed by running it: `list:wishlist` on a `spotify://episode:` favurl stores in
+  `wishlist` with `source='spotify'`. Widening `isPodcastSource` to cover it is not a one-line
+  change — it relabels those rows across Browse — and would be a feature decision, not a bug
+  fix. Documented in README.md under *Podcasts* so the asymmetry is stated rather than found.
+
 ### C. CLOSED FINDINGS
 
 The version history below records review fixes inline (0.1.26, 0.1.32 onward).
@@ -769,6 +780,51 @@ looking at.
   Deezer one is the whole reason the gate cannot live inside `favurlIsTrack`, and an anti-test
   that only asserted "something stored" would have let that placement error through.
 
+**Eleventh round of 2026-09-04 — CLOSED, two findings, both CONFIRMED BY RUNNING THE CODE and
+both FIXED. Shipped as 0.1.125.** Run against the 0.1.124 tree. Tests 1183 → 1220 assertions,
+14 suites green. The round's value is that executing each finding widened BOTH of them: neither
+was as small as the read-only report said.
+
+| # | finding | disposition |
+|---|---|---|
+| 1 | `_pruneMaterialActions` unlinks the shared `actions.json` on `!keys %$data`, but `_readMaterialActions` answers `{}` for "absent", "could not open" and "malformed" alike | **FIXED** — `_readMaterialActions` now answers `undef` for unreadable; all three callers bail out without writing. Reproduced first: a truncated file and an unopenable one were both DELETED, control kept |
+| 2 | a Deezer podcast episode (`deezerpodcast://`, new in 0.1.124) stores through `_saveTrackRecord`, the one save path with no Wish List redirect | **FIXED** — one carrier (`_wishListable`) now consulted at five sites. Reproduced first: built-in episode → `later`, Deezer episode → `wishlist` |
+
+**A READER THAT COLLAPSES "NOTHING THERE" WITH "I COULD NOT TELL" HANDS EVERY CALLER A
+DESTRUCTIVE DEFAULT.** `_readMaterialActions` returned `{}` for three different questions, and
+each of its three callers then acted on the emptiest possible reading: the tier-0/1 writers
+overwrote the shared file, and the tier-2 prune unlinked it — logging "removed the now-empty"
+file about a file full of another plugin's actions. No caller was wrong given what it was told.
+The fix belongs in the reader, and the ZERO case has to be split from the UNKNOWN case there,
+once, rather than re-guessed at each call site. **An empty file is still `{}`** — it holds
+nothing of anyone's, so the husk removal stays; that distinction is pinned both ways in the
+suite.
+
+**RUNNING THE FINDING WIDENED BOTH OF THEM, AND A READ COULD NOT HAVE.** Finding 1 was written
+about malformed JSON; executing it showed the identical delete for a file we merely lack
+PERMISSION to open — the realistic case on the live box, where LMS runs as `squeezeboxserver`
+and a root-owned `actions.json` is unopenable while being perfectly valid. Finding 2 was written
+about Deezer; a control row proved the `Move to Wish List` half hits BOTH podcast sources
+(an episode is `kind='track'`, and the old exclusion tested `kind eq 'playlist'`), so the menu
+defect predated 0.1.124 entirely. **Write the control into the reproduction** — "playlist has no
+Move to Wish List, podcast does" is the line that turned one finding into its real shape.
+
+**FOUR CONSUMERS OF ONE RULE IS THREE TOO MANY** (the fleet's one-carrier rule, again). "You
+cannot put this in the Wish List" was answered independently by `_savePodcastEpisode`,
+`_savePlaylistRecord`, `_contextMenuQuery` — and not at all by `_saveTrackRecord`. The newest
+consumer is where the hole appears, because a new storage path is written against the paths it
+resembles, not against a rule nobody stated in one place. `_wishListable(kind, source)` is now
+that place, and it is asked of the STORED shape, never of the menu the row was tapped in:
+Material builds a menu per surface, not per row, so the menu can never be the guard.
+
+**THE MENU IS PRESENTATION; THE COMMAND IS ENFORCEMENT.** Fixing `_contextMenuQuery` alone would
+have left the rule holding only for users on a freshly-rendered page — Material replays a
+history page without re-querying, so a `Move to Wish List` rendered before the upgrade stays
+tappable, and a CLI caller never saw a menu at all. `_moveCommand` now asks the same carrier.
+That gap was open for PLAYLISTS too, since the playlist redirect shipped, and was found only by
+asking "what else can set this column?" — `DB::setStatus` has exactly one caller, which is what
+made the answer cheap.
+
 ### D. ADDING TO THIS LEDGER
 
 When a finding is declined, or accepted-but-deferred, add it here in the same
@@ -914,6 +970,23 @@ ours *and now empty*, and puts back only what Material REFUSED.
 `getCustomActions` tests `if (customActions || pluginCustomActions)` and `getSectionActions`
 tests `if (list && list[section])`. A missing file and an empty one are identical to Material.
 Anything foreign keeps the file alive, so "remove ours" and "leave theirs alone" never conflict.
+
+**...but only as far as the file can be READ (0.1.125).** "Anything foreign keeps it alive" was
+true of a file we could PARSE and false of one we could not, and `_readMaterialActions` answered
+`{}` to three different questions — absent, could-not-open, could-not-parse. So a truncated
+`actions.json`, or a valid one left root-owned/0600 that LMS (running as `squeezeboxserver`)
+cannot open, reached this delete with an empty `$data` and was removed, logging *"removed the
+now-empty"* about a file full of someone else's actions. Both reproduced. The reader now answers
+**`undef` for unreadable**, and all three callers — this prune, the tier-0/1 write and the clear
+pass, which overwrote for the identical reason — return without touching the file. **An EMPTY
+file still reads as `{}`**: it holds nothing of anyone's, so the husk removal above is unchanged,
+and the suite pins that boundary in both directions.
+
+Bailing out cannot double a menu, which is the standing hazard here: Material streams THIS file
+for `/material/customactions.json` (`MaterialSkin::Plugin::_customActionsHandler`) and the client
+does `customActions = eval(resp.data)` inside a `.then`. A file we cannot open does not stream;
+one we cannot parse does not eval. Either way `customActions` stays undefined — so there are no
+file entries to appear beside the registered ones.
 
 **Two fallbacks keep it honest, and both are gated:**
 - `%UNREGISTERED` — positives Material refused. Written to the file even if the file has to be
@@ -3589,6 +3662,8 @@ The "Add to Listen Later"/"Add to Wish List" custom actions appear on streaming 
   refused, so episode support cannot quietly reopen the container.
 
   Podcast `CACHE_VER` bumped 28 → 29 with the build per the dev-build cache rule.
+
+- **0.1.125** — Eleventh review round, two findings, both reproduced before being fixed. **(1) A shared `actions.json` we cannot READ is no longer treated as an empty one.** `_readMaterialActions` answered `{}` for "absent", "could not open" and "malformed JSON" alike, so a hand-edit syntax error — or a file left root-owned/0600, which LMS running as `squeezeboxserver` cannot open — was OVERWRITTEN by the tier-0/1 writers and UNLINKED by the tier-2 prune, taking every other plugin's custom actions with it and logging "removed the now-empty" file about it. It now answers `undef` for unreadable and all three callers bail out without writing; an EMPTY file still reads as `{}` so the husk removal is unaffected. Safe to bail because Material streams this same file and neither an unopenable nor an unparseable one reaches `customActions` (`MaterialSkin::Plugin::_customActionsHandler` + `customactions.js`), so nothing can be doubled. **(2) The Wish List rule has one carrier.** `_wishListable(kind, source)` replaces four independent answers; a Deezer podcast episode (`deezerpodcast://`, 0.1.124) stores through `_saveTrackRecord`, which had no redirect, so it landed in the Wish List the identical built-in episode was redirected out of — and `Move to Wish List` was offered on the saved row of BOTH podcast sources, because the old exclusion tested `kind eq 'playlist'` and an episode is `kind='track'`. `_moveCommand` now asks the same carrier, since the menu is presentation and the command is enforcement (Material replays a stale page without re-querying). Spotify episodes are deliberately excluded — see §B. Tests 1183 → 1220, 14 suites green. Podcast `CACHE_VER` 29 → 30 per the dev-build cache rule.
 
 ## Regression tests — RUN THESE BEFORE ANY BUILD (added 2026-07-29)
 
