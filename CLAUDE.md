@@ -149,6 +149,42 @@ subsystem.
   so it could not catch a wrong guess, and the account it depends on is rate-limited. The URL is
   the identity here — see *Identity: what Played actually matches on*. A blank show is a display
   and dedupe shortcoming, never a Played failure.
+  **AND THE HANDLER'S ANSWER IS NOT SELF-VALIDATING (0.1.130).** "Whatever it does not know it
+  simply does not answer" was assumed from 0.1.127 and is FALSE: Spotty's `getMetadataFor` has
+  two early returns — `!hasCredentials()` and `!hasSSL()` — that set the title AND the artist to
+  a localised hint string with `duration => 0`. Non-empty, and different from whatever the row
+  holds, so the old "take it if it differs" test accepted them and stored "Please authorize this
+  player…" as an episode's title, artist, and dedupe-key title segment, permanently. The gate is
+  a positive `duration`, applied to the WHOLE fill: every genuine answer from both reachable
+  handlers carries one (Spotty `duration_ms/1000` — `_removeUnused` keeps that field, checked —
+  and Deezer the API's `duration`), and all three junk shapes carry 0 or none. **It is
+  source-agnostic on purpose and must stay that way** — naming a service here would make this the
+  fourteenth adapter site, which is precisely what the carrier exists to avoid.
+  **Do NOT copy this gate onto `_nowPlayingFallback`**, which shares the reader: live radio
+  legitimately reports `duration 0` with a real title, so it would refuse a valid fill there. It
+  is right HERE because this runs against a browse row that is not the playing track, which is
+  also the only reason the error branches are reachable at all.
+- **`_migrateArtistPrefix`'s four-column SELECT is CORRECT, and the "obvious fix" is a
+  REGRESSION — DISPROVEN 2026-09-04. Do not widen it.** The finding was that it now calls
+  the one-carrier `_keyForRow` while still selecting only `id, artist, album_title, year`, so
+  with no `kind`/`dedupe_key`/`track_title`/`source`/`ref_json` the carrier degrades to the
+  plain album key for every row — the album-vs-track drift `_keyForRow` exists to close. The
+  degradation is real and it is **unreachable, by ladder ORDER rather than by luck**:
+  `_migrateArtistPrefix` runs at `$schemaVer < 1`, and `kind`/`track_title`/`rel_type` are
+  added at `$schemaVer < 2`, i.e. AFTER it. So on the only DBs where it does any work — a
+  pre-0.1.72 file — those columns **do not exist**, no track or playlist row can exist either,
+  and `album` is the right answer for every row it can see. On a fresh install `CREATE TABLE`
+  has the columns but `_migrate` runs inside `dbh()` before the handle is returned, so the
+  table is empty at that moment. **MEASURED, not argued:** against a real pre-0.1.74 table
+  (DBD::SQLite 1.64) the current SELECT returns its rows and the proposed one dies `no such
+  column: kind` — which the `eval { … } or return` swallows, so the artist-prefix cleanup
+  silently never runs on precisely the databases that need it. The call site now passes
+  `kind => 'album'` explicitly so the invariant is stated rather than accidental. The other
+  three `_keyForRow` feeds were checked in the same pass and are complete: `_migrateRefold`
+  selects all 17 columns, and `updateArtist`/`updateYear` pass `get($id)`, which is
+  `SELECT *`. **Re-raise only if the migration is ever MOVED below the column-adding rung** —
+  reordering the ladder is what would make the extra columns both safe and necessary, and it
+  would also regress `user_version` on the first boot after the move.
 - **THE DEDUPE KEY HAS ONE WRITER: `DB::_keyForRow` (0.1.129). Do not add a second.** Five
   writers used to answer "what key does this row have" — `add`, `updateArtist`, `updateYear`,
   `_migrateArtistPrefix`, `_migrateRefold` — and two had drifted: `updateArtist`/`updateYear`
@@ -215,6 +251,23 @@ subsystem.
   third-party `favorites-*` is deletable — is the accepted trade-off `%ours` carries
   for every legacy name, bounded by the only-empty / only-ours rules. **Do not use
   `git log -S` alone to prove this repo never shipped something.**
+  **RE-RAISED 2026-09-04 by a different route and RE-DECLINED — the entry above covers
+  it, and this names the route so the next round recognises it.** The new framing was
+  that `_pruneMaterialActions` deletes an empty category on NAME alone (`$ours{$cat} ||
+  $emptied{$cat}`, where `%ours` folds in `@suppressors` and both legacy sets) while the
+  WRITE path requires provenance (`$emptied{$cat} || $owned{$cat}`), so the prune "dropped
+  the write path's rule". The asymmetry is real and is not drift: on a PRE-LEDGER install
+  `%owned` is itself the name-based seed (`_ownedCats`'s `||=` fallback claims
+  `<cmd>-album`/`-track` for every supported command), so both passes answer by name there
+  — and the wide set is what lets the prune remove what an OLDER build wrote, which is the
+  one thing the ledger cannot know. **The governing reasoning is already written out at
+  `Plugin.pm`'s `_ownedCats` header**: an empty category with our name is indistinguishable
+  from a third party's by content, there is nothing in the file to tell them apart, and the
+  protection therefore lives where it can be exact (`_isOurAction`, and the only-empty /
+  never-unlink-a-non-empty-file rules). Narrowing `%ours` to `%owned` for the suppressor
+  family would trade a bounded, deliberate residual for the 0.1.51 regression class.
+  **Re-raise only with a case the `_ownedCats` header does not cover** — restating the
+  write-path/prune asymmetry is not new information.
 - **`foldLatin`'s `utf8::is_utf8` gate is sound HERE — DECLINED 2026-09-03.** The
   finding was that gating the NFD/`%FOLD` pass on a STORAGE flag skips folding for a
   downgraded Latin-1-range character string (`Björk` → `bj rk`), which is not a
@@ -4052,6 +4105,42 @@ The "Add to Listen Later"/"Add to Wish List" custom actions appear on streaming 
   at play time (`"Kygo, Khalid, Gryffin"`) while the row may store one — `_matchRecord`'s
   `findByAlbum` + `_artistMatch` subset rescue matches in BOTH directions, so Played is not
   affected. Tests: `t_addpath.pl` 208 → 213, `t_db.pl` 60 → 66 (4 red without the carrier).
+
+- **0.1.130** — Fourteenth review round. Three findings, **one fixed and two disproven**, and
+  the two disprovals are the more useful half — both are now in Review Ledger A2 with the
+  evidence, because each had a plausible "obvious fix" and one of them was a regression.
+  **(1) FIXED — `_fillFromPlayingMeta` accepted a handler's ERROR TEXT as an episode's name.**
+  Its header claimed a guard ("some return a placeholder while an async fetch runs… which is why
+  the value has to differ from what we hold") that the code did not implement: `$t ne $$trackRef`
+  only skips a redundant write. Reading both handlers that can reach it — the caller gates on
+  `isPodcastEpisode` and the built-in Podcasts app takes `_savePodcastEpisode`, so it is Spotty
+  and lms-deezer's `PodcastProtocolHandler`, nothing else — **the placeholder it names does not
+  exist** (both answer no title at all on a cache miss), while two shapes that DO answer a
+  non-empty name were being taken: Spotty's `!hasCredentials()` and `!hasSSL()` early returns set
+  title AND artist to a `cstring` hint with `duration => 0`. A Spotify episode row arrives with
+  `$artist` deliberately undef'd, so the fill-only path took the hint outright. Now gated on a
+  positive `duration` for the whole fill — source-agnostic, and NOT to be copied onto
+  `_nowPlayingFallback` (live radio reports 0 with a real title). Reachable at ADD time and not at
+  play time, because this runs against a browse row that is not the playing track. Anti-tested
+  both ways: gate off → 4 red naming the stored hint string; gate always-on → 2 red on the
+  positive controls, so it cannot be widened into refusing every fill.
+  **(2) DISPROVEN — `_migrateArtistPrefix`'s four-column SELECT, and the proposed fix breaks it.**
+  Measured against a real pre-0.1.74 table rather than argued: the ladder adds `kind`/`track_title`
+  BELOW that rung, so the "fixed" SELECT dies `no such column: kind`, which `eval {…} or return`
+  swallows — the cleanup would silently stop running on exactly the databases needing it. The call
+  site now asserts `kind => 'album'` so the invariant is stated. The other three `_keyForRow` feeds
+  were checked in the same pass and are complete.
+  **(3) DECLINED — the prune's `%ours` deleting an empty category by NAME.** Already settled at
+  `Plugin.pm`'s `_ownedCats` header; the ledger entry now names this route too.
+  **A correction made mid-round, recorded because it nearly became a finding:** the reasoning that
+  Spotty's cached `'Failed to get access token'` entry makes `getMetadataFor` DIE (`@{undef}` on
+  the missing `artists` key) is wrong — that is an rvalue deref, it yields an empty list. Ran it.
+  The entry is harmless for an unrelated reason: it stores `title`/`duration` where the reader
+  looks for `name`/`duration_ms`, so it surfaces as `title => undef, duration => 0`.
+  **A stale comment removed at the call site**: "whatever it does not know it simply does not
+  answer" was the 0.1.127 assumption this round disproves. Tests 1,287 → 1,292, 14 suites green;
+  `matcher_sync_check.py` exits 0. Podcast `CACHE_VER` 34 → 35 per the dev-build cache rule;
+  nothing here parses a feed, so it is hygiene, not a fix.
 
 ## Regression tests — RUN THESE BEFORE ANY BUILD (added 2026-07-29)
 

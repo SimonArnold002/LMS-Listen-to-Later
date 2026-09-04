@@ -448,7 +448,14 @@ sub _migrateArtistPrefix {
         my $clean = $r->{album_title};
         next unless $clean =~ s/^\s*\Q$r->{artist}\E\s+[-\x{2012}\x{2013}\x{2014}\x{2015}\x{2212}]\s+//i
                  && length $clean;
-        my $key = _keyForRow({ %$r, album_title => $clean });
+        # kind => 'album' is asserted, not assumed, and it is the whole reason this SELECT
+        # stays four columns wide. This rung runs at `user_version < 1`; `kind`/`track_title`
+        # are added at `< 2`, BELOW it — so on the only DBs that reach here (pre-0.1.72) those
+        # columns do not exist, no track or playlist row can exist either, and selecting them
+        # would make the SELECT die `no such column: kind`, which the `or return` above
+        # swallows: the cleanup would silently stop running on exactly the databases needing
+        # it. Saying 'album' out loud is what stops that being re-"fixed". See Review Ledger A2.
+        my $key = _keyForRow({ %$r, album_title => $clean, kind => 'album' });
         eval {
             $h->do('UPDATE albums SET album_title = ?, dedupe_key = ? WHERE id = ?',
                 undef, $clean, $key, $r->{id});

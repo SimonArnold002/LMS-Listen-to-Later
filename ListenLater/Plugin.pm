@@ -2152,8 +2152,12 @@ sub _saveTrackRecord {
     # service and got it wrong; there is only one right source for it, and this is it.
     #
     # Synchronous, local, and free: getMetadataFor reads the service plugin's own cache — no
-    # HTTP call, no callback, no timeout, and nothing to hang the add. Whatever it does not
-    # know it simply does not answer, and the row keeps what it arrived with.
+    # HTTP call, no callback, no timeout, and nothing to hang the add.
+    #
+    # It does NOT follow that whatever it cannot describe it leaves alone — that was assumed
+    # here until 0.1.130 and it is false. Spotty's getMetadataFor has two early returns that
+    # answer a localised HINT STRING in both the title and the artist fields. The carrier
+    # decides what is trustworthy; see the gate in its header.
     #
     # Scoped to podcast EPISODES deliberately. A music track's browse row is already the
     # title and artist, so there is nothing to correct, and widening this to every streaming
@@ -2201,16 +2205,54 @@ sub _saveTrackRecord {
 #
 # The title is the exception to "only if absent": a handler that names the track is stating
 # the string it will report at play time, and that is the one the metadata fallback needs —
-# so it wins over a browse row's decorated version. Guarded on the handler actually knowing
-# it (some return a placeholder while an async fetch runs, and a placeholder must never
-# replace a real title), which is why the value has to differ from what we hold rather than
-# merely exist.
+# so it wins over a browse row's decorated version.
+#
+# WHICH HANDLERS CAN REACH THIS, AND WHAT THEY ANSWER — read from their source 2026-09-04,
+# not inferred. The caller gates on `isPodcastEpisode`, and the built-in Podcasts app takes
+# `_savePodcastEpisode` instead (its names come from the RSS feed), so exactly two handlers
+# arrive here: Spotty for `spotify://episode:<id>` and lms-deezer's PodcastProtocolHandler
+# for `deezerpodcast://<id>`.
+#
+#   Spotty ProtocolHandler::getMetadataFor
+#     cache HIT    -> title/artist/album real, duration = duration_ms/1000  (> 0)
+#     cache MISS   -> $meta = {}; title undef                               (no duration)
+#     NO CREDENTIALS -> EARLY RETURN with artist AND title both set to
+#                       cstring('PLUGIN_SPOTTY_NOT_AUTHORIZED_HINT'), duration => 0
+#     NO SSL         -> the same shape with PLUGIN_SPOTTY_MISSING_SSL
+#   Deezer PodcastProtocolHandler::getMetadataFor
+#     cache HIT    -> title + album (the show) + duration from the API      (> 0)
+#     cache MISS   -> $defaultMeta: bitrate/type/icon/cover only            (no title)
+#
+# SO THE GUARD IS A POSITIVE `duration`, AND IT GUARDS THE WHOLE FILL, not just the title.
+# The two Spotty error branches are the only shapes that answer a non-empty NAME without
+# describing a real episode — and they answer it for the ARTIST too, which matters here
+# because a Spotify episode row arrives with `$artist` deliberately undef'd above, so the
+# fill-only path would take the hint string outright. Both carry `duration => 0`; every
+# genuine answer carries a real one (an episode always has a length). A handler that knows
+# nothing yet answers no title at all, so the previously-claimed "placeholder while an async
+# fetch runs" is not a shape either of these produces — and testing that the value merely
+# DIFFERS from what we hold, as this used to, never excluded one anyway.
+#
+# The cost of being wrong in the safe direction is nil: the row keeps the strings it arrived
+# with (already corrected by `stripEpisodeDatePrefix`), which is exactly the pre-0.1.127
+# behaviour. Getting it wrong the other way stores "Please authorize…" as an episode's title
+# and artist, permanently, and puts that string in the dedupe key's title segment.
 sub _fillFromPlayingMeta {
     my ($client, $url, $trackRef, $artistRef, $albumRef) = @_;
     return unless $client && defined $url && length $url;
 
     my $meta = eval { Plugins::ListenLater::Sources::playingMeta($client, $url) };
     return unless ref $meta eq 'HASH' && keys %$meta;
+
+    # Does this answer describe a real episode? See the table above. Numeric-shaped first,
+    # because a handler is free to answer a string and `> 0` on one would warn (and this
+    # module has no `use warnings`, so it would be silent rather than merely noisy).
+    my $dur = $meta->{duration};
+    unless (defined $dur && !ref $dur && $dur =~ /^\d+(?:\.\d+)?$/ && $dur > 0) {
+        $log->info("LL: handler answered no playable duration for $url — filling nothing "
+            . 'from it (an auth/SSL failure answers hint strings in the name fields)');
+        return;
+    }
 
     my $take = sub {
         my ($k) = @_;
@@ -2227,7 +2269,9 @@ sub _fillFromPlayingMeta {
         $log->info("LL: filled $key from the handler for $url: '$v'");
     }
 
-    # The title only when the handler HAS one and it differs — see the note above.
+    # The title only when the handler HAS one. The `ne` is NOT a guard — whether the answer
+    # can be trusted was settled by the duration gate above; this only skips a redundant
+    # write and the log line that goes with it.
     my $t = $take->('title');
     if (defined $t && (!defined $$trackRef || !length $$trackRef || $t ne $$trackRef)) {
         $log->info("LL: handler names this track '$t' (row said '"

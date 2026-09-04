@@ -1147,6 +1147,14 @@ section('a podcast episode stores what the handler will report while playing');
 #     artist => "Kygo, Khalid, Gryffin", title => "Save My Love"
 # Note what that shape does NOT contain: any album id, and any separate publisher field. The
 # handler answers a flat trio of strings, which is all this path needs.
+#
+# EVERY FIXTURE ALSO CARRIES A `duration`, and that is not decoration — it is the fact
+# `_fillFromPlayingMeta` gates the whole fill on. Read from both handlers' source 2026-09-04:
+# Spotty's cache hit sets `duration => $cached->{duration_ms}/1000` and lms-deezer's complete
+# episode meta carries the API's `duration`, so a real answer always has one, while the three
+# shapes that answer a NAME without describing an episode do not. A fixture without a duration
+# therefore models a handler that knows nothing — which is what the §fallback case below uses
+# it for deliberately. Do not "tidy" durations in or out; they decide which branch runs.
 our %HANDLER_META;
 our $HANDLER_ASKED;
 {
@@ -1167,9 +1175,10 @@ our $HANDLER_ASKED;
 my $EPCL  = bless {}, 'FakePlayingClient';
 my $EPURL = 'spotify://episode:9wMPFS9B5V7gg6hZ3UZ7hf';
 $HANDLER_META{$EPURL} = {
-    title  => 'Mission Killer',
-    album  => 'Serial',
-    artist => 'Serial Productions',
+    title    => 'Mission Killer',
+    album    => 'Serial',
+    artist   => 'Serial Productions',
+    duration => 2732,
 };
 
 $r = add(_client => $EPCL,
@@ -1250,7 +1259,7 @@ is('the metadata fallback does NOT find an episode — it is url-keyed, by desig
 {
     my $u = 'spotify://episode:6wMPFS9B5V7gg6hZ3UZ7hf';
     $HANDLER_META{$u} = { title => 'Episode Two', album => 'A Different Show',
-                          artist => 'A Different Publisher' };
+                          artist => 'A Different Publisher', duration => 1810 };
     my $r2 = add(_client => $EPCL,
                  kind => 'track', trackname => 'Episode Two', name => 'Serial',
                  artist => 'A Publisher The Row Knew', svc => 'spotty',
@@ -1272,11 +1281,59 @@ is('the metadata fallback does NOT find an episode — it is url-keyed, by desig
     is('...and the handler is never asked about it', $HANDLER_ASKED, undef);
 }
 
+# THE FAILURE SHAPE THE FILL MUST REFUSE, and the reason the guard is a duration rather than
+# a "does it differ" test. Spotty's getMetadataFor has two EARLY RETURNS — no credentials, and
+# no SSL — that set BOTH `artist` and `title` to a localised hint string and `duration => 0`
+# (read verbatim from Spotty ProtocolHandler.pm, 2026-09-04). Those strings are non-empty and
+# they differ from whatever the row holds, so the pre-fix code took them: the episode was
+# stored titled "Please authorize this player…", permanently, with the same string as its
+# artist and inside its dedupe key.
+#
+# It is reachable at ADD time in a way it is not at play time — this sub runs against a row
+# the user tapped in a browse list, which is NOT the playing track, so nothing else has had to
+# succeed against the service first.
+#
+# ANTI-TEST: drop the duration gate and both of these go red, the first naming the hint string
+# it stored as the title. The positive controls above are what stop the gate being widened
+# into refusing every fill.
+{
+    my $hint = 'Please authorize this player on your Spotify account';
+    for my $c ([ 'dd3dd3dd3dd3dd3dd3dd3d', 'no credentials' ],
+               [ 'ee3ee3ee3ee3ee3ee3ee3e', 'no SSL' ]) {
+        my ($id, $why) = @$c;
+        # duration => 0 is the shape, not an omission: the hint branches build a full hash.
+        $HANDLER_META{"spotify://episode:$id"} = {
+            title => $hint, artist => $hint, album => '', duration => 0,
+        };
+        my $b = add(_client => $EPCL, name => '2026-04-04 - Real Episode Title',
+                    artist => 'a blurb the row supplied', svc => 'spotty',
+                    favurl => "spotify:episode:$id");
+        is("Spotty answering a $why hint does NOT become the title",
+            ($b ? $b->{track_title} : 'nothing'), 'Real Episode Title');
+        is("...nor the artist",  ($b ? $b->{artist} : 'nothing'), undef);
+    }
+}
+
+# ...and the neighbouring shape, for the same reason: a cache MISS. Spotty returns `{}` with
+# no title at all here (it fires an async fetch and answers what it has), so the fill has
+# nothing to take even before the gate — asserted so that "the miss is harmless" is a checked
+# fact rather than an assumption about a third party's code.
+{
+    $HANDLER_META{'spotify://episode:ff3ff3ff3ff3ff3ff3ff3f'} = {
+        bitrate => '320k VBR', type => 'Ogg Vorbis (Spotify)',
+    };
+    my $m = add(_client => $EPCL, name => '2026-05-05 - Cache Cold',
+                svc => 'spotty', favurl => 'spotify:episode:ff3ff3ff3ff3ff3ff3ff3f');
+    is('a cold Spotty cache leaves the row exactly as it arrived',
+        ($m ? $m->{track_title} : 'nothing'), 'Cache Cold');
+}
+
 # A DEEZER episode takes the identical path — this is the "no different from other services"
 # assertion. Same fill, same reader, no per-service branch.
 {
     my $u = 'deezerpodcast://927648402';
-    $HANDLER_META{$u} = { title => 'The Floor', album => 'The Minimalists' };
+    $HANDLER_META{$u} = { title => 'The Floor', album => 'The Minimalists',
+                          duration => 3122 };
     my $d = add(_client => $EPCL, kind => 'track', trackname => 'The Floor',
                 svc => 'deezer', favurl => 'deezerpodcast://927648402');
     is('a Deezer episode stores', ($d ? $d->{kind} : 'nothing'), 'track');
