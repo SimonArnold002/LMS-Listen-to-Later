@@ -29,6 +29,7 @@ use Slim::Utils::Cache;
 use Slim::Utils::Log;
 use Slim::Utils::Prefs;
 use URI::Escape ();
+use Encode ();
 
 my $log   = Slim::Utils::Log::logger('plugin.listenlater');
 my $cache = Slim::Utils::Cache->new();
@@ -39,7 +40,7 @@ my $cache = Slim::Utils::Cache->new();
 use constant FEED_TTL          => 3600;        # 1h
 use constant FEED_FALLBACK_TTL => 7 * 86400;   # 7d
 use constant HTTP_TIMEOUT      => 20;
-use constant CACHE_VER         => 35;           # bump to invalidate parsed feeds
+use constant CACHE_VER         => 36;           # bump to invalidate parsed feeds
 
 # The user's subscribed podcasts, read from the Podcast plugin's OWN prefs — the only
 # place the durable feed urls exist. Each entry is { name => <show>, value => <rss url> }.
@@ -140,6 +141,62 @@ sub _feedEpisodes {
     return;
 }
 
+# The feed body arrives as RAW BYTES. Slim::Networking::SimpleHTTP::Base::content is
+# `${ $self->contentRef }` with no charset step anywhere above it, so every field pulled out
+# below is octets. Three things went wrong downstream of that, all measured:
+#
+#  1. THE VISIBLE ONE, and it needs no entity at all. DB's handle sets `sqlite_unicode`, so
+#     it takes CHARACTERS; handing it the raw "Bj\xc3\xb6rk" stores codepoints U+00C3,U+00B6
+#     and the list renders "BjÃ¶rk". Every accented episode title and show name was stored
+#     double-encoded.
+#  2. _clean's numeric-entity pass (`chr($1)`) mixes codepoints INTO that byte string.
+#     "Bj&#246;rk" puts byte 0xF6 in an unflagged string, which is not valid UTF-8, so
+#     DB::foldLatin's decode fails, the accent fold is SKIPPED, and the key is 'bj rk' where
+#     every other producer keys 'bjork'. Played's findSavedTrack then never matches it and
+#     the episode is never marked played.
+#  3. A WIDE entity next to raw UTF-8 is worse: chr(8217) upgrades the whole string, so the
+#     UTF-8 bytes already in it are reinterpreted as latin-1 — "La\xc3\xads Martins&#8217;"
+#     stores as "LaÃ­s Martins’", wrong on screen AND in the key.
+#
+# 2 and 3 write a wrong dedupe_key, which is UNIQUE and permanent. One decode, before any
+# entity pass, fixes all three: _clean's chr() and DB::foldLatin then work in one
+# representation.
+#
+# TEXT ONLY — the urls stay octets, and that is load-bearing, not laziness. Each is compared
+# against a value that reaches it as octets:
+#   • `url` round-trips through ref_json and is compared `eq` against the PLAYING track's url
+#     in DB::findTrackByUrl. Stored as characters it stops matching and the episode is never
+#     marked played — the very bug 2 causes by the other route.
+#   • `image` is compared `eq` against _realImageUrl($IMAGE), which uri_unescape's Material's
+#     escaped url and so yields octets too.
+# Decoding either was measured to break its match for every non-ASCII url. `duration` and
+# `pubDate` are ASCII by format and need nothing.
+sub _charset {
+    my ($xml) = @_;
+    return $1 if $xml =~ /^\s*<\?xml[^>]*\bencoding=["']([\w:.-]+)["']/i;
+    return 'utf-8';
+}
+
+# Decode one extracted TEXT field to characters. UNCONDITIONALLY, including a pure-ASCII one:
+# the entity pass that runs after this can introduce a non-ASCII codepoint that was never in
+# the bytes ("Bj&#246;rk" is ASCII until chr(246) runs), and appending a codepoint to an
+# unflagged string is exactly bug 2 above. Flagging here means chr() lands in a character
+# string whatever the field looked like.
+#
+# Falls back through utf-8 then cp1252 so a mislabelled feed still yields text rather than
+# dying: FB_CROAK makes a wrong declared charset fail loudly enough to try the next, and
+# cp1252 accepts every byte, so this always returns something.
+sub _decodeText {
+    my ($s, $charset) = @_;
+    return $s unless defined $s && length $s;
+    return $s if utf8::is_utf8($s);
+    for my $enc ($charset, 'utf-8') {
+        my $d = eval { Encode::decode($enc, $s, Encode::FB_CROAK()) };
+        return $d if defined $d;
+    }
+    return Encode::decode('cp1252', $s);
+}
+
 # Parse an RSS podcast feed -> (\@episodes, $showName). Deliberately a tolerant regex scan
 # rather than a full XML parse: podcast RSS is machine-generated, we need four fields per
 # item, and this can't die on the malformed-but-common feeds an XML parser would reject.
@@ -147,11 +204,13 @@ sub _parseFeed {
     my ($xml) = @_;
     return ([], undef) unless defined $xml && length $xml;
 
+    my $charset = _charset($xml);
+
     # Show name = the channel <title> (the first one, before any <item>).
     my ($head) = $xml =~ /^(.*?)<item[\s>]/s;
     $head = $xml unless defined $head;
     my ($show) = $head =~ m{<title[^>]*>(.*?)</title>}s;
-    $show = _clean($show);
+    $show = _cleanText($show, $charset);
 
     # Channel-level artwork, the fallback for an episode with no <itunes:image>.
     my ($chanImg) = $head =~ m{<itunes:image[^>]*\bhref=["']([^"']+)["']}i;
@@ -175,13 +234,20 @@ sub _parseFeed {
             # Store the podcast://-wrapped url: that's what the Podcast plugin's protocol
             # handler plays, and what keeps its resume-position tracking working.
             url      => 'podcast://' . $enc,
-            title    => _clean($t),
+            title    => _cleanText($t, $charset),
             image    => (_clean($img) || $chanImg),
             duration => _seconds(_clean($dur)),
             year     => ((_clean($pub) // '') =~ /\b(\d{4})\b/) ? $1 : undef,
         };
     }
     return (\@eps, $show);
+}
+
+# _clean for a HUMAN-READABLE field: decode to characters first, then run the shared cleanup.
+# Order matters — the entity pass inside _clean must land in a character string.
+sub _cleanText {
+    my ($s, $charset) = @_;
+    return _clean(_decodeText($s, $charset));
 }
 
 # Strip CDATA, decode the handful of entities that actually appear in feed titles and

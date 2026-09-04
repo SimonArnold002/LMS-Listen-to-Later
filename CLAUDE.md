@@ -289,6 +289,72 @@ subsystem.
   downgrades — a module and a measurement, not the mechanism.** The mechanism is not in
   dispute and restating it is not new information.
 
+  **THE PRODUCER WAS NAMED 2026-09-04, AND IT IS NOT `utf8::downgrade` — FIXED IN 0.1.131 AT
+  THE PRODUCER, NOT AT THE GATE. Read this before declining another encoding finding here.**
+  The census above is right about every producer it lists and was INCOMPLETE: it enumerated the
+  ones that hand `foldLatin` a whole string (JSON, SQLite, the CLI) and missed the one that
+  BUILDS a string a character at a time. `Podcast::_clean`'s numeric-entity pass is
+  `s/&#(\d+);/chr($1)/ge`, run over the RAW FEED BYTES — `SimpleHTTP::Base::content` is
+  `${ $self->contentRef }` with no charset step anywhere above it — so `&#246;` puts byte 0xF6
+  into an unflagged string. Not valid UTF-8, so the decode above the gate FAILS to adopt it, the
+  fold is skipped, and the key is `bj rk` against `bjork` from every other producer. A WIDE
+  entity is worse: `chr(8217)` upgrades the whole string, so raw UTF-8 bytes already in it are
+  reread as latin-1. Both measured through the real modules, and both reach `dedupe_key`.
+
+  **The gate stays as it is, and that is the decided part.** `utf8::upgrade` in `foldLatin`
+  would paper over the first case, cannot touch the second (the mojibake happens before DB sees
+  the string), and would rewrite a stored UNIQUE key for every row — owing a migration, per the
+  warning above `DB::_norm`. The feed is decoded ONCE instead, in `Podcast::_parseFeed`. So the
+  ORIGINAL verdict holds — the gate is sound given its producers — and what was wrong was
+  treating "which producers exist" as settled.
+
+  **What a re-raise needs now:** still a named producer and a measurement, and the census to
+  check against is *every site that composes a string from codepoints*, not just the three
+  modules that hand one over whole. `chr`, `pack`, and `Encode::decode` on a fragment all
+  qualify; `grep -n 'chr(' ListenLater/*.pm` is the cheap version of that sweep.
+
+- **0.1.131's feed decode OWES NO MIGRATION RUNG — DECIDED 2026-09-04, with the population
+  MEASURED rather than estimated. Do not re-raise "this changes what the parser produces and
+  writes no migration".** That is a standing finding shape in this repo (cf. the 0.1.116 `lc`
+  entry below), and here it has been asked and answered.
+
+  **There are TWO damage classes and they behave differently — conflating them is what made the
+  first write-up of this wrong.**
+  - **A mojibake'd TITLE is display-only.** RSS bytes went into the `sqlite_unicode` handle and
+    were stored as codepoints, so `Björk` renders `BjÃ¶rk`. Its **dedupe_key was always correct**,
+    because `foldLatin` decoded those octets before folding — which is precisely why the old-vs-new
+    run over ~6,700 real episodes reported `KEY_changed=0`. These rows dedupe and mark played
+    normally. Only Podcasts-app (RSS) rows can have it; Deezer and Spotify episodes never touch
+    the parser.
+  - **A wrong KEY needs a latin-1-range numeric entity** (`&#246;`) and is the one that
+    misbehaves: `findSavedTrack` can never match it, so the episode is never marked played, and
+    a re-add computes the right key and stores a SECOND row.
+
+  **CORRECTION, and it is the reason this entry exists rather than a one-liner: "the original
+  bytes are gone, so a mojibake'd title cannot be repaired" is FALSE, and it was the stated
+  justification in the first draft.** Double-encoding is losslessly reversible — the bytes are
+  sitting there as codepoints U+00C3,U+00B6. Downgrade to latin-1, decode as UTF-8, done; proven
+  round-trip on `Björk ’Homógenic’`. So a repair migration is entirely writable and the decision
+  does NOT rest on it being impossible. Leaving a wrong reason in place is what invites a re-raise
+  (the ninth round's lesson, one section down).
+
+  **The decision rests on the population, which is zero and was read rather than assumed.** The
+  live list over jsonrpc 2026-09-04: 44 rows, 38 with non-ASCII, **0 showing mojibake** — every
+  non-ASCII row is an ALBUM from an already-decoded producer (`Tempos Difíceis`, `Sigur Rós`), the
+  only podcast row is an ASCII Deezer one, and the single subscribed feed is raw UTF-8 with no
+  numeric entities. Across 8 sampled major feeds there were **0 latin-1-range entities** (the one
+  feed using any had 16x `&#39;`, ASCII). Against that, a `user_version` rung is permanent, runs
+  on every install for ever, and rewrites a UNIQUE column — which is where this plugin's most
+  expensive bugs have all lived (`_migrateRefold`, and the four ledger entries it generated).
+
+  **What a re-raise needs: an actual affected ROW, not the mechanism.** The mechanism is not in
+  dispute and is written out above. Detecting one needs no DB access — read the browse feed and
+  match a UTF-8 lead byte reinterpreted as latin-1 (`/[\x{c2}\x{c3}\x{e2}][\x{80}-\x{bf}]/` over
+  each row name), the same check used to measure the zero above. And the fix for a row that IS
+  found is one row deep and needs no rung: **delete it and re-add** — the parser is correct now,
+  so it returns with the right title and key. A rung only becomes the right answer if the field
+  turns up rows in numbers that make hand-repair unreasonable.
+
 - **A Spotify ARTIST row cannot reach the add command — do not report it as an unguarded
   source. WITHDRAWN 2026-09-03 (tenth round).** The finding was that
   `_isReplayableSource('spotify')` is true for every Spotify favurl shape, so
@@ -4142,6 +4208,70 @@ The "Add to Listen Later"/"Add to Wish List" custom actions appear on streaming 
   `matcher_sync_check.py` exits 0. Podcast `CACHE_VER` 34 → 35 per the dev-build cache rule;
   nothing here parses a feed, so it is hygiene, not a fix.
 
+- **0.1.131** — **The podcast RSS body is decoded ONCE, before anything reads it — the feed was
+  the last producer handing octets to consumers that want characters.** Not a review round: it
+  came out of verifying a finding the ledger had DECLINED twice (§A2, now corrected), and the
+  verification is what found the real defect somewhere else entirely.
+
+  **Three bugs, one cause.** `Slim::Networking::SimpleHTTP::Base::content` is
+  `${ $self->contentRef }` — raw bytes, no charset step anywhere above `_parseFeed` — so every
+  field it pulls out is octets:
+  1. **The visible one, and it needs no entity at all.** `DB`'s handle sets `sqlite_unicode`, so
+     it takes CHARACTERS; handing it the raw `"Bj\xc3\xb6rk"` stores codepoints U+00C3,U+00B6
+     and the list renders **"BjÃ¶rk"**. Every accented episode title and show name was stored
+     double-encoded. Measured on a real DBD::SQLite 1.64 handle, not argued.
+  2. **The dedupe key.** `_clean`'s `chr($1)` entity pass put byte 0xF6 into an unflagged string
+     for `Bj&#246;rk`, which is not valid UTF-8, so `DB::foldLatin`'s decode failed, the accent
+     fold was SKIPPED and the key came out `bj rk` against `bjork` from every other producer.
+     `dedupe_key` is UNIQUE and permanent, and `Played::findSavedTrack` then never matches the
+     row — **the episode can never be marked played**.
+  3. **A WIDE entity beside raw UTF-8.** `chr(8217)` upgrades the whole string, so bytes already
+     in it are reread as latin-1: `"La\xc3\xads Martins&#8217;"` stored as `"LaÃ­s Martins’"`,
+     wrong on screen AND in the key. This is the likeliest of the three to be hit — `&#8217;` is
+     common in RSS and needs only one accented character beside it.
+
+  **Fix: `_charset` + `_decodeText`, applied through a `_cleanText` wrapper to the TEXT fields
+  only.** Decoding is UNCONDITIONAL, pure-ASCII fields included — the entity pass that runs after
+  it can introduce a codepoint that was never in the bytes (`Bj&#246;rk` is ASCII until `chr(246)`
+  runs), and appending a codepoint to an unflagged string is bug 2. Falls back charset → utf-8 →
+  cp1252, so a mislabelled feed yields text rather than dying.
+
+  **THE URLS DELIBERATELY STAY OCTETS, and that is the load-bearing half.** Decoding the whole
+  document is the obvious fix and it is WRONG: both url fields are compared with `eq` against a
+  value that reaches them as octets — `DB::findTrackByUrl` against the PLAYING track's url
+  (measured: as characters the JSON round-trip stops matching, so an accented episode silently
+  stops being marked played, which is bug 2 by another route), and `resolveEpisode`'s image branch
+  against `_realImageUrl($IMAGE)`, which `uri_unescape`s Material's escaped url and so yields
+  octets too. `duration` and `pubDate` are ASCII by format. Section 3 of the suite pins the split
+  rather than the fix that produced it.
+
+  **Verified against real data, not just fixtures.** ~6,700 episodes across 7 live feeds (Simon's
+  own subscription plus 6 major ones) run through OLD and NEW `_parseFeed` side by side:
+  **0 url changes, 0 image changes, 0 duration changes, 0 KEY changes** — every real feed is raw
+  UTF-8, so their keys were already right and the fix is inert on them; only the title BYTES move
+  (octets → characters), which is bug 1 being repaired. Separately, all 244 non-ASCII
+  artist/album strings from the live library were run through the real `DB::_norm` in both shapes
+  real producers emit: **0 disagreements**, confirming the other producers are sound.
+
+  **Why it was never seen in the field:** the one subscribed feed on the test server
+  (Darko.Audio/SoundCloud) is raw UTF-8 with zero numeric entities, and across 8 sampled major
+  feeds there were **0 latin-1-range entities** (the one feed using any had 16× `&#39;`, ASCII).
+  Rare, not unreachable — and bug 1 needs no entity at all, so any accented episode title was
+  already storing mojibake.
+
+  New `tools/t_podcast_enc.pl`, **23 assertions** (1,315 across 15 suites). Anti-tested three ways
+  against the real numbers: drop the decode → 10 red, skip a pure-ASCII field → 2 red, route the
+  urls through `_cleanText` too → 5 red. Podcast `CACHE_VER` 35 → 36 — **a real invalidation here,
+  not the usual build hygiene**: parsed feeds are cached with the mangled titles.
+
+  **Known residual, accepted and MEASURED — no migration rung. See the ledger entry in §A2, which
+  separates the two damage classes and states what a re-raise needs.** Rows stored before this
+  build keep whatever they were given: a mojibake'd TITLE (display only — its key was always
+  correct, which is why the real-feed run showed `KEY_changed=0`), or, only from a latin-1-range
+  numeric entity, a wrong KEY (never marked played, and re-adding makes a second row). Zero of
+  either on the live list — read back over jsonrpc 2026-09-04, 44 rows, 38 non-ASCII, all albums
+  from already-decoded producers and **0 showing mojibake**.
+
 ## Regression tests — RUN THESE BEFORE ANY BUILD (added 2026-07-29)
 
     sh tools/t_all.sh          # one line per suite, non-zero exit on any failure
@@ -4177,6 +4307,7 @@ session scratchpads and are gone — so nothing carried forward. Anything worth 
 | `t_reltype.pl` (Spotify section) | That a Spotify EP — `album_type: 'single'` with `total_tracks: 5` — is NOT stored as a single, that it resolved a real tracklist to prove it, and that a 9-track "single" demotes to `album` rather than `ep`. Also that the album is requested by full URI, and that no album object at all falls through to the tracklist instead of dying or inventing |
 | `t_refold.pl` | 0.1.112's fleet fold and the migration it owes: apostrophe elision (and the `'n'` guard) plus `%FOLD` in ALL THREE normalisers, that the three punctuation passes still differ where they must (the key keeps "(Deluxe)", the gate strips it, the ranker keeps "(LP4)"), that the lenient empty-artist gates are untouched, and `_migrateRefold` end to end against real SQLite — a stale key rewritten, same-status duplicates collapsed into the earliest save with the loser's `ref` carried across, MIXED-status rows left alone on their old keys, track `|t:` and playlist `|p:<svc>:<id>` identity segments preserved, and idempotence. Plus, at source level, that the fold lives in `DB.pm` and that `DB::_norm` calls it DIRECTLY while `Sources` goes through `->can` — the failure that guards is a permanent wrong key in a UNIQUE column, which no passing call can show. Plus §4i (0.1.119): a rollback that ITSELF fails must not poison the handle — `AutoCommit` restored, a later transaction still openable, the failed pass still withholding the ladder stamp, and the assertion that actually matters, that an ordinary write made AFTER the failure is durable rather than discarded at shutdown. DBD::SQLite will not fail a rollback on demand, so only the rollback is injected (a `RootClass` subclass); the failing GROUP is 4h's planted collision. Its squatter pair differs by an apostrophe rather than reusing 4h's accented one — that is fixture history, not a hazard in accents |
 | `t_query_enc.pl` | 0.1.120's per-branch query encoding in `_searchService`: that Qobuz, Tidal and Spotty (0.1.121) are handed CHARACTERS and Deezer OCTETS, and the CONSEQUENCE rather than just the flag — the URL `uri_escape_utf8` actually builds (called for real) and the name Unidecode actually transliterates to (modelled, since Text::Unidecode is not a dependency here). Plus the fail-safe cases in both directions, since a raw-CLI add arrives as octets and must not be corrupted on the way out. **Its fixture is the fragile part and is asserted rather than assumed:** a `"\x{f3}"` literal is stored latin-1 with `utf8::is_utf8` FALSE, so the encode never fires and every branch looks correct — `utf8::upgrade` models what `sqlite_unicode`/JSON::XS really hand back, and the first assertion fails loudly if it is ever dropped. The ASCII positive control is what stops the suite being satisfied by a change that mangles every query equally. **Bandcamp (0.1.122) is in NEITHER camp and is tested for exactly that**, because "exempt by an invariant" and "nobody checked" look identical from outside: its branch sends the combined `_norm("$artist $album")`, which `s/[^a-z0-9]+/ /g` makes ASCII-only, so the two encodings are byte-identical there and no conversion applies. The assertions pin that INVARIANT — ASCII out for character, octet and latin-1 in, the two encodings identical, and the album half still in the query — so a refactor that sends a raw artist or title down that branch goes red and has to pick a camp (5 red without them) |
+| `t_podcast_enc.pl` | 0.1.131's feed decode: that an episode title keys the same whichever way a real feed spells it (raw UTF-8, latin-1-range numeric entities, a declared iso-8859-1 body, no declaration at all, and a mislabelled one), that the stored title is CHARACTERS holding the real codepoint rather than the two bytes `sqlite_unicode` would double-encode into "BjÃ¶rk", and that a WIDE entity beside raw UTF-8 no longer rereads those bytes as latin-1. Section 3 is the reason the suite exists as much as the other two: it pins that the play url and the image url are still OCTETS and byte-identical to the feed, because both are compared `eq` against a value that reaches them as octets — the play url round-tripped through `ref_json` against the PLAYING url, and the image against `_realImageUrl` of Material's escaped `$IMAGE`. Decode either and an accented episode silently stops being marked played. Section 4 pins what did NOT move (duration, year, an `&amp;` in a url) and that `_normTitle` is blind to the representation, which is WHY the fix could not have broken episode resolution and is not obvious from reading the sub |
 | `t_load.pl` | every shipped module compiles AND loads, plus a called-vs-defined sweep — `perl -c` passes on a call to a sub that doesn't exist, which nearly shipped a runtime crash in 0.1.83 |
 
 Two rules that follow from how this suite is built:
@@ -4523,7 +4654,10 @@ the primary key** — it appears verbatim in the RSS as `<itunes:image href>` an
 Material `$IMAGE` is the LMS image proxy wrapping it (`/imageproxy/<escaped>/image.png`), so `_realImageUrl`
 unwraps it back. Normalised title is the fallback. The matched `<enclosure url>` is stored **podcast://-
 prefixed**, so the Podcast plugin's own protocol handler plays it AND keeps its resume-position tracking. RSS
-is parsed with a tolerant regex scan, not an XML parser — podcast feeds are machine-generated, only four
+is DECODED TO CHARACTERS FIRST (0.1.131 — the body arrives as raw bytes and `_clean`'s
+`chr()` entity pass would otherwise mix codepoints into them; the urls stay octets on purpose, see
+that entry), then parsed with a tolerant regex scan, not an XML parser — podcast feeds are
+machine-generated, only four
 fields per item are needed, and a strict parser would die on the malformed-but-common ones.
 
 **Category.** Confirmed from the SERVED bundle, not inferred: `ba = fb?"artist":wa?"track":"album"`, and `wa`
