@@ -1218,6 +1218,20 @@ the add depends on the answer: `_backfillStreamingArtist`'s Spotify branch still
 a guarded callback — so a 429 costs one row its artist rather than hanging an add. That is the
 distinction, not "no API calls".
 
+**Round of 2026-09-04 (second) — CLOSED, one finding, FIXED.** Run against the
+0.1.134 tree. `Podcast::resolveEpisode` walked on past a non-perfect match while
+`_savePodcastEpisode`'s 20s timer — equal to one feed's `HTTP_TIMEOUT` — could
+fire and REJECT the add, discarding an episode already found. Fixed in 0.1.135
+(`RESOLVE_BUDGET`, per-feed cap, the caller's timer derived from it); see the
+version history. **What this round says about the ledger itself:** every other
+candidate the review raised was already in §A/§A2 and was correctly dropped
+before reporting — `materialAtLeast`'s version parse, `_migrateArtistPrefix`'s
+four-column SELECT, `_migrateRefold`'s NULL sentinel and its collision retry,
+`%ours` and `favorites-*`, `foldLatin`'s `utf8::is_utf8` gate, and
+`_canClassifyTrack` omitting `spotify`. The one finding that survived was the one
+about an INTERACTION between two files, which no single-file settled verdict
+could have covered.
+
 ### D. ADDING TO THIS LEDGER
 
 When a finding is declined, or accepted-but-deferred, add it here in the same
@@ -4400,6 +4414,59 @@ The "Add to Listen Later"/"Add to Wish List" custom actions appear on streaming 
   cost of walking further is the HTTP fetch of additional feeds, which is cached for FEED_TTL and
   only happens when no candidate scores 3.
 
+- **0.1.135 — the podcast resolve walk gets its OWN clock, so a match it has already found is
+  answered with rather than thrown away.** One finding from the 2026-09-04 review round, and it
+  is 0.1.132's scoring walk meeting `_savePodcastEpisode`'s timer.
+
+  **The defect.** Only a perfect 3 (title AND image) short-circuits the walk. A correct
+  title-only 1 or unique-image 2 therefore keeps fetching every REMAINING subscribed feed with
+  the answer already sitting in `$best` — and the only clock over that was the caller's single
+  20s budget, which equalled ONE feed's `HTTP_TIMEOUT`. So one slow feed *after* the match fired
+  the outer timer, `$finish->(undef)` rejected the add, and the episode that had been found was
+  discarded. Roughly ten feeds' cumulative latency on a cold cache did the same. It is reachable
+  whenever `$wantImage` is empty (`$IMAGE` unpopulated, or not an `http(s)` imageproxy url),
+  which caps every score at 1. **A regression, narrowly:** pre-0.1.132 the walk returned on the
+  first hit, so a dead feed after the match could never reach the add at all.
+
+  **This is the hole in 0.1.134's point 4**, which measured the walk's CPU cost (0.160s to parse
+  the largest real feed, 18 ms for a full score sweep) and concluded the only real cost of
+  walking further was cached HTTP. True, and beside the point: the cost that mattered was not
+  latency, it was that the latency was spent against a budget whose expiry DESTROYS the result.
+  Measuring the walk in isolation could not see it; the two clocks had to be read together.
+
+  **Fix, and the shape of it matters.** `RESOLVE_BUDGET` (15s) is the WALK's own clock, checked
+  before each next fetch — when it runs out the walk stops and `$finish` answers with the best
+  match it has. Each feed's fetch is capped at whatever is left of that budget (floored at 1s,
+  never above `HTTP_TIMEOUT`), so one hung feed cannot spend the lot on its own. The caller's
+  timer stays, demoted to a backstop and DERIVED as `RESOLVE_BUDGET + 5` so the two cannot
+  cross again — when they were both 20 there was no ordering between them at all, which is the
+  whole bug. Under budget nothing about the score moves.
+
+  **NOT the fix that was offered first: short-circuiting on any positive score.** That is
+  0.1.132 reverted — a title-only 1 in the first feed would beat a 3 in the second, which is
+  exactly the cross-feed collision the scoring walk exists to prevent. The trade actually made
+  is narrower and is pinned in the suite: once the budget is spent, the match in hand wins over
+  a better one there is no longer time to find, because the alternative is not the better match,
+  it is the add being rejected and nothing stored.
+
+  **The cap's OWN knock-on, found by asking what else the change touched rather than by it
+  going wrong in the field, and fixed in the same build — `_warmFeeds`.** A fetch that times
+  out writes NEITHER cache (only a parse with items sets `$key` and `$fbKey`), and every fetch
+  is now capped below `HTTP_TIMEOUT` — so a feed slower than the budget could never be fetched
+  by the walk at all, and would stay cold for ever. Before the cap that case healed itself by
+  ACCIDENT: the outer timer rejected the add, but the uncapped fetch underneath went on to
+  complete and cache, so the next add resolved. The cap would have removed the accident and put
+  nothing in its place. So when the budget stops the walk, every subscribed feed not already
+  cached is warmed in the background — serial, fire-and-forget, full timeout, `%WARMING`
+  guarding against a second sweep. Nothing waits on it: the add has already answered.
+
+  `t_podcast_resolve.pl` §7, **9 new assertions** (1,347 across 16 suites). Anti-tested against
+  reverted copies of the tree, not reasoned about: drop the budget check → 2 red (the walk
+  overruns and answers the LATER feed, which is the discarded-match case); drop the per-feed cap
+  → 2 red; drop the warm call → 2 red. `t_load.pl`'s called-vs-defined check also learned `use constant`, which defines a
+  real sub — `Plugin.pm` now calls `Podcast::RESOLVE_BUDGET()` across packages and the checker
+  reported it as undefined, a false positive indistinguishable from a true one.
+
 ## Regression tests — RUN THESE BEFORE ANY BUILD (added 2026-07-29)
 
     sh tools/t_all.sh          # one line per suite, non-zero exit on any failure
@@ -4436,7 +4503,7 @@ session scratchpads and are gone — so nothing carried forward. Anything worth 
 | `t_refold.pl` | 0.1.112's fleet fold and the migration it owes: apostrophe elision (and the `'n'` guard) plus `%FOLD` in ALL THREE normalisers, that the three punctuation passes still differ where they must (the key keeps "(Deluxe)", the gate strips it, the ranker keeps "(LP4)"), that the lenient empty-artist gates are untouched, and `_migrateRefold` end to end against real SQLite — a stale key rewritten, same-status duplicates collapsed into the earliest save with the loser's `ref` carried across, MIXED-status rows left alone on their old keys, track `|t:` and playlist `|p:<svc>:<id>` identity segments preserved, and idempotence. Plus, at source level, that the fold lives in `DB.pm` and that `DB::_norm` calls it DIRECTLY while `Sources` goes through `->can` — the failure that guards is a permanent wrong key in a UNIQUE column, which no passing call can show. Plus §4i (0.1.119): a rollback that ITSELF fails must not poison the handle — `AutoCommit` restored, a later transaction still openable, the failed pass still withholding the ladder stamp, and the assertion that actually matters, that an ordinary write made AFTER the failure is durable rather than discarded at shutdown. DBD::SQLite will not fail a rollback on demand, so only the rollback is injected (a `RootClass` subclass); the failing GROUP is 4h's planted collision. Its squatter pair differs by an apostrophe rather than reusing 4h's accented one — that is fixture history, not a hazard in accents |
 | `t_query_enc.pl` | 0.1.120's per-branch query encoding in `_searchService`: that Qobuz, Tidal and Spotty (0.1.121) are handed CHARACTERS and Deezer OCTETS, and the CONSEQUENCE rather than just the flag — the URL `uri_escape_utf8` actually builds (called for real) and the name Unidecode actually transliterates to (modelled, since Text::Unidecode is not a dependency here). Plus the fail-safe cases in both directions, since a raw-CLI add arrives as octets and must not be corrupted on the way out. **Its fixture is the fragile part and is asserted rather than assumed:** a `"\x{f3}"` literal is stored latin-1 with `utf8::is_utf8` FALSE, so the encode never fires and every branch looks correct — `utf8::upgrade` models what `sqlite_unicode`/JSON::XS really hand back, and the first assertion fails loudly if it is ever dropped. The ASCII positive control is what stops the suite being satisfied by a change that mangles every query equally. **Bandcamp (0.1.122) is in NEITHER camp and is tested for exactly that**, because "exempt by an invariant" and "nobody checked" look identical from outside: its branch sends the combined `_norm("$artist $album")`, which `s/[^a-z0-9]+/ /g` makes ASCII-only, so the two encodings are byte-identical there and no conversion applies. The assertions pin that INVARIANT — ASCII out for character, octet and latin-1 in, the two encodings identical, and the album half still in the query — so a refactor that sends a raw artist or title down that branch goes red and has to pick a camp (5 red without them) |
 | `t_podcast_enc.pl` | 0.1.131's feed decode: that an episode title keys the same whichever way a real feed spells it (raw UTF-8, latin-1-range numeric entities, a declared iso-8859-1 body, no declaration at all, and a mislabelled one), that the stored title is CHARACTERS holding the real codepoint rather than the two bytes `sqlite_unicode` would double-encode into "BjÃ¶rk", and that a WIDE entity beside raw UTF-8 no longer rereads those bytes as latin-1. Section 3 is the reason the suite exists as much as the other two: it pins that the play url and the image url are still OCTETS and byte-identical to the feed, because both are compared `eq` against a value that reaches them as octets — the play url round-tripped through `ref_json` against the PLAYING url, and the image against `_realImageUrl` of Material's escaped `$IMAGE`. Decode either and an accented episode silently stops being marked played. Section 4 pins what did NOT move (duration, year, an `&amp;` in a url) and that `_normTitle` is blind to the representation, which is WHY the fix could not have broken episode resolution and is not obvious from reading the sub |
-| `t_podcast_resolve.pl` | 0.1.132's episode scoring — WHICH episode a tapped Podcasts-app row resolves to, which is the stored row's whole identity. That a shared channel image no longer answers episode 1 for every tap; that a SHOW row is refused on a feed with AND without per-episode art (the claim `Sources.pm` rests on, which was only true of the second shape); that a unique image still resolves an episode whose title Material decorated; that an earlier subscription's title collision no longer beats a later feed's exact match; and that a shared image still names the right FEED when paired with a title. §5 pins the one genuine ambiguity — same title, two feeds, no image — as a documented limit rather than leaving it to be found as a bug. §6 pins the record's shape at the CONSUMING end (`_savePodcastEpisode` reads url/title/show/year), so a change here that satisfies the matcher but starves the caller still fails. The stub cache is a no-op, so the suite installs a real one and primes it — that is what keeps it offline and deterministic |
+| `t_podcast_resolve.pl` | 0.1.132's episode scoring — WHICH episode a tapped Podcasts-app row resolves to, which is the stored row's whole identity. That a shared channel image no longer answers episode 1 for every tap; that a SHOW row is refused on a feed with AND without per-episode art (the claim `Sources.pm` rests on, which was only true of the second shape); that a unique image still resolves an episode whose title Material decorated; that an earlier subscription's title collision no longer beats a later feed's exact match; and that a shared image still names the right FEED when paired with a title. §5 pins the one genuine ambiguity — same title, two feeds, no image — as a documented limit rather than leaving it to be found as a bug. §6 pins the record's shape at the CONSUMING end (`_savePodcastEpisode` reads url/title/show/year), so a change here that satisfies the matcher but starves the caller still fails. The stub cache is a no-op, so the suite installs a real one and primes it — that is what keeps it offline and deterministic. §7 (0.1.135) pins the walk's own budget: a match already found is answered with when the budget runs out rather than lost to the caller's timer, the walk still prefers a better score while time remains, a feed's fetch is capped at what is left, and the feeds left cold by that cap are warmed in the background so the cap cannot starve a slow feed for ever. Its clock is FAKED — `Podcast.pm` calls `Time::HiRes::time()` fully qualified, so a queue of readings replaces waiting |
 | `t_load.pl` | every shipped module compiles AND loads, plus a called-vs-defined sweep — `perl -c` passes on a call to a sub that doesn't exist, which nearly shipped a runtime crash in 0.1.83 |
 
 Two rules that follow from how this suite is built:

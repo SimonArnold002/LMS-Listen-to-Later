@@ -48,6 +48,12 @@
 #   - return on the first feed holding any candidate, not on a -> 3 red: every cross-feed
 #     score of 3                                                  case, which is the half a
 #     reordering alone cannot fix
+#   - drop the budget check in the walk (§7)                    ->  2 red: an imperfect match
+#     is walked past and lost, which is what the outer timer then rejects the add over
+#   - drop the per-feed timeout cap                             ->  2 red: one feed may spend
+#     the whole walk's budget on its own, so the cap is not decoration
+#   - drop the background warm the cap makes necessary           ->  2 red: a feed slower than
+#     the budget can then never be fetched at all, because a timed-out fetch caches nothing
 # Each was run against a copy of the tree, not reasoned about; the pre-fix numbers come from
 # `git show HEAD:ListenLater/Podcast.pm`.
 use strict;
@@ -59,6 +65,7 @@ require "$FindBin::Bin/t_stubs.pl";
 # cache is a no-op — priming it is what keeps this suite offline and deterministic. Installed
 # before ll_require so nothing captures the no-op version.
 my %CACHE;
+my @CLOCK;      # §7's fake clock; empty = the real Time::HiRes::time
 {
     no warnings 'redefine';
     *Slim::Utils::Cache::get = sub { $CACHE{ $_[1] } };
@@ -243,6 +250,106 @@ is('show',     $rec && $rec->{show},     'The Rest Is History');
 is('duration', $rec && $rec->{duration}, 2700);
 is('year',     $rec && $rec->{year},     2025);
 is('url is the podcast://-wrapped enclosure', $rec && $rec->{url}, url('rih-ep47'));
+
+# ---------------------------------------------------------------------------
+section('7. the budget answers with the best match instead of losing it');
+# ---------------------------------------------------------------------------
+# Scoring means an IMPERFECT match (a title-only 1, a unique-image 2) keeps fetching every
+# remaining feed — only a 3 stops the walk. So an episode already found and held in $best sat
+# behind however many feeds came after it, with _savePodcastEpisode's outer timer as the only
+# clock; that timer REJECTS the add, so the match was discarded rather than answered with.
+# One slow feed after the match was enough (a single feed's HTTP_TIMEOUT equalled that whole
+# budget), and so was several feeds' cumulative latency on a cold cache. RESOLVE_BUDGET is
+# the walk's own clock: when it runs out we stop and answer with what we have.
+#
+# The clock is FAKED rather than waited on — Podcast.pm calls Time::HiRes::time() fully
+# qualified, so the queue below feeds it a start and one reading per $step. It holds its last
+# value once the queue is down to one, so the number of readings doesn't have to be guessed.
+{
+    no warnings 'redefine';
+    my $real = \&Time::HiRes::time;
+    *Time::HiRes::time = sub {
+        return $real->() unless @CLOCK;
+        return @CLOCK > 1 ? shift(@CLOCK) : $CLOCK[0];
+    };
+}
+
+# Feed A (earlier subscription) holds the title with NO per-episode art — a score of 1, the
+# case that keeps walking. Feed B holds the same title WITH its own art, so supplying B's
+# episode image makes B a 3: the walk would reach it and rightly prefer it, and does when the
+# budget allows. Both are primed, so a walk that keeps going costs nothing and the pre-fix
+# tree answers B's url here rather than dying on a live fetch — the anti-test reads as a red
+# line, which is the point. The trade this pins is deliberate: once the budget is spent, the
+# match in hand beats a better one we no longer have time to find, because the alternative is
+# not the better match, it is the outer timer rejecting the add and storing nothing.
+subscribe([ aaa => rss(show => 'Show A', slug => 'aaa', items => \@THREE) ],
+          [ bbb => rss(show => 'Show B', slug => 'bbb', items => \@THREE, art => 1) ]);
+
+@CLOCK = (0, 0, 100);   # start, feed A under budget, then the budget is spent
+is('a title-only match survives the budget running out mid-walk',
+   resolve('47. The Fall of Constantinople', proxied('https://cdn.ex/bbb-ep47.jpg')),
+   url('aaa-ep47'));
+
+@CLOCK = ();            # the same tap with the budget intact walks on to the better match
+is('...and with time left the walk still prefers the score of 3',
+   resolve('47. The Fall of Constantinople', proxied('https://cdn.ex/bbb-ep47.jpg')),
+   url('bbb-ep47'));
+
+@CLOCK = (0, 100);      # spent before the first feed is even read
+is('...and with nothing found yet it still refuses cleanly',
+   resolve('47. The Fall of Constantinople', ''), '(rejected)');
+
+@CLOCK = ();
+
+# The per-feed cap: one hung feed must not be allowed to spend the whole walk's budget, so
+# _feedEpisodes takes what is left and never more than HTTP_TIMEOUT. Read back off the
+# request the async client is handed.
+#
+# NOTE for anyone adding a §8: this replaces the async client for the REST OF THE FILE, and
+# a fetch here never calls back (LLTestHTTP::get is a no-op). Nothing after it may rely on a
+# real fetch completing.
+my ($asked, @fetched);
+{
+    no warnings 'redefine';
+    *Slim::Networking::SimpleAsyncHTTP::new = sub {
+        my ($class, $ok, $err, $args) = @_;
+        $asked = $args->{timeout};
+        return bless { cb => $ok }, 'LLTestHTTP';
+    };
+}
+sub LLTestHTTP::get { push @fetched, $_[1] }
+$P->can('_feedEpisodes')->('https://feeds.ex/uncached', sub { }, 4);
+is('a feed fetch is capped at what is left of the budget', $asked, 4);
+$P->can('_feedEpisodes')->('https://feeds.ex/uncached2', sub { }, 60);
+is('...but never longer than HTTP_TIMEOUT', $asked, $P->can('HTTP_TIMEOUT')->());
+$P->can('_feedEpisodes')->('https://feeds.ex/uncached3', sub { }, 0.2);
+is('...and a sub-second remainder is floored, not passed through', $asked, 1);
+
+# ...and the cap's own knock-on, which is why _warmFeeds exists. A fetch that times out
+# writes NEITHER cache (only a parse with items sets them), so a feed slower than the budget
+# could never be fetched by the capped walk at all and would stay cold for ever. Before the
+# cap that case healed by accident — the outer timer rejected the add, but the uncapped fetch
+# underneath still completed and cached, so the next add worked. So: when the budget stops
+# the walk, every subscribed feed that is not already cached is warmed in the background,
+# with the full timeout and nothing waiting on it.
+subscribe([ aaa => rss(show => 'Show A', slug => 'aaa', items => \@THREE) ]);
+Slim::Utils::Prefs::set_test_pref_ns('plugin.podcast', 'feeds',
+    [ { name => 'aaa', value => 'https://feeds.ex/aaa' },      # primed by subscribe()
+      { name => 'ccc', value => 'https://feeds.ex/ccc' } ]);   # cold
+
+@CLOCK = (0, 0, 100);   # feed A read under budget, then spent with ccc unread
+@fetched = ();
+resolve('47. The Fall of Constantinople', '');
+is('the budget stopping the walk warms the unread feed in the background',
+   join(',', @fetched), 'https://feeds.ex/ccc');
+is('...with the FULL timeout, not the spent budget', $asked, $P->can('HTTP_TIMEOUT')->());
+
+# The already-cached feed is not re-fetched: _feedEpisodes answers it off the cache, so a
+# warm sweep costs nothing for the feeds the walk did read.
+is('...and an already-cached feed is not re-fetched',
+   scalar(grep { m/aaa/ } @fetched), 0);
+
+@CLOCK = ();
 
 printf "\n%d passed, %d failed\n", $pass, $fail;
 exit($fail ? 1 : 0);

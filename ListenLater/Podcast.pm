@@ -49,6 +49,7 @@ use Slim::Utils::Log;
 use Slim::Utils::Prefs;
 use URI::Escape ();
 use Encode ();
+use Time::HiRes ();
 
 my $log   = Slim::Utils::Log::logger('plugin.listenlater');
 my $cache = Slim::Utils::Cache->new();
@@ -59,7 +60,20 @@ my $cache = Slim::Utils::Cache->new();
 use constant FEED_TTL          => 3600;        # 1h
 use constant FEED_FALLBACK_TTL => 7 * 86400;   # 7d
 use constant HTTP_TIMEOUT      => 20;
-use constant CACHE_VER         => 39;           # bump to invalidate parsed feeds
+use constant CACHE_VER         => 40;           # bump to invalidate parsed feeds
+
+# THE WHOLE WALK's budget, and the reason it exists: scoring means an imperfect match keeps
+# fetching the REMAINING feeds (only a 3 stops it), so an episode already found and held in
+# $best is hostage to every feed after it. _savePodcastEpisode's outer timer used to be the
+# only clock, and firing it rejects the add outright — the match is thrown away rather than
+# answered with. One slow feed AFTER the match was enough, because a single feed's
+# HTTP_TIMEOUT equalled that whole budget; so was ~10 feeds' cumulative latency on a cold
+# cache. Pre-0.1.132 the walk returned on the first hit, so a dead feed after the match could
+# not reach the add at all — this is what pays that back. The budget is OURS, not the
+# caller's: we answer with the best match found so far, which is strictly better than the
+# rejection the outer timer produces. Each feed's own fetch is capped at whatever is left of
+# it, so one hung feed cannot spend the lot either.
+use constant RESOLVE_BUDGET    => 15;
 
 # The user's subscribed podcasts, read from the Podcast plugin's OWN prefs — the only
 # place the durable feed urls exist. Each entry is { name => <show>, value => <rss url> }.
@@ -101,6 +115,9 @@ sub hasFeeds { return scalar @{ feeds() } ? 1 : 0 }
 #
 # The walk still SHORT-CIRCUITS on a 3, so the common case costs exactly what it did before:
 # one feed fetch. Only an imperfect match pays for the remaining feeds, and they are cached.
+# That payment is bounded by RESOLVE_BUDGET (see the constant): when it runs out the walk
+# stops and answers with the best match it has, rather than letting the caller's timer fire
+# and discard it. Under budget the behaviour is unchanged, so nothing about the SCORE moves.
 sub resolveEpisode {
     my ($title, $image, $cb) = @_;
 
@@ -118,6 +135,7 @@ sub resolveEpisode {
     }
     $log->warn("LL: podcast resolve '" . ($title // '?') . "' across " . scalar(@queue) . ' feed(s)');
 
+    my $started = Time::HiRes::time();
     my ($best, $bestScore, $bestWhy) = (undef, 0, '');
     my $finish = sub {
         unless ($best) {
@@ -130,6 +148,19 @@ sub resolveEpisode {
 
     my $step;
     $step = sub {
+        # Checked BEFORE the next fetch, not after it, so what is left of the budget is what
+        # the next feed is allowed to spend. $best is answered with, never discarded.
+        my $left = RESOLVE_BUDGET - (Time::HiRes::time() - $started);
+        if ($left <= 0) {
+            $log->warn('LL: podcast resolve — budget spent with ' . scalar(@queue)
+                . ' feed(s) unread; answering with the best match so far') if @queue;
+            # Every subscribed feed, not just @queue: a feed the walk DID reach may have had
+            # its fetch capped short and cached nothing, so it is cold too. _feedEpisodes
+            # answers instantly for the ones already cached, so this costs them nothing.
+            _warmFeeds(map { $_->{value} } @{ feeds() });
+            return $finish->();
+        }
+
         my $feed = shift @queue;
         return $finish->() unless $feed;
 
@@ -162,17 +193,56 @@ sub resolveEpisode {
             # what keeps the ordinary add at one fetch, exactly as before.
             return $finish->() if $bestScore == 3;
             $step->();
-        });
+        }, $left);
     };
     $step->();
     return;
 }
 
+# Warm the parse cache for feeds the walk did not get to read, in the background.
+#
+# WHY THIS IS PART OF THE BUDGET AND NOT AN OPTIMISATION. A fetch that times out writes
+# NEITHER cache (see _feedEpisodes: only a parse with items sets $key and $fbKey), and every
+# fetch is now capped below HTTP_TIMEOUT — so a feed slower than the budget could never be
+# fetched by the walk at all, and would stay cold for ever. Pre-0.1.135 that case still
+# healed itself by accident: the outer timer rejected the add, but the 20s fetch underneath
+# it went on to complete and cache, so the NEXT add resolved. The cap would have taken that
+# accident away and left nothing in its place. This puts it back deliberately.
+#
+# SERIAL, and fire-and-forget. Serial because the point is a warm cache for the next add, not
+# speed, and a burst of parallel fetches across a long subscription list is the kind of thing
+# that gets a plugin blamed for the network. Fire-and-forget because the add has ALREADY
+# answered — nothing is waiting on this, there is no setStatusProcessing to release and no
+# result to return; each feed simply caches itself on the way past, with the full timeout.
+# %WARMING keeps a second add from starting a second sweep over the same feed.
+my %WARMING;
+sub _warmFeeds {
+    my (@urls) = @_;
+    my $next;
+    $next = sub {
+        my $url = shift @urls;
+        return unless defined $url && length $url;
+        return $next->() if $WARMING{$url};
+        $WARMING{$url} = 1;
+        _feedEpisodes($url, sub { delete $WARMING{$url}; $next->() });
+    };
+    $next->();
+    return;
+}
+
 # Fetch + parse one feed -> $cb->(\@episodes, $showName). Cached; a failed fetch falls back
 # to the last good parse so one flaky feed doesn't break resolution.
+#
+# $timeout caps THIS fetch at what is left of the caller's budget (resolveEpisode passes it).
+# Without the cap one hung feed spends HTTP_TIMEOUT — the whole walk's budget — on its own.
+# A failure here is not a failure of the walk: the error branch falls back and calls back
+# normally, so a feed that runs out of time simply contributes nothing.
 sub _feedEpisodes {
-    my ($url, $cb) = @_;
+    my ($url, $cb, $timeout) = @_;
     return $cb->([], undef) unless defined $url && length $url;
+
+    $timeout = HTTP_TIMEOUT if !defined $timeout || $timeout > HTTP_TIMEOUT;
+    $timeout = 1            if $timeout < 1;   # a sub-second socket timeout fetches nothing
 
     my $key   = 'll:podfeed:' . CACHE_VER . ':' . $url;
     my $fbKey = "$key:fb";
@@ -205,7 +275,7 @@ sub _feedEpisodes {
             my $fb = $cache->get($fbKey);
             $cb->(($fb ? $fb->{items} : []) || [], $fb ? $fb->{show} : undef);
         },
-        { timeout => HTTP_TIMEOUT },
+        { timeout => $timeout },
     )->get($url);
     return;
 }

@@ -2365,11 +2365,17 @@ sub _savePodcastEpisode {
         });
     };
 
+    # A BACKSTOP, and only that. resolveEpisode now runs its own RESOLVE_BUDGET and answers
+    # with the best match it has when that runs out, so this timer firing means the resolver
+    # never called back at all. It is derived from that budget rather than written as its own
+    # number so the two cannot cross: when they did (both 20s), a slow feed AFTER the match
+    # fired this instead, and rejecting here DISCARDS an episode that had already been found.
     my $timeout = sub {
         $log->warn('LL: podcast episode resolve timed out — rejected');
         $finish->(undef);
     };
-    Slim::Utils::Timers::setTimer(undef, time() + 20, $timeout);
+    Slim::Utils::Timers::setTimer(undef,
+        time() + Plugins::ListenLater::Podcast::RESOLVE_BUDGET() + 5, $timeout);
 
     Plugins::ListenLater::Podcast::resolveEpisode($title, $p->{image}, sub {
         my ($ep) = @_;
