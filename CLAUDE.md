@@ -523,6 +523,40 @@ subsystem.
 
 ### B. KNOWN-OPEN AND ACCEPTED — do not re-report as new
 
+- **A STREAMING podcast SERIES row still shows a dead "Add" — ACCEPTED 2026-09-05, it
+  cannot be fixed from the plugin side. Do not re-report, and do not "fix" it by emptying a
+  category.** A Spotify show (`spotify://show:<id>`) or Deezer series (`deezer://podcast:<id>`)
+  row renders LL's Add; pressing it stores nothing — `Sources::unsupportedContainer` refuses
+  it (0.1.123) and `_rejectAdd` completes the request silently. Reported from the field.
+
+  **Why suppression is not available.** Material resolves an action by
+  `<browse command>-<type>`, per CONTAINER, not per row. A Spotify show row and a Spotify
+  ALBUM row are both `-album` under the same browse command, so an empty suppressor there
+  removes Add from every Spotify album and track as well. Same for Deezer. There is no
+  category axis that separates a series from an album. **This is exactly why the built-in
+  Podcasts app COULD be suppressed cleanly in 0.1.136 and these cannot** — it had its own
+  browse command with nothing else in it.
+
+  **Why the per-row filter does not help, checked rather than assumed.** Material's
+  per-action `filter` matches `startsWith` against `presetParams.favorites_url`. LL used it
+  in 0.1.49 and ROLLED IT BACK in 0.1.50 (see that entry): it is allow-by-prefix with no
+  deny, so excluding `show:` means enumerating every allowed prefix instead — one action copy
+  per prefix, the entry explosion 0.1.50 removed — and the filter is BYPASSED when the favurl
+  is undefined, which is the case for home-shelf cards and LBF rows, so every copy renders.
+  Registration does not change this: `registerCustomAction` alters DELIVERY; the filter
+  semantics live in Material's `browse-resp.js`, so tier 2 behaves identically.
+
+  **Why a message is not available either.** See the header above `_rejectAdd`: Material
+  renders no toast for a custom-action command (server-side `showBriefly` reaches physical
+  player displays only, not the web UI), and the sole feedback hook is a generic
+  "'…' failed" snackbar that cannot be customised.
+
+  **The position, and it is LL's existing one:** the COMMAND is the gate, not the button —
+  the same treatment radio and BBC Sounds already get. The log names the refused container
+  type, which is what triage needs. The only clean fix is upstream in Material (a deny
+  filter, or a per-row predicate that is not bypassed on a missing favurl); it would close
+  the same problem for every plugin, and it is not LL work.
+
 - ~~**`matcher_sync_check.py` exits 1 fleet-wide.**~~ **CLOSED 2026-09-02** — the
   hold was lifted, the sync ran repo by repo (PFR 0.9.33, LBF 0.9.194, LL 0.1.112),
   and the check **exits 0**. A non-zero exit is a real finding again. LL's three
