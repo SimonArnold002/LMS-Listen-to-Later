@@ -18,6 +18,47 @@ baseline frozen for 13 days, and converged 4 → 4 → 4 → 2 → 1 → clean o
 commit. Diff size and commit cadence are not the variable. An undecided verdict
 with nowhere to live is.*
 
+### ⚠ PODCAST SUPPORT — THE BUILT-IN PATH WAS REMOVED IN 0.1.136. READ THIS FIRST.
+
+A review pass has already thrown out rebuild work by citing entries below that were
+written for the OLD implementation. They were correct then. They are superseded now.
+
+**What changed.** The built-in Podcasts-app path (`ListenLater/Podcast.pm`, the RSS
+resolver, the `podcasts-*` populated override, `_savePodcastEpisode`, the `kind:podcast`
+action) is GONE — 637 lines. It did not fit LL's model: an episode is not an album, the
+Wish List never applied to it, it duplicated the Podcast plugin's own resume tracking
+while never reading it, and it had no identity, which is what the 441-line resolver
+existed to guess at. **Streaming episodes (Spotify, Deezer) are KEPT** — they carry
+durable ids, are url-keyed through `DB::episodeKey`, and need none of the deleted
+machinery.
+
+**Do not cite these against the removal, and do not re-report the old path's defects:**
+
+| entry | why it no longer applies |
+|---|---|
+| "Identity: what Played actually matches on" (below) | the name-fallback half described a built-in row; those rows no longer exist |
+| the 0.1.132 audit residue ("do not re-raise without a real row") | both accepted defects were removed with the path |
+| "`$ITEMID` … considered and not taken" | it was rejected because `_parseFeed` skewed the indices; `_parseFeed` is deleted |
+| `DB.pm` "Left as-is DELIBERATELY — url-keying these would owe a migration" | no migration is owed: the rows are PURGED (schema rung 6), with a report |
+| the 13-site adapter list | its podcast sites are consolidated — but see the WARNING below |
+
+**THE ONE INVARIANT THAT MUST SURVIVE, carried out of the 13-site entry:**
+`_canClassifyTrack` is safe *only* because no episode source appears in its list, and the
+0.1.126 early return that used to divert episodes was removed in 0.1.127. Adding one that
+does would classify a podcast SERIES as a release. Superseding the entry is fine; losing
+this is not.
+
+**Two measurements, so they are never re-reported as findings:** the old warm-sweep thaw
+was **1.6 ms** for a 2,968-episode feed (863 KB frozen) — waste, not a stall; and the old
+resolve walk was **synchronous across cached feeds by design** (12 feeds → 12 cache reads,
+stack depth 38). Neither was ever a performance defect.
+
+**`podcasts-album` / `podcasts-track` are now deliberately EMPTY suppressors**, not
+populated entries — the same rule as radio: we don't show an Add we can't honour. The
+clearing and prune machinery still names them ON PURPOSE, so husks written by pre-0.1.136
+builds are swept. Removing them from `@fileOnlySup` / `%ours` / `_ownedCats` turns 4
+assertions red.
+
 **If you are reviewing:** read sections A and B first, and report an item from
 them only if you have genuinely NEW information — a case the recorded reasoning
 does not cover. Say which ledger entry you are challenging and what changed.
@@ -115,9 +156,11 @@ subsystem.
   release semantics. `Browse::_albumTracks`'s write-back guard is therefore
   `kind eq 'album'` and NOT `ne 'track'` — that is the fix, not a typo.
 - **PODCASTS ARE EPISODE-LEVEL ONLY. A SERIES/SHOW IS OUT OF SCOPE EVERYWHERE, and the
-  streaming side refuses one (0.1.123). THREE sources supply episodes** — the built-in Podcasts
-  app (`podcast://`, matched against subscribed feeds), Deezer (`deezerpodcast://<id>`, 0.1.124)
-  and Spotify (`spotify://episode:<id>`, stored under source `spotify`). Qobuz, TIDAL and
+  streaming side refuses one (0.1.123). TWO sources supply episodes since 0.1.136** — Deezer
+  (`deezerpodcast://<id>`, 0.1.124) and Spotify (`spotify://episode:<id>`, stored under source
+  `spotify`). **The built-in Podcasts app was a THIRD until 0.1.136 REMOVED it** (`podcast://`,
+  matched against subscribed feeds); everything below about that path is history, not current
+  behaviour — see the banner at the top of this ledger. Qobuz, TIDAL and
   Bandcamp have no podcasts at all. Ask `Sources::isPodcastEpisode($source, $url)`, never
   `eq 'podcast'` — it is the predicate Browse's glyph and type word share with the Wish List
   rule. **It takes the URL as well as the source, and that is not decoration (0.1.126):** the
@@ -125,15 +168,15 @@ subsystem.
   stores an episode under plain `spotify`, identical to a music track, and says `episode:`
   only in the url. A source-only predicate therefore cannot answer for a third of the
   sources, which is exactly how a Spotify episode kept the ♪ glyph, the word "Track" and a
-  Wish List entry after 0.1.125 closed the identical Deezer hole. The Podcasts app refuses a series:
-  a feed row arrives as `kind:podcast` with the FEED name as `$TITLE`, `Podcast::resolveEpisode`
-  finds no episode containing it, and `_rejectAdd` says so (verified live 2026-09-03 on
-  "Darko.Audio podcast" — nothing stored). **"Has ALWAYS refused" was the wording here until
-  0.1.132 and it was not true.** That live check passed because Darko.Audio gives every episode
-  its own artwork; on a feed that does not, the show row's channel image matched episode 1 and the
-  SHOW STORED AS AN EPISODE. Now unconditional, and pinned on both feed shapes in
-  `t_podcast_resolve.pl` — a claim about the podcast app has to be tested against a feed WITHOUT
-  per-episode art, because that is the shape the defect needs and this box does not have one. The STREAMING side did not, because the two gates it
+  Wish List entry after 0.1.125 closed the identical Deezer hole. **The Podcasts-app half of this is HISTORY as of 0.1.136** — that
+  path, `Podcast::resolveEpisode`, the `kind:podcast` action and `t_podcast_resolve.pl` are all
+  deleted, and a Podcasts-app row now renders no Add at all (an EMPTY `podcasts-*` suppressor,
+  the same rule as radio; verified on the server). It is left recorded because the reasoning
+  still generalises: the old refusal rested on a feed giving every episode its own artwork, and
+  on a feed that did not, the show row's channel image matched episode 1 and the SHOW STORED AS
+  AN EPISODE — a claim about artwork identity has to be tested against a feed WITHOUT
+  per-episode art, because that is the shape the defect needs and this box does not have one.
+  The STREAMING side did not, because the two gates it
   has answer different questions: `_serviceCan` asks about the SERVICE (Spotty is installed, so
   `spotify` says yes whatever the favurl points at) and `favurlIsTrack` asks album-vs-TRACK,
   which presumes the row is one of the two. So a Spotify show stored as an ALBUM and a Deezer
@@ -309,18 +352,23 @@ subsystem.
   **The gate stays as it is, and that is the decided part.** `utf8::upgrade` in `foldLatin`
   would paper over the first case, cannot touch the second (the mojibake happens before DB sees
   the string), and would rewrite a stored UNIQUE key for every row — owing a migration, per the
-  warning above `DB::_norm`. The feed is decoded ONCE instead, in `Podcast::_parseFeed`. So the
-  ORIGINAL verdict holds — the gate is sound given its producers — and what was wrong was
-  treating "which producers exist" as settled.
+  warning above `DB::_norm`. The feed was decoded ONCE instead, in `Podcast::_parseFeed` — a
+  producer that no longer exists, since 0.1.136 removed the RSS path entirely, which only
+  strengthens the verdict. So the ORIGINAL verdict holds — the gate is sound given its
+  producers — and what was wrong was treating "which producers exist" as settled.
 
   **What a re-raise needs now:** still a named producer and a measurement, and the census to
   check against is *every site that composes a string from codepoints*, not just the three
   modules that hand one over whole. `chr`, `pack`, and `Encode::decode` on a fragment all
   qualify; `grep -n 'chr(' ListenLater/*.pm` is the cheap version of that sweep.
 
-- **0.1.131's feed decode OWES NO MIGRATION RUNG — DECIDED 2026-09-04, with the population
-  MEASURED rather than estimated. Do not re-raise "this changes what the parser produces and
-  writes no migration".** That is a standing finding shape in this repo (cf. the 0.1.116 `lc`
+- ~~**0.1.131's feed decode OWES NO MIGRATION RUNG — DECIDED 2026-09-04.**~~ **MOOT as of
+  0.1.136:** the RSS parser this entry is about was DELETED with the built-in path, and every
+  row it could have damaged was PURGED (schema rung 6, with a report). Nothing is left to
+  migrate or to re-raise. **Note the rung 6 that now exists is NOT a reversal of this
+  decision** — it deletes the removed path's rows, it does not re-key anything. The general
+  finding-shape warning below still stands for other parsers. Original reasoning kept because
+  the two-damage-class distinction is the reusable part: That is a standing finding shape in this repo (cf. the 0.1.116 `lc`
   entry below), and here it has been asked and answered.
 
   **There are TWO damage classes and they behave differently — conflating them is what made the
@@ -1317,7 +1365,7 @@ plugin-registered second.
 | tier | Material | what happens |
 |---|---|---|
 | **0** | no `registerCustomAction` (< 6.4.6, or no Material) | the shared `actions.json` carries everything, byte for byte as before 0.1.95 |
-| **1** | 6.4.6 / 6.4.7 | the "Add" entries register; `track`, `queue-track`, `podcasts-*` and every empty suppressor still have to be written to the file |
+| **1** | 6.4.6 / 6.4.7 | the "Add" entries register; `track`, `queue-track` and every empty suppressor (`podcasts-*` among them since 0.1.136, when it stopped being a populated override) still have to be written to the file |
 | **2** | **>= 6.4.8** (upstream PR #1257) | **everything** registers, suppressors included, and the file is **pruned**, not written |
 
 **Tier 2 needs BOTH tests, and the version half is not belt-and-braces.** PR #1257 is what made
@@ -1429,10 +1477,13 @@ THIRD PARTY's `script`/`command`/`weblink` action that happened to share a title
 most once per server run, and **BOTH halves are tracked PER CATEGORY** — `%REGISTERED_POS` for the
 positives (0.1.119), `%REGISTERED_EMPTY` for the empty suppressors — because both sets GROW.
 The suppressors grow because TuneIn's radio directory arrives asynchronously, so the +60s deferred
-pass finds commands postinit could not (0.1.56). The positives grow because on tier 2 the
-`podcasts-*` override folds into them and is gated on `Podcast::hasFeeds()`, so subscribing to a
-first feed mid-session adds a section — which the old single `$REGISTERED` latch then refused for
-the rest of the run (0.1.119). **`$REGISTERED` survives, but it now answers only "did the API half
+pass finds commands postinit could not (0.1.56). The positives grew because on tier 2 the
+`podcasts-*` override folded into them gated on `Podcast::hasFeeds()`, so subscribing to a first
+feed mid-session added a section — which the old single `$REGISTERED` latch then refused for the
+rest of the run (0.1.119). **That specific case is gone as of 0.1.136** — `podcasts-*` is now an
+EMPTY suppressor, so it grows the SUPPRESSOR half if anything, not the positives. The per-category
+tracking stays: it is the correct shape whether or not a growable positive currently exists, and
+reverting it would re-introduce the 0.1.119 latch bug the moment one is added again. **`$REGISTERED` survives, but it now answers only "did the API half
 RUN"** — the flag the diagnostics read to tell "delivered nothing" from "never asked" — and it is
 no longer what decides whether a given section is offered.
 With no unregister, turning `material_action` OFF removes the registered entries **at the next
@@ -4500,10 +4551,9 @@ session scratchpads and are gone — so nothing carried forward. Anything worth 
 | `t_addpath.pl` (Spotify section) | 0.1.113's Spotify support end to end: a bare `spotify:album:<id>` URI storing as an album with source `spotify` and its id captured, a track URI storing a playable `spotify://track:<id>`, both playlist spellings landing the same short id, `svc:'spotty'` resolving to source `spotify` with no cover to sniff — and **the rebuild test**, replaying each stored row and asserting Spotty received a full URI rather than a bare id (a bare id matches nothing in `API::album` and returns an empty tracklist, i.e. a row that plays once and is then gone). The Spotty stubs are declared at the END of the file on purpose, so every test above it runs with Spotty ABSENT and the `->can` refusal is covered by the same file |
 | `t_favurl.pl` (Spotify sections) | `normaliseFavurl` itself, and then the four readers that consume it — including that none of them reaches `favurlIsTrack`'s fail-open branch, which the file's no-warnings check enforces. Plus `sourceFromSvc`: `spotty` → `spotify`, while a home-shelf id still answers `''` so the cover sniff keeps its turn. Plus 0.1.115's `spottyArtistName`, the ONE reader of a Spotty album object's artist: both legitimate shapes (the cache's plain `artist` string and the raw API's `artists` array), the string winning when both are present, and seven miss cases — including a hash in `artist`, which is the TIDAL/DEEZER shape and must NOT be read here, so a fold of the two extractions fails rather than quietly losing a Tidal row's artist. Calls are `eval`'d because a shape the sub fails to guard DIES rather than returning, and a dying assertion aborts the run instead of reporting it. Plus source checks that both modules ask through the sub and neither open-codes the `artists[0]{name}` read outside its body (`LL_SOURCES_SRC=`/`LL_PLUGIN_SRC=` point those at mutated copies) |
 | `t_reltype.pl` (Spotify section) | That a Spotify EP — `album_type: 'single'` with `total_tracks: 5` — is NOT stored as a single, that it resolved a real tracklist to prove it, and that a 9-track "single" demotes to `album` rather than `ep`. Also that the album is requested by full URI, and that no album object at all falls through to the tracklist instead of dying or inventing |
+| `t_podcast_purge.pl` | The 0.1.136 purge (schema rung 6), which is the one rung that DESTROYS user data, so the suite is about blast radius. Rows are seeded BELOW the rung by hand, not through `DB::add`, because the shapes under test are what OLDER builds wrote. It pins that every `source='podcast'` row goes; that a MIS-KEYED pre-0.1.126 streaming episode goes (a `|t:` key, and for Spotify the bare `spotify:episode:` spelling — only the url identifies those, which is why the test is `spotifyEpisodeUri` and not one SQL predicate); and that a CORRECTLY-keyed Spotify **or Deezer** episode SURVIVES, both being supported paths. Controls: an ordinary Spotify track, an album and a playlist are untouched. Also pins the report file — written BEFORE the delete, naming what went and nothing that stayed — the empty-library no-op (stamp, no report, the path most upgrades take), and the LADDER rule: a failed delete withholds the stamp, and rung 6 refuses to stamp over an earlier rung that failed. Anti-tested 4/4/2/2/3 red |
 | `t_refold.pl` | 0.1.112's fleet fold and the migration it owes: apostrophe elision (and the `'n'` guard) plus `%FOLD` in ALL THREE normalisers, that the three punctuation passes still differ where they must (the key keeps "(Deluxe)", the gate strips it, the ranker keeps "(LP4)"), that the lenient empty-artist gates are untouched, and `_migrateRefold` end to end against real SQLite — a stale key rewritten, same-status duplicates collapsed into the earliest save with the loser's `ref` carried across, MIXED-status rows left alone on their old keys, track `|t:` and playlist `|p:<svc>:<id>` identity segments preserved, and idempotence. Plus, at source level, that the fold lives in `DB.pm` and that `DB::_norm` calls it DIRECTLY while `Sources` goes through `->can` — the failure that guards is a permanent wrong key in a UNIQUE column, which no passing call can show. Plus §4i (0.1.119): a rollback that ITSELF fails must not poison the handle — `AutoCommit` restored, a later transaction still openable, the failed pass still withholding the ladder stamp, and the assertion that actually matters, that an ordinary write made AFTER the failure is durable rather than discarded at shutdown. DBD::SQLite will not fail a rollback on demand, so only the rollback is injected (a `RootClass` subclass); the failing GROUP is 4h's planted collision. Its squatter pair differs by an apostrophe rather than reusing 4h's accented one — that is fixture history, not a hazard in accents |
 | `t_query_enc.pl` | 0.1.120's per-branch query encoding in `_searchService`: that Qobuz, Tidal and Spotty (0.1.121) are handed CHARACTERS and Deezer OCTETS, and the CONSEQUENCE rather than just the flag — the URL `uri_escape_utf8` actually builds (called for real) and the name Unidecode actually transliterates to (modelled, since Text::Unidecode is not a dependency here). Plus the fail-safe cases in both directions, since a raw-CLI add arrives as octets and must not be corrupted on the way out. **Its fixture is the fragile part and is asserted rather than assumed:** a `"\x{f3}"` literal is stored latin-1 with `utf8::is_utf8` FALSE, so the encode never fires and every branch looks correct — `utf8::upgrade` models what `sqlite_unicode`/JSON::XS really hand back, and the first assertion fails loudly if it is ever dropped. The ASCII positive control is what stops the suite being satisfied by a change that mangles every query equally. **Bandcamp (0.1.122) is in NEITHER camp and is tested for exactly that**, because "exempt by an invariant" and "nobody checked" look identical from outside: its branch sends the combined `_norm("$artist $album")`, which `s/[^a-z0-9]+/ /g` makes ASCII-only, so the two encodings are byte-identical there and no conversion applies. The assertions pin that INVARIANT — ASCII out for character, octet and latin-1 in, the two encodings identical, and the album half still in the query — so a refactor that sends a raw artist or title down that branch goes red and has to pick a camp (5 red without them) |
-| `t_podcast_enc.pl` | 0.1.131's feed decode: that an episode title keys the same whichever way a real feed spells it (raw UTF-8, latin-1-range numeric entities, a declared iso-8859-1 body, no declaration at all, and a mislabelled one), that the stored title is CHARACTERS holding the real codepoint rather than the two bytes `sqlite_unicode` would double-encode into "BjÃ¶rk", and that a WIDE entity beside raw UTF-8 no longer rereads those bytes as latin-1. Section 3 is the reason the suite exists as much as the other two: it pins that the play url and the image url are still OCTETS and byte-identical to the feed, because both are compared `eq` against a value that reaches them as octets — the play url round-tripped through `ref_json` against the PLAYING url, and the image against `_realImageUrl` of Material's escaped `$IMAGE`. Decode either and an accented episode silently stops being marked played. Section 4 pins what did NOT move (duration, year, an `&amp;` in a url) and that `_normTitle` is blind to the representation, which is WHY the fix could not have broken episode resolution and is not obvious from reading the sub |
-| `t_podcast_resolve.pl` | 0.1.132's episode scoring — WHICH episode a tapped Podcasts-app row resolves to, which is the stored row's whole identity. That a shared channel image no longer answers episode 1 for every tap; that a SHOW row is refused on a feed with AND without per-episode art (the claim `Sources.pm` rests on, which was only true of the second shape); that a unique image still resolves an episode whose title Material decorated; that an earlier subscription's title collision no longer beats a later feed's exact match; and that a shared image still names the right FEED when paired with a title. §5 pins the one genuine ambiguity — same title, two feeds, no image — as a documented limit rather than leaving it to be found as a bug. §6 pins the record's shape at the CONSUMING end (`_savePodcastEpisode` reads url/title/show/year), so a change here that satisfies the matcher but starves the caller still fails. The stub cache is a no-op, so the suite installs a real one and primes it — that is what keeps it offline and deterministic. §7 (0.1.135) pins the walk's own budget: a match already found is answered with when the budget runs out rather than lost to the caller's timer, the walk still prefers a better score while time remains, a feed's fetch is capped at what is left, and the feeds left cold by that cap are warmed in the background so the cap cannot starve a slow feed for ever. Its clock is FAKED — `Podcast.pm` calls `Time::HiRes::time()` fully qualified, so a queue of readings replaces waiting |
 | `t_load.pl` | every shipped module compiles AND loads, plus a called-vs-defined sweep — `perl -c` passes on a call to a sub that doesn't exist, which nearly shipped a runtime crash in 0.1.83 |
 
 Two rules that follow from how this suite is built:

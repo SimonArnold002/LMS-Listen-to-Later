@@ -173,7 +173,7 @@ my $ins = sub {
     });
     my $r = $h->selectall_arrayref('SELECT dedupe_key FROM albums', { Slice => {} });
     is('a stale key is rewritten',  $r->[0]{dedupe_key}, 'janes addiction|ritual de lo habitual|1990');
-    is('...and the ladder is stamped', ($h->selectrow_array('PRAGMA user_version'))[0], 5);
+    is('...and the ladder is stamped', ($h->selectrow_array('PRAGMA user_version'))[0], 6);
 }
 
 section('4b. …and it COLLAPSES the duplicates the new fold merges');
@@ -297,7 +297,7 @@ section('4h. A MERGE THAT CANNOT LAND TAKES NOTHING WITH IT');
     is('...under the folded key',              $r2->[0]{dedupe_key}, 'janes addiction|ritual|1990');
     is('...keeping the higher play count',     $r2->[0]{play_count}, 3);
     is('...and the loser\'s ref',              $r2->[0]{ref_kind}, 'album_id');
-    is('...and now the ladder is stamped',     ($h->selectrow_array('PRAGMA user_version'))[0], 5);
+    is('...and now the ladder is stamped',     ($h->selectrow_array('PRAGMA user_version'))[0], 6);
 }
 
 section('4i. A ROLLBACK THAT FAILS MUST NOT POISON THE HANDLE');
@@ -398,7 +398,7 @@ section('4g. A FAILED PASS DOES NOT STAMP THE LADDER');
        ($h->selectrow_array('SELECT dedupe_key FROM albums'))[0],
        'janes addiction|ritual|1990');
     is('...and stamps the ladder',
-       ($h->selectrow_array('PRAGMA user_version'))[0], 5);
+       ($h->selectrow_array('PRAGMA user_version'))[0], 6);
 }
 
 # ---------------------------------------------------------------------------

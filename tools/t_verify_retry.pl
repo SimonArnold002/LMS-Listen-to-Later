@@ -21,7 +21,7 @@ use warnings;
 use FindBin;
 require "$FindBin::Bin/t_stubs.pl";
 
-ll_require('DB', 'Sources', 'Podcast', 'Browse', 'Plugin');
+ll_require('DB', 'Sources', 'Browse', 'Plugin');
 my $P = 'Plugins::ListenLater::Plugin';
 
 my ($pass, $fail) = (0, 0);

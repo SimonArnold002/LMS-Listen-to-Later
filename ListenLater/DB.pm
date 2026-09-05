@@ -189,7 +189,140 @@ SQL
                 . 'start');
         }
     }
+
+    # 0.1.136 — the built-in Podcasts-app path was REMOVED, so its rows are purged rather
+    # than migrated. A re-key would have been the higher-risk change (this file's most
+    # expensive bugs all live on the UNIQUE dedupe_key rung) for rows the user has agreed to
+    # re-add by hand, and the removal means nothing can replay a 'podcast://' url any more:
+    # Sources::_serviceCan no longer has an arm for it, so a surviving row would sit in the
+    # list unplayable. The report is written BEFORE the DELETE so a failed delete cannot lose
+    # the record of what was about to go.
+    # Re-read the version rather than trusting the one taken at entry: rung 5 withholds its
+    # stamp on failure so it retries next start, and stamping 6 over it would carry the
+    # ladder PAST a rung that never ran — losing that retry for good. A rung must never
+    # advance the version on behalf of an earlier one that failed.
+    my ($ladderVer) = $h->selectrow_array('PRAGMA user_version');
+    $ladderVer = 0 unless defined $ladderVer;
+    if ($ladderVer < 5) {
+        $log->warn("Listen Later: an earlier migration is still pending (schema $ladderVer) "
+            . '— the podcast purge waits for it rather than stamping over it');
+    }
+    elsif ($schemaVer < 6) {
+        if (_purgeRemovedPodcasts($h)) {
+            $h->do('PRAGMA user_version = 6');
+        }
+        else {
+            $log->warn('Listen Later: podcast purge did not complete — schema left at '
+                . "version $schemaVer so it is retried at the next start");
+        }
+    }
     return;
+}
+
+# Which rows go, and why `source` alone cannot answer it for Spotify.
+#
+#   source 'podcast'        — the removed built-in path. ALL of them.
+#   source 'deezerpodcast'  — its own scheme, so the tag is enough.
+#   source 'spotify'        — the tag is shared with every Spotify MUSIC TRACK, so only the
+#                             play url separates them. Before 0.1.126 (commit 49b8902, which
+#                             added spotifyEpisodeUri, episodeKey AND the `episode` flag in
+#                             one go) an episode was not recognised at all and stored as an
+#                             ordinary track — a `|t:` key with no `|e:` tail. Those rows are
+#                             indistinguishable from music by key alone.
+#
+# So the url is the test, through Sources::spotifyEpisodeUri — the one carrier for that
+# question, which already accepts both the bare 'spotify:episode:<id>' and the '//' spelling
+# normaliseFavurl has produced since 0.1.113. A CORRECTLY-keyed streaming episode is KEPT:
+# that path is still supported.
+sub _purgeRemovedPodcasts {
+    my ($h) = @_;
+
+    my $rows = eval {
+        $h->selectall_arrayref(
+            "SELECT id, status, source, artist, album_title, track_title, dedupe_key,
+                    ref_json, added_at
+               FROM albums WHERE source IN ('podcast', 'deezerpodcast', 'spotify')",
+            { Slice => {} })
+    };
+    unless ($rows) {
+        $log->error("Listen Later: podcast purge could not read the table: $@");
+        return 0;
+    }
+
+    my @doomed;
+    for my $r (@$rows) {
+        # The REMOVED path: every one of them, whatever its key.
+        if ($r->{source} eq 'podcast') {
+            push @doomed, $r;
+            next;
+        }
+        # Everything below is a STREAMING episode, which is a SUPPORTED path — Deezer's as
+        # much as Spotify's. A correctly-keyed one is KEPT. Only a MIS-KEYED one goes, and
+        # the '|e:' tail is what says which: episodeKey (and the `episode` flag that drives
+        # it) arrived in 0.1.126, so a Deezer row written by 0.1.124-0.1.125 or a Spotify
+        # row written before recognition existed carries a '|t:' key instead. Those cannot
+        # dedupe or mark played against the url the way the supported path does, and they
+        # have never shipped, so they are cleared rather than carried.
+        next if ($r->{dedupe_key} // '') =~ /\|e:/;
+        # Deezer's own scheme says "episode" on its own; Spotify's source tag is shared with
+        # every music track, so only the play url can answer it — via the one carrier that
+        # knows both the bare and '//' spellings.
+        if ($r->{source} eq 'deezerpodcast') {
+            push @doomed, $r;
+            next;
+        }
+        my $ref = eval { $JSON->decode($r->{ref_json} // '{}') } || {};
+        next unless Plugins::ListenLater::Sources::spotifyEpisodeUri($ref->{url});
+        push @doomed, $r;
+    }
+    return 1 unless @doomed;
+
+    _writePurgeReport(\@doomed);
+
+    my $gone = 0;
+    for my $r (@doomed) {
+        $gone++ if eval { $h->do('DELETE FROM albums WHERE id = ?', undef, $r->{id}); 1 };
+    }
+    if ($gone != @doomed) {
+        $log->error('Listen Later: podcast purge removed ' . $gone . ' of '
+            . scalar(@doomed) . ' rows');
+        return 0;
+    }
+    $log->warn("Listen Later: removed $gone podcast row(s) — see " . _reportPath());
+    return 1;
+}
+
+sub _reportPath {
+    my $dir = preferences('server')->get('cachedir') || '/tmp';
+    return "$dir/listenlater-removed-podcasts.txt";
+}
+
+# Beside the DB, in the same cachedir DB::_path uses, so a support question is answerable
+# from one place. Best-effort: a report we cannot write must not stop the purge, but it is
+# logged loudly, because the whole point is that the user can re-add these by hand.
+sub _writePurgeReport {
+    my ($rows) = @_;
+    my $path = _reportPath();
+    my $ok = eval {
+        open my $fh, '>:encoding(UTF-8)', $path or die "$path: $!\n";
+        print $fh "Listen Later — podcast rows removed by the 0.1.136 upgrade\n";
+        print $fh "Built-in Podcasts-app support was removed; these rows could no longer be\n"
+                . "played, so they were deleted. Re-add anything you still want by hand.\n\n";
+        for my $r (sort { ($a->{added_at} || 0) <=> ($b->{added_at} || 0) } @$rows) {
+            my @when = localtime($r->{added_at} || 0);
+            printf $fh "[%s] %s — %s%s\n    url: %s\n    added: %04d-%02d-%02d\n\n",
+                ($r->{status}   // 'later'),
+                ($r->{album_title} // '(no show)'),
+                ($r->{track_title} // '(no title)'),
+                ($r->{source} eq 'podcast' ? '' : "  [$r->{source}]"),
+                ((eval { $JSON->decode($r->{ref_json} // '{}')->{url} }) // '(none)'),
+                $when[5] + 1900, $when[4] + 1, $when[3];
+        }
+        close $fh;
+        1;
+    };
+    $log->error("Listen Later: could not write the podcast removal report: $@") unless $ok;
+    return $ok ? 1 : 0;
 }
 
 # ALTER TABLE ... ADD COLUMN, but only if the column isn't already present (a fresh

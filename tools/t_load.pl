@@ -13,7 +13,7 @@ use warnings;
 use FindBin;
 require "$FindBin::Bin/t_stubs.pl";
 
-my @MODULES = qw(DB Sources Podcast Browse Played Settings HomeExtras Plugin);
+my @MODULES = qw(DB Sources Browse Played Settings HomeExtras Plugin);
 
 my ($pass, $fail) = (0, 0);
 sub is {

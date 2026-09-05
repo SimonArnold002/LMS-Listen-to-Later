@@ -1373,11 +1373,6 @@ sub _serviceCan {
     # sub this plugin actually calls, per the adapter spec's R8, rather than the more
     # familiar-looking Plugin->can(...) that nothing here would invoke.
     return 1 if $source eq 'spotify'  && Plugins::Spotty::OPML->can('album');
-    # A podcast EPISODE needs no service adapter at all — it's a single self-contained
-    # enclosure url, stored podcast://-wrapped, and replay is a straight handoff to the
-    # Podcast plugin's own protocol handler (which also keeps its resume-position
-    # tracking). So the only question is whether that handler exists on this server.
-    return 1 if $source eq 'podcast'  && _hasPodcastHandler();
     # Deezer's podcast episodes are the SAME shape under a different scheme: Deezer browses
     # them as 'deezerpodcast://<id>' (verified live — NOT 'deezer://', which is why they were
     # refused as an unknown source until 0.1.124). A saved episode is kind='track', and a
@@ -1403,13 +1398,6 @@ sub _serviceCanPlaylist {
     return 1 if $source eq 'deezer' && Plugins::Deezer::Plugin->can('getPlaylist');
     return 1 if $source eq 'spotify' && Plugins::Spotty::OPML->can('playlist');
     return 0;
-}
-
-# Is the built-in Podcast plugin's podcast:// protocol handler registered? Asked with a
-# representative url because handlerForURL parses the scheme off one (the same call
-# trackAlbumId already relies on).
-sub _hasPodcastHandler {
-    return _hasSchemeHandler('podcast://https://example.com/e.mp3');
 }
 
 # Is this row a podcast EPISODE? THREE sources supply them and they answer in two different
@@ -1440,7 +1428,7 @@ sub _hasPodcastHandler {
 sub isPodcastEpisode {
     my ($source, $url) = @_;
     if (defined $source && length $source) {
-        return 1 if $source eq 'podcast' || $source eq 'deezerpodcast';
+        return 1 if $source eq 'deezerpodcast';
     }
     return defined spotifyEpisodeUri($url) ? 1 : 0;
 }

@@ -46,7 +46,7 @@ use File::Path ();
 use JSON::XS ();
 require "$FindBin::Bin/t_stubs.pl";
 
-ll_require('DB', 'Sources', 'Podcast', 'Browse', 'Played', 'Settings', 'Plugin');
+ll_require('DB', 'Sources', 'Browse', 'Played', 'Settings', 'Plugin');
 
 my ($pass, $fail) = (0, 0);
 sub is {

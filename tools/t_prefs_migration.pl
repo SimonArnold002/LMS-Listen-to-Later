@@ -26,7 +26,7 @@ no warnings 'once';
 use FindBin;
 require "$FindBin::Bin/t_stubs.pl";
 
-ll_require('DB', 'Sources', 'Podcast', 'Plugin');
+ll_require('DB', 'Sources', 'Plugin');
 
 my ($pass, $fail) = (0, 0);
 sub is {

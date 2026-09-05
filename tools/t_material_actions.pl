@@ -36,11 +36,12 @@ use strict;
 use warnings;
 use FindBin;
 use File::Temp ();
+use File::Basename;
 use File::Path ();
 use JSON::XS ();
 require "$FindBin::Bin/t_stubs.pl";
 
-ll_require('DB', 'Sources', 'Podcast', 'Browse', 'Played', 'Settings', 'Plugin');
+ll_require('DB', 'Sources', 'Browse', 'Played', 'Settings', 'Plugin');
 
 my ($pass, $fail) = (0, 0);
 sub is {
@@ -81,6 +82,19 @@ sub read_file {
     open my $fh, '<:raw', $f or die $!;
     local $/; my $raw = <$fh>; close $fh;
     return $JSON->decode($raw);
+}
+# Write a populated podcasts-* pair straight into actions.json, exactly as a pre-0.1.136
+# build left it. Used to prove the CLEAR/PRUNE machinery still removes what this build can
+# no longer produce — the clearing half is deliberately kept while the writing half is gone.
+sub seed_husk {
+    my (@cats) = @_;
+    my $f = actions_file();
+    File::Path::make_path((File::Basename::fileparse($f))[1]);
+    my $data = -e $f ? read_file() : {};
+    $data->{$_} = [ { title => 'Add to Listen Later',
+                      lmscommand => [ 'listenlater', 'addctx', 'kind:podcast' ] } ] for @cats;
+    open my $fh, '>:raw', $f or die $!;
+    print $fh $JSON->encode($data); close $fh;
 }
 sub reset_all {
     @REG = ();
@@ -235,27 +249,6 @@ my $old = read_file();
 is('nothing registered (no API to register with)', scalar @REG, 0);
 is('all our entries are in the file', ours_in_file($old), $TOTAL + $FILEHALF);
 is('...byte-identical to what 0.1.94 wrote', $JSON->encode($old), $JSON->encode($legacy));
-
-# ---------------------------------------------------------------------------
-section('podcasts — file-only on BOTH paths (Material reads the override from the file)');
-
-reset_all();
-Slim::Utils::Prefs::set_test_pref_ns('plugin.podcast', 'feeds',
-    [ { name => 'Darko.Audio', value => 'https://darko.audio/feed' } ]);
-my (undef, $withFeeds) = Plugins::ListenLater::Plugin::_materialActionSet();
-is('podcasts-* join the file half once a feed is subscribed',
-    join(',', sort keys %$withFeeds), 'podcasts-album,podcasts-track,queue-track,track');
-
-install_api();
-Plugins::ListenLater::Plugin::_registerMaterialActions();
-Plugins::ListenLater::Plugin::_writeMaterialActions();
-my $pod = read_file();
-is('podcasts-* NOT registered with Material',
-    (grep { $_->[0] =~ /^podcasts-/ } @REG) ? 'registered' : 'no', 'no');
-is('...written to the file instead', scalar @{ $pod->{'podcasts-album'} // [] }, 1);
-is('...as the podcast add, with no Wish List entry',
-    $pod->{'podcasts-album'}[0]{lmscommand}[2], 'kind:podcast');
-Slim::Utils::Prefs::set_test_pref_ns('plugin.podcast', 'feeds', []);
 
 # ---------------------------------------------------------------------------
 section('the pref turned off');
@@ -516,6 +509,58 @@ is('...and our own entry set comes out exactly as a clean write leaves it',
     ours_in_file($afterWrite), $ourBaseline);
 
 # ---------------------------------------------------------------------------
+section('0.1.136 — a Podcasts-app row shows NO Add at all (same rule as radio)');
+# The built-in podcast path is gone, so there is nothing LL can store from a Podcasts-app
+# episode row. Left alone, the row would inherit the GENERIC online-* pair and render an
+# "Add to Listen Later" that silently rejects — a dead button. An EMPTY per-app category
+# suppresses that fallback (the 0.1.52 rule), which is exactly how every unsupported radio
+# command is already handled: we don't show an Add we can't honour.
+# Pinned at EVERY tier explicitly, and not left to whatever version an earlier section
+# happened to set: the three tiers deliver by different halves, so one passing says nothing
+# about the others. Tier 0 (no register API) and tier 1 (6.4.6/6.4.7 — registers positives
+# but mis-handles the empty call) both go through the FILE; tier 2 is asserted separately
+# below because _writeMaterialActions returns early there.
+for my $t ( [ 'tier 0', undef, 0 ], [ 'tier 1', '6.4.7', 1 ] ) {
+    my ($name, $ver, $wantApi) = @$t;
+    reset_all();
+    $wantApi ? install_api() : remove_api();
+    set_material_version($ver) if defined $ver;
+    Plugins::ListenLater::Plugin::_writeMaterialActions();
+    my $pod = read_file();
+    is("$name: podcasts-album is written, and EMPTY",
+       (exists $pod->{'podcasts-album'} ? scalar @{ $pod->{'podcasts-album'} } : 'MISSING'), 0);
+    is("$name: ...and podcasts-track too",
+       (exists $pod->{'podcasts-track'} ? scalar @{ $pod->{'podcasts-track'} } : 'MISSING'), 0);
+    is("$name: ...while the generic online-album pair stays populated for everything else",
+       scalar @{ $pod->{'online-album'} // [] }, 2);
+}
+# Tier 0 above removed the register API and tier 1 pinned a version; restore BOTH, or the
+# sections that follow silently run at the wrong tier. The suite has no getPluginVersion
+# stub by default (see the note at the top), so undef is the correct restore.
+install_api();
+set_material_version(undef);
+
+# TIER 2 delivers suppressors by REGISTRATION, not through the file — _writeMaterialActions
+# returns early there — so the tier 0/1 assertions above prove nothing about it. The same
+# suppression has to arrive by the other half, or a 6.4.8+ user gets the dead Add button
+# that the file half prevents for everyone else.
+reset_all();
+install_api();
+set_material_version('6.4.9');
+Plugins::ListenLater::Plugin::_registerMaterialActions();
+my %emptied = map { $_ => 1 } registered_empties();
+is('tier 2: podcasts-album is registered as an EMPTY section',
+   ($emptied{'podcasts-album'} ? 'suppressed' : 'MISSING'), 'suppressed');
+is('...and podcasts-track too',
+   ($emptied{'podcasts-track'} ? 'suppressed' : 'MISSING'), 'suppressed');
+is('...and it is a SUPPRESSOR, never a real Add entry',
+   (scalar grep { $_->[0] =~ /^podcasts-/ } registered_actions()), 0);
+
+# Leave the tier and the registration state exactly as this section found them.
+reset_all();
+install_api();
+set_material_version(undef);
+
 section('the FILE-ONLY podcasts-* override leaves no husk when the pref goes OFF');
 # podcasts-album/-track are ours and file-only, so the strip pass empties them — but they are
 # per-app "<command>-<type>" categories, and an EMPTY one of those SUPPRESSES the online-*
@@ -526,13 +571,20 @@ section('the FILE-ONLY podcasts-* override leaves no husk when the pref goes OFF
 # good. Nothing cleans it later: the pref-ON write pass that would is the one the pref being
 # off stops from running.
 
+# 0.1.136: THIS BUILD NEVER WRITES THE PAIR — the built-in Podcasts-app path was removed.
+# That makes the husk question SHARPER, not moot: what an EARLIER build wrote is still on
+# disk, and an empty per-app category SUPPRESSES the online-* fallback, so a leftover would
+# hide "Add" on every Podcasts-app row for good with no code left to rewrite it. So the
+# husk is seeded here directly — as a previous release left it — rather than produced by a
+# write pass that no longer exists. This is the single most likely way the removal bites.
 reset_all();
 install_api();
-Slim::Utils::Prefs::set_test_pref_ns('plugin.podcast', 'feeds',
-    [ { name => 'Darko.Audio', value => 'https://darko.audio/feed' } ]);
-Plugins::ListenLater::Plugin::_writeMaterialActions();     # nothing registered
-is('the write pass wrote the override',
+seed_husk('podcasts-album', 'podcasts-track');
+is('an OLD build\'s populated override is on disk to begin with',
     scalar @{ read_file()->{'podcasts-album'} // [] }, 1);
+is('...and this build does NOT write it',
+    (do { Plugins::ListenLater::Plugin::_writeMaterialActions();
+          scalar @{ read_file()->{'podcasts-album'} // [] } }), 0);
 Plugins::ListenLater::Plugin::_clearMaterialActions();
 is('the clear pass deletes it outright, husk and all',
     join(',', map { (exists read_file()->{$_} ? 'y' : 'n') } qw(podcasts-album podcasts-track)),
@@ -543,7 +595,7 @@ is('the clear pass deletes it outright, husk and all',
 # them and the husks would survive. This is why the clear pass hardcodes the pair.
 reset_all();
 install_api();
-Plugins::ListenLater::Plugin::_writeMaterialActions();
+seed_husk('podcasts-album', 'podcasts-track');
 Slim::Utils::Prefs::set_test_pref_ns('plugin.podcast', 'feeds', []);
 Plugins::ListenLater::Plugin::_clearMaterialActions();
 is('...even for a user who has unsubscribed from everything',
@@ -1165,9 +1217,6 @@ is('tier 2: our own list rows report the REGISTERED suppressor',
 is('tier 2: a radio browse command too',
     (svc_line('music') =~ /Add HIDDEN \(registered empty 'music-album' section\)/)
         ? 'registered' : svc_line('music'), 'registered');
-is('tier 2: the podcasts override is reported as its own REGISTERED category',
-    (svc_line('podcasts') =~ /Add shown \(via its own registered 'podcasts-album' section\)/)
-        ? 'registered' : svc_line('podcasts'), 'registered');
 is('tier 2: a plain streaming app still falls through to online-*',
     (svc_line('qobuz') =~ /Add shown \(via online-\*\)/) ? 'online' : svc_line('qobuz'), 'online');
 
@@ -1181,9 +1230,6 @@ Plugins::ListenLater::Plugin::_writeMaterialActions();
 is('tier 1: our own list rows report the FILE suppressor',
     (svc_line('listenlater') =~ /Add HIDDEN \(empty 'listenlater-album' in actions\.json\)/)
         ? 'file' : svc_line('listenlater'), 'file');
-is('tier 1: the podcasts override is reported from the file',
-    (svc_line('podcasts') =~ /Add shown \(via its own 'podcasts-album' in actions\.json\)/)
-        ? 'file' : svc_line('podcasts'), 'file');
 is('tier 1: and online-* still carries the rest',
     (svc_line('qobuz') =~ /Add shown \(via online-\*\)/) ? 'online' : svc_line('qobuz'), 'online');
 
@@ -1551,112 +1597,6 @@ install_api();
 set_material_version(undef);
 
 # ---------------------------------------------------------------------------
-section('a category that appears MID-RUN still reaches Material (tier 2)');
-# $REGISTERED was a single latch on the belief that the positive set is fixed at startup. On
-# tier 2 it is not: podcasts-* folds into %positive and is gated on Podcast::hasFeeds(), so a
-# user subscribing to their FIRST feed grows a section after postinit and the deferred pass have
-# both run. The latch then refused it for the rest of the server run, and the prune writes back
-# only what registration REFUSED — so it reached neither half and podcast rows had no "Add"
-# until a restart. Two halves to pin: the per-category ledger lets a NEW section through, and
-# something has to call us when the subscription list changes.
-reset_all();
-install_api();
-set_material_version('6.4.9');
-save_settings(material_action => 1, debug_log => 0);
-Slim::Utils::Prefs::set_test_pref_ns('plugin.podcast', 'feeds', []);
-Plugins::ListenLater::Plugin::_registerMaterialActions();
-Plugins::ListenLater::Plugin::_writeMaterialActions();
-is('with no subscriptions the override is not registered',
-    (grep { $_->[0] eq 'podcasts-album' } @REG) ? 'registered' : 'absent', 'absent');
-my $before = scalar @REG;
-
-# The user subscribes to their first podcast, and the pref watcher fires the deferred pass.
-Slim::Utils::Prefs::set_test_pref_ns('plugin.podcast', 'feeds',
-    [ { name => 'Darko.Audio', value => 'https://darko.audio/feed' } ]);
-Plugins::ListenLater::Plugin::_writeMaterialActionsDeferred();
-is('subscribing mid-run registers the podcasts override',
-    (grep { $_->[0] eq 'podcasts-album' } @REG) ? 'registered' : 'MISSING', 'registered');
-is('...the -track half too',
-    (grep { $_->[0] eq 'podcasts-track' } @REG) ? 'registered' : 'MISSING', 'registered');
-is('...and it is the real Add entry, not an empty section',
-    (grep { $_->[0] eq 'podcasts-album' && @$_ > 1 } @REG) ? 'entry' : 'empty', 'entry');
-# The latch's whole job: everything already handed over must NOT be pushed again, or Material
-# appends it and every "Add" in those sections shows twice.
-my %dup;
-$dup{ $_->[0] }++ for grep { @$_ > 1 } @REG;
-is('...while nothing already registered is pushed a second time',
-    (join ',', sort grep { $dup{$_} > 2 } keys %dup), '');
-is('...and it did not re-register the whole set', (scalar @REG > $before) ? 'grew' : 'static', 'grew');
-is('the override is NOT also written to the file (that would double it)',
-    (exists read_file()->{'podcasts-album'} ? 'written' : 'clean'), 'clean');
-
-# A second identical pass must be a no-op — the deferred pass also runs on a +60s timer.
-my $after = scalar @REG;
-Plugins::ListenLater::Plugin::_writeMaterialActionsDeferred();
-is('...and a repeat pass registers nothing further', scalar @REG, $after);
-
-# The other half: postinit must actually ASK to be told, and it must do so on BOTH of its
-# arms. This was pinned at SOURCE while the harness's setChange was a no-op, which is why the
-# check below is the one that matters: the source grep passed happily with the watcher sitting
-# inside the pref-ON branch, where a server that booted with the box UNTICKED installed none.
-# Ticking the box on the Settings page registers and writes (Settings.pm) but installs no
-# watcher, so that run went to its end unable to notice a first subscription — the podcasts-*
-# pair then reached neither half on tier 2. The callback self-gates on the pref, so installing
-# it while the box is off is free; asking for it from Settings.pm instead would be wrong,
-# because setChange STACKS callbacks and would add one per save.
-section('the podcast watcher is installed on BOTH postinit arms');
-my $watched = sub {
-    return scalar grep { $_->{ns} eq 'plugin.podcast' && $_->{pref} eq 'feeds'
-                      && $_->{cb} == \&Plugins::ListenLater::Plugin::_writeMaterialActionsDeferred }
-        @Slim::Utils::Prefs::Obj::CHANGES;
-};
-
-@Slim::Utils::Prefs::Obj::CHANGES = ();
-Slim::Utils::Prefs::preferences('plugin.listenlater')->set('material_action', 0);
-Plugins::ListenLater::Plugin->postinitPlugin();      # the box was UNTICKED at server start
-is('postinit with the box unticked still watches the subscription list',
-    $watched->() ? 'watched' : 'NOT watched', 'watched');
-
-@Slim::Utils::Prefs::Obj::CHANGES = ();
-Slim::Utils::Prefs::preferences('plugin.listenlater')->set('material_action', 1);
-Plugins::ListenLater::Plugin->postinitPlugin();      # ...and the ordinary ticked boot
-is('postinit with the box ticked watches it too',
-    $watched->() ? 'watched' : 'NOT watched', 'watched');
-is('...exactly once per boot, not once per arm', $watched->(), 1);
-
-# ---------------------------------------------------------------------------
-# The remaining ordering, and the reason the fix above did NOT also need a setChange in
-# Settings.pm: subscribe FIRST, tick the box SECOND. The watcher fires while the box is off
-# and self-gates to nothing, but the save that follows reads hasFeeds() live — the action set
-# is rebuilt per call, never cached — so the pair is registered by the save itself. Pinned so
-# that nobody "completes" the fix by adding a second watcher in Settings.pm, which would stack
-# a callback per save.
-section('subscribe first, tick the box second');
-reset_all();
-install_api();
-set_material_version('6.4.9');
-Slim::Utils::Prefs::preferences('plugin.listenlater')->set('material_action', 0);
-Slim::Utils::Prefs::set_test_pref_ns('plugin.podcast', 'feeds',
-    [ { name => 'Darko.Audio', value => 'https://darko.audio/feed' } ]);
-Plugins::ListenLater::Plugin::_writeMaterialActionsDeferred();
-is('a feeds change while the box is off registers nothing', n_actions(), 0);
-save_settings(sort => 'added', material_action => 1);
-is('...and ticking the box afterwards registers the podcasts override',
-    (grep { $_->[0] eq 'podcasts-album' } @REG) ? 'registered' : 'MISSING', 'registered');
-Slim::Utils::Prefs::set_test_pref_ns('plugin.podcast', 'feeds', []);
-
-# ---------------------------------------------------------------------------
-# An actions.json we cannot READ is not an empty one. Every pass that touches the shared
-# file used to treat the two as the same thing, because _readMaterialActions answered {} for
-# "absent", "could not open" and "could not parse" alike — so a file with a hand-edit syntax
-# error, or one left root-owned/0600 (we run as the server user, not root), was OVERWRITTEN
-# by the tier-0/1 writers and UNLINKED by the tier-2 prune, taking every other plugin's
-# custom actions with it. The prune even logged "removed the now-empty" file about it.
-#
-# The rule these pin: when the content cannot be established, the file is left EXACTLY as it
-# was, byte for byte, and nothing of ours is written. Every case here is asserted on the
-# RAW BYTES on disk, not on a re-read through the plugin's own reader — a reader that cannot
-# parse the file cannot be the witness to whether the file survived it.
 section('an UNREADABLE actions.json is never written over, and never deleted');
 
 sub raw_on_disk {

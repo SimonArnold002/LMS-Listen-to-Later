@@ -23,7 +23,6 @@ use Slim::Utils::Strings qw(cstring);
 use Slim::Utils::Timers;
 
 use Plugins::ListenLater::DB;
-use Plugins::ListenLater::Podcast;
 use Plugins::ListenLater::Sources;
 
 my $JSON = JSON::XS->new->utf8->canonical->pretty;
@@ -345,44 +344,6 @@ sub postinitPlugin {
             or $log->error("LL: failed to clear Material custom actions: $@");
     }
 
-    # The podcasts-* override is the one part of the set that is not fixed for the run:
-    # _materialActionSet emits it only while Podcast::hasFeeds() is true, so a user who
-    # subscribes to their first feed GROWS a category after both passes above have run. On
-    # tier 0/1 the next file write picks it up, but on tier 2 it is registered, and nothing
-    # re-registers on its own — the prune writes back only what registration REFUSED, so the
-    # pair reached NEITHER half and podcast rows had no "Add" until a server restart.
-    # Watching the Podcast plugin's own pref is what closes that; the deferred pass is
-    # exactly the right callback, since it re-registers what is new and rewrites the file.
-    #
-    # OUTSIDE the branch above, and gated only on Material being present, because the pref
-    # is not the only way in. Ticking the box on the Settings page mid-run registers and
-    # writes (Settings.pm) but installs nothing — so had this stayed in the ON arm, a server
-    # that started with the box UNTICKED would run the rest of its life with no watcher, and
-    # a first feed subscribed after the box was ticked would reach neither half. The callback
-    # self-gates on the pref (see _writeMaterialActionsDeferred), so installing it here while
-    # the box is off costs nothing and does nothing until the box is ticked. Installing it
-    # from Settings.pm instead would be wrong: setChange STACKS callbacks, so it would add
-    # one per save.
-    #
-    # UNSUBSCRIBING the last feed is NOT the mirror case on tier 2, and the same call
-    # does NOT handle it: `registerCustomAction` PUSHES with no unregister (see the
-    # note above %REGISTERED_POS), so once `podcasts-*` is registered it stays live for
-    # the rest of the run with our "Add" on it — which `_savePodcastEpisode` can no
-    # longer honour, since it resolves an episode against the subscribed feeds. Tier
-    # 0/1 DO mirror it: the pair leaves %fileCats and the next file write drops it.
-    # The tier-2 residue is bounded — with no feeds there are few podcast rows left to
-    # press Add on, and it clears at the next restart — so it is accepted rather than
-    # worked around. If it ever needs closing, the fix is a hasFeeds() check inside the
-    # add handler at invocation time, not more registration bookkeeping.
-    # NB a Material tab already open took its snapshot at app start, so the new entry
-    # appears on the next app load — the standing late-registration caveat, not a new one.
-    if ( Slim::Utils::PluginManager->isEnabled('Plugins::MaterialSkin::Plugin') ) {
-        eval {
-            Slim::Utils::Prefs::preferences('plugin.podcast')
-                ->setChange(\&_writeMaterialActionsDeferred, 'feeds');
-            1;
-        } or $log->error("LL: could not watch the podcast subscription list: $@");
-    }
 
     # Material Skin home-page shelf for the Listen Later list (guarded on the
     # registerHomeExtra API, like Qobuz/Bandcamp/ListenBrainz do).
@@ -705,8 +666,16 @@ my %SUPPORTED_CMD = map { $_ => 1 }
 # stable, so seed them at INIT to guarantee the suppressing empty categories exist before
 # Material ever loads the file. Unioned with the live 'radios' enumeration
 # (_unsupportedRadioCommands) so other radio plugins are still covered.
+#
+# 0.1.136 — 'podcasts' (PLURAL, the built-in Podcasts app) joins this list, and it is not
+# radio. The list is really "browse commands whose rows LL cannot add", which is what the
+# suppression actually keys on; TuneIn's categories were simply the only members until the
+# built-in podcast path was removed. With that path gone an episode row has nothing LL can
+# store, so the generic online-* pair must not render on it — the same rule already applied
+# to radio: we don't show an Add we can't honour. NB 'podcast' (SINGULAR, below) is TuneIn's
+# own radio category and a different string; both are suppressed, for the same reason.
 my @KNOWN_RADIO_CMDS =
-    qw(music news sports talk location language podcast search presets local);
+    qw(music news sports talk location language podcast podcasts search presets local);
 
 # Radio stations are live streams — never a valid "Listen Later" item. We hide the
 # streaming "Add" on radio BROWSE rows (see _writeMaterialActions) by giving each
@@ -871,24 +840,6 @@ sub _materialActionSet {
     my $onlineTrackCmd = [ 'listenlater', 'addctx', 'kind:track',
         'trackname:$TITLE', 'artist:$ARTISTNAME', 'svc:$SERVICE', 'favurl:$FAVURL', 'image:$IMAGE' ];
 
-    # A PODCAST episode row in the built-in Podcasts app. Verified in the served bundle:
-    # those rows have no stdItem and no metadata, so Material's is-track flag is false and
-    # the category it resolves is "<command>-album" = 'podcasts-album' — and it prefers a
-    # PRESENT per-command category over the generic online-*. Writing a POPULATED
-    # podcasts-album is therefore what REPLACES the generic pair on those rows, and nowhere
-    # else. (The same per-app override we already use EMPTY for suppression; populated it
-    # swaps the list wholesale, so it can hide an entry by not carrying it.)
-    #
-    # NB the win is NOT the wording — every row-level title went type-neutral ("Add to Listen
-    # Later") in 0.1.85, so the generic entries read correctly here too. What the override
-    # actually buys is (a) 'kind:podcast', which routes straight to _savePodcastEpisode
-    # instead of leaning on the last-resort resolve at the bottom of _addCtxCommand, and
-    # (b) NO "Add to Wish List" entry, because you don't buy a podcast episode (the same rule
-    # _savePodcastEpisode enforces on the command side).
-    # The row carries no favurl and no id — only $TITLE and $IMAGE — so the episode is
-    # resolved at add time against the user's subscribed feeds (Podcast.pm).
-    my $podcastCmd = [ 'listenlater', 'addctx', 'kind:podcast',
-        'name:$TITLE', 'artist:$ARTISTNAME', 'svc:$SERVICE', 'image:$IMAGE' ];
 
     # Each context menu category maps to a list of { cmd, role } bases — one per "Add"
     # pair (Add to Listen Later + Add to Wish List) written for it. The distinction is by
@@ -905,7 +856,6 @@ sub _materialActionSet {
     my $npBase          = { cmd => $trackCmd,       role => 'nowplaying' };
     my $onlineAlbumBase = { cmd => $onlineCmd,      role => 'plain' };
     my $onlineTrackBase = { cmd => $onlineTrackCmd, role => 'plain' };
-    my $podcastBase     = { cmd => $podcastCmd,     role => 'podcast' };
     # Registered with Material (6.4.6+). Every one of these is RE-RESOLVED per browse
     # response — so it does not matter when the plugin list reaches the client. ('track' and
     # 'queue-track' are resolved client-side too, but ONCE, off a bus event; that is what
@@ -951,25 +901,6 @@ sub _materialActionSet {
         'queue-track' => [ $trackBase ],
     );
 
-    # 2. The built-in Podcasts app, keyed on ITS browse command. '-album' is the category
-    # Material actually resolves for those rows (see $podcastCmd); '-track' is written with
-    # the same pair purely as insurance, in case a future Material starts classifying them
-    # as tracks.
-    # Only written when the Podcast plugin holds subscriptions, because an episode can only
-    # be resolved against a subscribed feed; with none, the generic "Add album" stays and
-    # keeps rejecting exactly as it does today, rather than promising a podcast add we
-    # can't honour.
-    #
-    # FILE-ONLY up to tier 1, and it has to be there: this is a per-app "<command>-<type>"
-    # override, and a Material before 6.4.8 only consults one of those when the category is
-    # present in actions.json. 6.4.8 made that test read the plugin list too, so the tier-2
-    # branch below folds this pair in with the rest — see the %fileCats fold, and the
-    # per-service diagnostic in _dumpMaterialState, which names whichever half it came from.
-    if (Plugins::ListenLater::Podcast::hasFeeds()) {
-        $fileCats{'podcasts-album'} = [ $podcastBase ];
-        $fileCats{'podcasts-track'} = [ $podcastBase ];
-    }
-
     # NB: deliberately NO 'favorites-*' category. FAVOURITES is the other route people take
     # to a podcast (favourite the feed, browse into it), and 0.1.85 gave it its own category
     # purely to get type-neutral wording there. Now that EVERY row-level entry is neutral,
@@ -995,9 +926,6 @@ sub _materialActionSet {
         # top-level action adds the TRACK; the album option lives in "… → More" (the
         # TrackInfo provider, which can drill) and is qualified there for the same reason.
         nowplaying => { later => 'Add track to Listen Later', wishlist => 'Add track to Wish List' },
-        # NO wishlist entry for a podcast: the Wish List is for things you might BUY, and
-        # you don't buy podcast episodes. A role with no wishlist title writes one entry.
-        podcast    => { later => 'Add to Listen Later' },
     );
 
     my $build = sub {
@@ -1603,10 +1531,13 @@ sub _dumpMaterialState {
         . (@radios ? join(', ', @radios) : '(none)'));
 
     # Any NON-empty per-command "<svc>-album/-track" category shadows online-* and hides
-    # Add on that service. Ours are always empty (or, for 'podcasts-*', deliberately
-    # POPULATED — it's what makes a podcast row say "Add to Listen Later" and route
-    # kind:podcast); a populated one that ISN'T ours is foreign/leftover and is the thing to
-    # look at if Add is missing on exactly one service.
+    # Add on that service. Ours are always empty — 'podcasts-*' included since 0.1.136, when
+    # the built-in Podcasts-app path was removed and the pair went from deliberately POPULATED
+    # (its own "Add to Listen Later" routing kind:podcast) to a deliberate SUPPRESSOR, so no
+    # dead Add renders on a row we can no longer store. A populated category that ISN'T ours
+    # is foreign/leftover and is the thing to look at if Add is missing on exactly one
+    # service. The exemption below needs no edit for that change: the pair now arrives via
+    # _radioSuppressorCats, which is already one of its sources of truth.
     #
     # Exempt by FULL category name, read from the same source of truth the writers use —
     # never a hand-list of prefixes. Three of our own populated categories (album-track,
@@ -1836,7 +1767,7 @@ sub _wantedList {
 # playlist.
 #
 # ONE carrier for the rule, because it has four consumers and they used to answer it
-# separately: _savePodcastEpisode and _savePlaylistRecord each carried their own
+# separately: the built-in podcast add (removed 0.1.136) and _savePlaylistRecord each their own
 # `if ($list eq 'wishlist')`, _saveTrackRecord carried none, and _contextMenuQuery tested
 # `kind eq 'playlist'` on its own. That is exactly how the Deezer episodes added in 0.1.124
 # came to land in the Wish List while the built-in ones could not — they store through
@@ -2136,7 +2067,7 @@ sub _saveTrackRecord {
 
     # Placed HERE, after the scheme/track-id/now-playing branches above have settled $source
     # AND $url, because that is the first point the rule can be asked: neither streaming
-    # episode source carries a kind:podcast param, and the two state their podcast-ness in
+    # episode source announces itself in a param, and the two state their podcast-ness in
     # different places — Deezer in the scheme ('deezerpodcast://<id>'), Spotify only in the
     # url's container ref ('spotify://episode:<id>'), since its source is plain 'spotify'.
     # Both are settled by here, so both are passed.
@@ -2208,10 +2139,10 @@ sub _saveTrackRecord {
 # so it wins over a browse row's decorated version.
 #
 # WHICH HANDLERS CAN REACH THIS, AND WHAT THEY ANSWER — read from their source 2026-09-04,
-# not inferred. The caller gates on `isPodcastEpisode`, and the built-in Podcasts app takes
-# `_savePodcastEpisode` instead (its names come from the RSS feed), so exactly two handlers
-# arrive here: Spotty for `spotify://episode:<id>` and lms-deezer's PodcastProtocolHandler
-# for `deezerpodcast://<id>`.
+# not inferred. The caller gates on `isPodcastEpisode`, and since 0.1.136 the built-in
+# Podcasts-app path no longer exists, so exactly two handlers arrive here: Spotty for
+# `spotify://episode:<id>` and lms-deezer's PodcastProtocolHandler for `deezerpodcast://<id>`.
+# These are now the ONLY podcast sources this plugin stores.
 #
 #   Spotty ProtocolHandler::getMetadataFor
 #     cache HIT    -> title, album = the SHOW's name, artist = the show's PUBLISHER, and
@@ -2292,96 +2223,6 @@ sub _fillFromPlayingMeta {
             . ($$trackRef // '?') . "') — storing the handler's");
         $$trackRef = $t;
     }
-    return;
-}
-
-# Save a podcast EPISODE from a Podcasts-app browse row. That row carries no play url and
-# no durable id (only $TITLE and $IMAGE), so the episode is resolved against the user's
-# subscribed feeds first — see Podcast.pm for why that's the only identity available. The
-# resolved enclosure is stored as an ordinary kind='track' row, so replay, dedupe and the
-# played-through Played check all come from the existing track machinery unchanged.
-# Async — setStatusProcessing holds the request open — with a timeout so an unreachable
-# feed can't leave the add hanging.
-sub _savePodcastEpisode {
-    my ($request, $list, $p, $rejectSource) = @_;
-
-    # When called as the last-resort fallback the add wasn't a podcast action at all, so a
-    # rejection should name the source it really came in as, not 'podcast'.
-    $rejectSource = 'podcast' unless defined $rejectSource && length $rejectSource;
-
-    my $title = $p->{name};
-    unless (defined $title && length $title) {
-        $log->warn('LL: podcast add with no title — rejected');
-        return _rejectAdd($request, $rejectSource, undef, 'no episode title');
-    }
-
-    # The podcast action offers no Wish List entry at all, so this only fires when the
-    # episode came in through a GENERIC container's "Add to Wish List" (Favourites etc.),
-    # where the menu can't know it's a podcast. The rule itself lives in _wishListable.
-    $list = _redirectWishList($list, 'track', 'podcast', undef, 'podcast episode');
-
-    # Same gate every other add path runs: don't store what we can't replay. This path
-    # inserts via _insertTrackRow directly (it doesn't go through _saveTrackRecord), so the
-    # check has to be made here — and it's made BEFORE the async feed work, so a server
-    # without the podcast:// handler costs nothing.
-    # The tested source is 'podcast', NOT $rejectSource (which is the container the row came
-    # in under) — so say so, or the line blames whatever menu was open for a server with no
-    # podcast:// handler.
-    return _rejectAdd($request, $rejectSource, $title, 'no podcast:// handler on this server')
-        unless _isReplayableSource('podcast');
-
-    # A show/section row (not an episode) resolves to nothing and is rejected below. The
-    # per-command category can't be scoped to episodes only: Material's per-action filter
-    # keys on the favurl, and these rows have none.
-    $request->setStatusProcessing;
-
-    my $done = 0;
-    my $finish = sub {
-        my ($ep) = @_;
-        return if $done; $done = 1;
-
-        # NOT a source problem: the row came in under whatever container it was browsed in
-        # (usually 'favorites'), and what failed is that no subscribed feed yielded an
-        # enclosure for it — either a show/section row rather than an episode, or a feed
-        # that didn't resolve. Naming the source here is what sent triage the wrong way.
-        return _rejectAdd($request, $rejectSource, $title,
-            'no podcast episode resolved from the subscribed feeds') unless $ep && $ep->{url};
-
-        # artist is left EMPTY and the show goes in album_title: the row then reads
-        # "❝ <episode>" with "Podcast · <show>" beneath it, rather than repeating the show on
-        # both lines. Dedupe still separates episodes (the key's track segment is the episode
-        # title, the album segment the show). This path takes its names from the RSS feed,
-        # which is authoritative for it, so it does not go through _fillFromPlayingMeta — the
-        # two streaming episode sources do, because their names come from a browse row.
-        return _insertTrackRow($request, $list, {
-            source  => 'podcast',
-            url     => $ep->{url},
-            track   => ($ep->{title} // $title),
-            artist  => undef,
-            album   => $ep->{show},
-            year    => $ep->{year},
-            artwork => ($ep->{image} // $p->{image}),
-            trackId => undef,
-        });
-    };
-
-    # A BACKSTOP, and only that. resolveEpisode now runs its own RESOLVE_BUDGET and answers
-    # with the best match it has when that runs out, so this timer firing means the resolver
-    # never called back at all. It is derived from that budget rather than written as its own
-    # number so the two cannot cross: when they did (both 20s), a slow feed AFTER the match
-    # fired this instead, and rejecting here DISCARDS an episode that had already been found.
-    my $timeout = sub {
-        $log->warn('LL: podcast episode resolve timed out — rejected');
-        $finish->(undef);
-    };
-    Slim::Utils::Timers::setTimer(undef,
-        time() + Plugins::ListenLater::Podcast::RESOLVE_BUDGET() + 5, $timeout);
-
-    Plugins::ListenLater::Podcast::resolveEpisode($title, $p->{image}, sub {
-        my ($ep) = @_;
-        Slim::Utils::Timers::killTimers(undef, $timeout);
-        $finish->($ep);
-    });
     return;
 }
 
@@ -2467,8 +2308,8 @@ sub _insertTrackRow {
     # The rule is "an episode whose show is not guaranteed keys on its url". Excluding the
     # built-in app also means no released row is re-keyed (built-in episodes ship from 0.1.87;
     # `main` is 0.1.93), so nothing here owes a migration.
-    my $isStreamingEpisode = ($source ne 'podcast')
-        && Plugins::ListenLater::Sources::isPodcastEpisode($source, $url);
+    my $isStreamingEpisode =
+        Plugins::ListenLater::Sources::isPodcastEpisode($source, $url);
 
     my $rec = {
         kind        => 'track',
@@ -3044,8 +2885,8 @@ sub _addCtxCommand {
     # that sniff now answers 'qobuz' for a row we saved from Qobuz and the re-add succeeds.
     # Name the surfaces explicitly rather than leaning on a side effect of how svc is judged.
     #
-    # Ahead of every branch below, including kind:podcast: a podcast episode in our own list
-    # is no more re-addable than an album.
+    # Ahead of every branch below: a podcast episode in our own list is no more re-addable
+    # than an album.
     if (Plugins::ListenLater::Sources::ownSurface($p{svc})) {
         return _rejectAdd($request, '', $p{name}, 'row is already in Listen Later');
     }
@@ -3058,9 +2899,8 @@ sub _addCtxCommand {
     # not inside favurlIsTrack. Putting it there would only move a Deezer series off the
     # track path and onto the album path — still stored, just wrong differently.
     #
-    # Ahead of kind:podcast costs that path nothing and is checked, not assumed: $podcastCmd
-    # passes name/artist/svc/image and no favurl at all, so an episode add reaches this with
-    # $p{favurl} undef and returns immediately. (A feed row in the Podcasts app carries an
+    # A row with no favurl at all reaches this with $p{favurl} undef and returns immediately,
+    # so the check costs such adds nothing. (A feed row in the Podcasts app carries an
     # https:// RSS url, which names no container ref either — and that add is already
     # refused one layer down, by resolveEpisode finding no episode.)
     if (my $kind = Plugins::ListenLater::Sources::unsupportedContainer($p{favurl})) {
@@ -3078,13 +2918,6 @@ sub _addCtxCommand {
     #      (…​.flac, /track/…) is the reliable tiebreaker (Sources::favurlIsTrack).
     # $TRACKNAME carries the track title on real track-context rows; an online row redirected
     # here by its favurl has only $TITLE (mapped to `name`), which IS the track title.
-    # Podcast episode (the podcasts-* custom action carries kind:podcast). Checked BEFORE
-    # the track branch: the row has no favurl at all, so neither the kind:track test nor
-    # favurlIsTrack would catch it, and it would fall through to the album path.
-    if (($request->getParam('kind') || '') eq 'podcast') {
-        return _savePodcastEpisode($request, $list, \%p);
-    }
-
     my $explicitTrack = ($request->getParam('kind') || '') eq 'track';
     my $favTrack      = Plugins::ListenLater::Sources::favurlIsTrack($p{favurl});
 
@@ -3278,21 +3111,6 @@ sub _addCtxCommand {
             $artwork = $npArt // $artwork;
             $log->warn("LL: now-playing fallback recovered source=$source for '" . ($album // '?') . "'");
         }
-    }
-
-    # Last resort before rejecting: this may be a PODCAST EPISODE reached through some
-    # container OTHER than the Podcasts app. Material picks the custom action by the
-    # CONTAINER's browse command, so an episode under a favourited feed arrives as
-    # svc='favorites' (a home-shelf card or a search hit likewise) and never reaches the
-    # kind:podcast action — it lands here with no favurl, no id, just $TITLE and $IMAGE.
-    # Resolving it here catches every such container at once instead of chasing them one
-    # category at a time. It costs nothing on a working add: it only runs on one that was
-    # already going to be rejected, and the feeds are cached.
-    if (!_isReplayableSource($source)
-            && !(defined $p{favurl}  && length $p{favurl})
-            && !(defined $p{albumid} && length $p{albumid})
-            && Plugins::ListenLater::Podcast::hasFeeds()) {
-        return _savePodcastEpisode($request, $list, \%p, $source);
     }
 
     # Reject a source we can't replay (radio, BBC Sounds, anything unadapted): don't store a record that

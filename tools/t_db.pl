@@ -230,7 +230,7 @@ is('kind column added',        ($col{kind}        ? 'yes':'no'), 'yes');
 is('track_title column added', ($col{track_title} ? 'yes':'no'), 'yes');
 is('rel_type column added',    ($col{rel_type}    ? 'yes':'no'), 'yes');
 is('track_count column added', ($col{track_count} ? 'yes':'no'), 'yes');
-is('user_version stamped',     ($h->selectrow_array('PRAGMA user_version'))[0], 5);
+is('user_version stamped',     ($h->selectrow_array('PRAGMA user_version'))[0], 6);
 
 # user_version 4: every streaming count stored before it was produced by counting the
 # resolved item list with a deny-list filter, which let a service's non-track rows through —
@@ -259,7 +259,7 @@ is('user_version stamped',     ($h->selectrow_array('PRAGMA user_version'))[0], 
     is('...and bandcamp too',                    $rows->{bandcamp}{track_count}, undef);
     is('...but a library count is untouched',    $rows->{library}{track_count}, 9);
     is('the label is NOT touched (display only)',$rows->{qobuz}{rel_type}, 'ep');
-    is('...and stamped so it runs once',         ($g->selectrow_array('PRAGMA user_version'))[0], 5);
+    is('...and stamped so it runs once',         ($g->selectrow_array('PRAGMA user_version'))[0], 6);
 }
 
 my $kept = $h->selectrow_hashref('SELECT * FROM albums WHERE id = 1');

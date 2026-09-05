@@ -32,7 +32,7 @@ require "$FindBin::Bin/t_stubs.pl";
 my $dir = tempdir(CLEANUP => 1);
 Slim::Utils::Prefs::set_test_pref_ns('server', 'cachedir', $dir);
 
-ll_require('DB', 'Sources', 'Podcast', 'Browse', 'Played');
+ll_require('DB', 'Sources', 'Browse', 'Played');
 
 my ($pass, $fail) = (0, 0);
 sub is {
@@ -218,7 +218,10 @@ is('a zero count is ignored, label used',
 is('a saved individual track is always one note',
    $glyph->({ source=>'qobuz', kind=>'track', track_count=>9 }), $ONE);
 is('a podcast episode is always the speech mark',
-   $glyph->({ source=>'podcast', kind=>'track' }), $POD);
+   $glyph->({ source=>'deezerpodcast', kind=>'track' }), $POD);
+is('...and a Spotify episode too — the url is what says so',
+   $glyph->({ source=>'spotify', kind=>'track',
+              ref=>{ url=>'spotify://episode:0tQdtR5srOLPVaevOrLyhR' } }), $POD);
 
 # ---------------------------------------------------------------------------
 section('the row title prints the year once');

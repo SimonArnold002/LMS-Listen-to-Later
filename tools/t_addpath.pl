@@ -25,7 +25,7 @@ require "$FindBin::Bin/t_stubs.pl";
 my $dir = tempdir(CLEANUP => 1);
 Slim::Utils::Prefs::set_test_pref_ns('server', 'cachedir', $dir);
 
-ll_require('DB', 'Sources', 'Podcast', 'Browse', 'Played', 'Plugin');
+ll_require('DB', 'Sources', 'Browse', 'Played', 'Plugin');
 
 # The add is gated on the service being REPLAYABLE — Sources::_serviceCan asks whether that
 # plugin is installed and exposes its album call (Plugin::_isReplayableSource, 0.1.51: nothing
@@ -993,6 +993,15 @@ section('nothing you cannot buy reaches the Wish List — by any route');
 
 # Which list did it actually land in? add() only ever watches 'later', which is the right
 # answer for a redirect but cannot tell "redirected" from "refused".
+# 0.1.136 — WITH THE OVERRIDE GONE, what does the generic online-* Add do on a Podcasts-app
+# row? The populated podcasts-* pair used to REPLACE that pair on those rows; removing it
+# means the generic entry renders there instead. It must REJECT cleanly rather than store a
+# row that cannot replay — and it must not silently do nothing.
+sub podcast_row_add {
+    my ($l) = landed_in(name => '47. The Fall of Constantinople', svc => 'podcasts',
+                        image => '/imageproxy/https%3A%2F%2Fcdn.ex%2Fep.jpg/image.png');
+    return $l;
+}
 sub landed_in {
     my (%params) = @_;
     my %before = map { my $l = $_;
@@ -1029,11 +1038,7 @@ sub landed_in {
     };
 }
 
-my ($where) = landed_in(name => 'Built-in Ep', list => 'wishlist', kind => 'podcast',
-                        svc => 'podcasts');
-is('a built-in podcast episode is redirected out of the Wish List', $where, 'later');
-
-($where) = landed_in(kind => 'track', trackname => 'Deezer Ep', artist => 'Someone',
+my ($where) = landed_in(kind => 'track', trackname => 'Deezer Ep', artist => 'Someone',
                      svc => 'deezer', favurl => 'deezerpodcast://5551212',
                      list => 'wishlist');
 is('a DEEZER episode is redirected too — it stores through _saveTrackRecord', $where, 'later');
@@ -1063,8 +1068,6 @@ is('an ordinary streaming TRACK still reaches the Wish List', $where, 'wishlist'
 is('...and an ordinary ALBUM does too', $where, 'wishlist');
 
 # The rule on its own, at the two ends that matter: both podcast SOURCES, not one spelling.
-is('_wishListable: a built-in podcast episode',
-    Plugins::ListenLater::Plugin::_wishListable('track', 'podcast'), 0);
 is('_wishListable: a Deezer podcast episode',
     Plugins::ListenLater::Plugin::_wishListable('track', 'deezerpodcast'), 0);
 is('_wishListable: a playlist',
@@ -1103,8 +1106,7 @@ sub move_to {
 
 # The stored ref goes in as well, because for Spotify it is the ONLY thing separating the
 # episode from the track: both rows below are kind='track', source='spotify'.
-for my $c ( [ 'a built-in podcast episode', 'podcast',      'track',    0, undef ],
-            [ 'a Deezer podcast episode',   'deezerpodcast','track',    0, 'deezerpodcast://1' ],
+for my $c ( [ 'a Deezer podcast episode',   'deezerpodcast','track',    0, 'deezerpodcast://1' ],
             [ 'a Spotify podcast episode',  'spotify',      'track',    0, 'spotify://episode:e1' ],
             [ 'an ordinary Spotify track',  'spotify',      'track',    1, 'spotify://track:t1' ],
             [ 'a playlist',                 'tidal',        'playlist', 0, undef ],
@@ -1389,6 +1391,10 @@ section('the same play url is the same track, whatever the row called it');
     is('two artist-less tracks sharing a title still collapse (known, needs a migration)',
         (defined $d ? 'stored' : 'collapsed'), 'collapsed');
 }
+
+section('0.1.136 — a Podcasts-app row now falls to the generic online-* Add');
+is('a built-in podcast row stores NOTHING through the generic action',
+   podcast_row_add(), 'nothing stored');
 
 printf "\n%d passed, %d failed\n", $pass, $fail;
 exit($fail ? 1 : 0);

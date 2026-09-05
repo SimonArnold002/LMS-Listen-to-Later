@@ -28,7 +28,7 @@ use warnings;
 use FindBin;
 require "$FindBin::Bin/t_stubs.pl";
 
-ll_require('DB', 'Sources', 'Podcast', 'Browse', 'Played', 'Plugin');
+ll_require('DB', 'Sources', 'Browse', 'Played', 'Plugin');
 
 # Any warning is a failure. NOTE what this does and does not buy: the 0.1.89 bug WOULD have
 # announced itself as "Use of uninitialized value $1 in numeric gt" on every single add — but
@@ -379,7 +379,10 @@ is('...and so is a spotify episode',
 # read every Spotify episode as a Spotify track, which is how one stayed Wish-Listable after
 # 0.1.125 closed the identical Deezer hole (0.1.126).
 my $isPod = \&Plugins::ListenLater::Sources::isPodcastEpisode;
-is('built-in podcast source',   $isPod->('podcast'),       1);
+# 0.1.136: the built-in Podcasts-app path was REMOVED, so 'podcast' is no longer a source
+# this plugin can produce and the predicate must NOT claim it. Pinned as a negative so a
+# future build cannot quietly reintroduce the source without revisiting the removal.
+is('built-in podcast source is gone', $isPod->('podcast'),     0);
 is('deezer podcast source',     $isPod->('deezerpodcast'), 1);
 is('deezer itself is NOT one',  $isPod->('deezer'),        0);
 is('library is NOT one',        $isPod->('library'),       0);
