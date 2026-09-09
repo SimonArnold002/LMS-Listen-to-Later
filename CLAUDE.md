@@ -727,6 +727,18 @@ subsystem.
   third fact, not to widen a list of source names. The stated cost ("it relabels those rows
   across Browse") was real and is exactly what was wanted; it came to four call sites.
 
+- **`DB::_purgeRemovedPodcasts` calls `Sources::spotifyEpisodeUri` DIRECTLY, with no `->can`
+  guard — KNOWN AND ACCEPTED (2026-09-09).** `DB.pm` never `use`s `Sources`, so this is the
+  DB→Sources direction of the leaf-module rule stated above `%FOLD` — a rule which mandates
+  `->can` for the Sources→DB direction and says nothing about this one. It is safe today
+  because `Plugin.pm` compiles both modules before anything can reach `dbh()`, and rung 6 runs
+  from the first `dbh()`. Recorded rather than "fixed", because a `->can` would be the WRONG
+  repair here: it needs a fallback, and every fallback KEEPS the mis-keyed Spotify episodes the
+  rung exists to clear. That is the same irreversible-consumer asymmetry the `%FOLD` comment
+  describes, pointing the other way. If it ever needs hardening the answer is an explicit `use
+  Plugins::ListenLater::Sources;` at the top of `DB.pm` — no cycle is created, since Sources
+  reaches DB through `->can` and never `use`s it.
+
 ### C. CLOSED FINDINGS
 
 The version history below records review fixes inline (0.1.26, 0.1.32 onward).
@@ -1451,6 +1463,46 @@ four-column SELECT, `_migrateRefold`'s NULL sentinel and its collision retry,
 `_canClassifyTrack` omitting `spotify`. The one finding that survived was the one
 about an INTERACTION between two files, which no single-file settled verdict
 could have covered.
+
+**Round of 2026-09-09 — CLOSED, one finding, DECLINED; NO code change.** Run against the
+0.1.140 tree (`@{upstream}...HEAD`: 31 commits, 10,344 insertions, working tree clean). The
+finding was that `_verifyRelease`'s no-year path arms `_armVerifyRetry` with a STALE
+`$albumId` — the `if ($year)` branch three lines above refreshes `$recId`/`$rec`/`$source`/
+`$albumId` from the merge survivor, the sibling path refreshes nothing, so
+`_verifyRetryTick`'s `refIdentity` guard rejects the retry, `track_count` is never measured
+and Played is left on the flat `streaming_min_tracks` floor. **Declined on three grounds,
+each sufficient. Do not re-report it.**
+
+- **The asymmetry is the point, not an oversight.** The `$year` branch refreshes because its
+  OWN `updateYear` call can merge the row synchronously, in that statement. The no-year path
+  issues no write at all, so nothing has moved under it — `$albumId` is still the id `$recId`
+  was armed with.
+- **A CONCURRENT merge (an artist backfill) cannot produce a wrong write either.**
+  `updateTrackCount` and `updateRelType` both re-resolve through `DB::_sameSourceCanonicalId`
+  against the answered source AND ref id, and return empty for a survivor that no longer
+  carries them. The stale-capture case is guarded at the writer, not at the caller, which is
+  what the 0.1.139 carrier audit above settled.
+- **The retry declining is DELIBERATE and says so in `_verifyRetryTick`'s own comment**: a
+  survivor that no longer carries the requested id must not be re-asked, because it would
+  receive a DIFFERENT catalogue entry's count and type. Such a row falls back to the floor and
+  heals on first play from the list (`Browse::_albumTracks`), which is the stated behaviour of
+  the whole retry ladder — see the `VERIFY_RETRY_SECS` header.
+
+**Checked and found sound in the same round** (recorded so the next one can skip them): the
+migration ladder's rungs 5/6/7 each re-read `PRAGMA user_version` rather than trusting the
+entry-time value, so a withheld stamp blocks the later rungs instead of being stamped over;
+`_mergeKeyRows`/`_updateIdentityField` column coverage on all three row shapes, with lineage
+published only after a committed merge and `canonicalId` cycle-safe; the Bandcamp case where
+`refIdentity` flips from `url` to `album_url` mid-flight (`_cacheBandcampUrl` mutates the
+same in-hand `$rec` it writes through, and all three readers compute `refIdentity` after it);
+Material tier 0/1/2 delivery, `_readMaterialActions`' three-way return and the prune's
+never-unlink-an-unreadable-file / only-empty / only-ours rules; `normaliseFavurl` running
+before every favurl reader; the podcast removal leaving no dangling `Podcast::` references;
+and build hygiene — `install.xml` and `repo.xml` both 0.1.140, `<sha>` equal to
+`shasum ListenLater.zip`.
+
+**One open note went to §B** rather than becoming a fix: `DB::_purgeRemovedPodcasts` reaching
+into `Sources` with no `->can` guard.
 
 ### D. ADDING TO THIS LEDGER
 
