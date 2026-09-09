@@ -24,6 +24,14 @@ my $log = logger('plugin.listenlater');
 my $dbh;        # lazily-opened handle
 my $JSON = JSON::XS->new->utf8->canonical;
 
+# A live artist/year backfill can merge a row while another callback, timer, or already-rendered
+# menu still carries its old id. Keep that process-local lineage: AUTOINCREMENT ids are never
+# reused in this database, and a server restart removes every in-flight carrier along with this
+# map. `get()` deliberately remains an exact existence check; callers opt into following a
+# logical row with getCanonical()/canonicalId(), while service-derived writes additionally check
+# that the survivor still belongs to the service which produced their answer.
+my %identityCanonical;
+
 # ---------------------------------------------------------------------------
 # Connection / migration
 # ---------------------------------------------------------------------------
@@ -167,10 +175,11 @@ SQL
     # collision policy (same-status groups merge into the earliest save; mixed-status
     # ones are left alone rather than guessing which list the user wanted).
     #
-    # LAST in the ladder on purpose: it reads every row and recomputes its key, so it
-    # must run AFTER the migrations that change what a key is built from (0.1.43's year
-    # segment, 0.1.71's artist-prefix cleanup), or it would faithfully rekey rows that
-    # those passes are about to rewrite again.
+    # LAST among migrations that RECOMPUTE a key from row metadata, on purpose: it reads
+    # every row and must run AFTER the migrations that change what a key is built from
+    # (0.1.43's year segment, 0.1.71's artist-prefix cleanup), or it would faithfully rekey
+    # rows those passes are about to rewrite again. Rung 7 comes later but only reconciles
+    # exact keys already stored; it does not define another key shape.
     #
     # Stamped ONLY on a completed pass. _migrateRefold reports false when its one SELECT
     # fails, and when a group's merge had to be rolled back; stamping regardless would retire
@@ -195,8 +204,8 @@ SQL
     # expensive bugs all live on the UNIQUE dedupe_key rung) for rows the user has agreed to
     # re-add by hand, and the removal means nothing can replay a 'podcast://' url any more:
     # Sources::_serviceCan no longer has an arm for it, so a surviving row would sit in the
-    # list unplayable. The report is written BEFORE the DELETE so a failed delete cannot lose
-    # the record of what was about to go.
+    # list unplayable. The report is written BEFORE the DELETE and the whole purge is one
+    # transaction, so a failed pass cannot lose either a row or its recovery record.
     # Re-read the version rather than trusting the one taken at entry: rung 5 withholds its
     # stamp on failure so it retries next start, and stamping 6 over it would carry the
     # ladder PAST a rung that never ran — losing that retry for good. A rung must never
@@ -214,6 +223,28 @@ SQL
         else {
             $log->warn('Listen Later: podcast purge did not complete — schema left at '
                 . "version $schemaVer so it is retried at the next start");
+        }
+    }
+
+    # 0.1.137 — repair databases that already ran the original rung-5 refold. That version
+    # grouped by (source,key), weaker than add()'s cross-source findAnyByKey rule, so two old
+    # spellings from different services could both be rewritten to the same logical key and
+    # survive. Editing rung 5 is necessary for upgrades from released builds, but not enough
+    # for a dev install that has already stamped 5/6; this new rung reconciles the keys as they
+    # now stand. It waits for the destructive purge exactly as rung 6 waits for the refold.
+    my ($identityVer) = $h->selectrow_array('PRAGMA user_version');
+    $identityVer = 0 unless defined $identityVer;
+    if ($identityVer < 6) {
+        $log->warn("Listen Later: an earlier migration is still pending (schema $identityVer) "
+            . '— cross-source identity repair waits rather than stamping over it');
+    }
+    elsif ($identityVer < 7) {
+        if (_migrateCrossSourceIdentity($h)) {
+            $h->do('PRAGMA user_version = 7');
+        }
+        else {
+            $log->warn('Listen Later: cross-source identity repair did not complete — schema '
+                . "left at version $identityVer so it is retried at the next start");
         }
     }
     return;
@@ -279,17 +310,55 @@ sub _purgeRemovedPodcasts {
 
     _writePurgeReport(\@doomed);
 
-    my $gone = 0;
-    for my $r (@doomed) {
-        $gone++ if eval { $h->do('DELETE FROM albums WHERE id = ?', undef, $r->{id}); 1 };
+    # ALL OR NOTHING. The report is the user's recovery record and is rewritten when this
+    # rung retries. Committing each DELETE separately let a late failure remove the first
+    # episodes, leave the version at 5, then rewrite the report on the retry with only the
+    # rows still present — erasing the only record of what the first pass had deleted.
+    # Keeping every DELETE in one transaction means a retry sees (and reports) the same full
+    # set. Unlike the refold's historical fallback, a destructive purge never runs unwrapped.
+    unless (eval { $h->begin_work; 1 }) {
+        $log->error("Listen Later: podcast purge could not begin its transaction: $@");
+        return 0;
     }
-    if ($gone != @doomed) {
-        $log->error('Listen Later: podcast purge removed ' . $gone . ' of '
-            . scalar(@doomed) . ' rows');
+
+    my ($gone, $err) = (0, undef);
+    for my $r (@doomed) {
+        my $rv = eval { $h->do('DELETE FROM albums WHERE id = ?', undef, $r->{id}) };
+        if ($@ || !defined $rv || $rv eq '0E0') {
+            $err = "could not delete id $r->{id}: " . ($@ || 'row was no longer present');
+            last;
+        }
+        $gone++;
+    }
+    if (!defined $err) {
+        eval { $h->commit; 1 } or $err = "could not commit: $@";
+    }
+    if (defined $err) {
+        _rollbackTransaction($h, 'podcast purge');
+        $log->error("Listen Later: podcast purge $err — no deletions were committed");
         return 0;
     }
     $log->warn("Listen Later: removed $gone podcast row(s) — see " . _reportPath());
     return 1;
+}
+
+# A failed DBI rollback can leave AutoCommit off on this process-wide handle, causing every
+# later plugin write to join a transaction nothing commits. Try the normal rollback first;
+# if it raises, issue SQLite's raw ROLLBACK before restoring AutoCommit. Callers still treat
+# that path as a failure and abandon their current operation — this only makes the handle safe
+# for the rest of the server run.
+sub _rollbackTransaction {
+    my ($h, $what) = @_;
+    return 1 if eval { $h->rollback; 1 };
+
+    my $err = $@;
+    $log->error("Listen Later: $what rollback failed: $err");
+    eval { $h->do('ROLLBACK'); 1 }
+        or $log->error("Listen Later: $what could not roll back by hand either "
+            . "(SQLite has most likely done it already): $@");
+    eval { $h->{AutoCommit} = 1; 1 }
+        or $log->error("Listen Later: $what could not restore AutoCommit: $@");
+    return 0;
 }
 
 sub _reportPath {
@@ -361,9 +430,13 @@ sub _addColumn {
 #
 # THE NEW FOLD MERGES KEYS THAT WERE DISTINCT, which is the point ("Jane's Addiction"
 # and "Janes Addiction" are one album) and also the whole difficulty — UNIQUE(source,
-# dedupe_key) has to be satisfied while collapsing them. Rows are therefore GROUPED by
-# their new (source, key) and each group settled as a unit, rather than updated one at
-# a time and catching the constraint error: a per-row loop also collides transiently
+# dedupe_key) has to be satisfied while collapsing them. Runtime add() defines sameness
+# ACROSS services through findAnyByKey, so rows are grouped by their new logical key — not
+# by the weaker SQL (source,key) constraint — and each group is settled as a unit. Playlist
+# and episode keys already carry their source in their '|p:'/'|e:' identity tail, so they
+# remain service-scoped without a second grouping rule. Each group is settled as a unit
+# rather than updating rows one at a time and catching the constraint error: a per-row loop
+# also collides transiently
 # against rows it has not reached yet, so the error tells you nothing about whether a
 # real duplicate exists.
 #
@@ -374,16 +447,168 @@ sub _addColumn {
 #     remembers making) and carry the play history and any resolved metadata across,
 #     so nothing learned about the release is lost. The others are deleted.
 #
-#   • MIXED STATUS (one 'later', one 'played', one in the Wish List) -> LEFT ALONE, on
-#     their OLD keys, with a WARN naming the ids. Collapsing would have to silently
-#     pick a list for the user: marking a Wish List item played, or resurrecting
-#     something they had finished with. An old key on a genuinely ambiguous pair costs
-#     one un-deduped row — visible, harmless, and reversible by hand — where guessing
-#     costs a list entry that vanishes without explanation. NOTHING IS EVER DELETED
-#     without a same-status twin to merge into.
+#   • MIXED STATUS (one 'later', one 'played', one in the Wish List) -> NEVER MERGED,
+#     with a WARN naming the ids. Collapsing would have to silently pick a list for the
+#     user: marking a Wish List item played, or resurrecting something they had finished
+#     with. NOTHING IS EVER DELETED without a same-status twin to merge into.
+#
+#     THAT BAR IS ON MERGING, NOT ON REKEYING, and the difference is the whole point of
+#     grouping cross-source. UNIQUE(source, dedupe_key) is per SERVICE, so a Qobuz 'later'
+#     row and a Tidal 'played' row can BOTH hold the new key. Rekey each service's rows
+#     independently and refuse only the merge: the ambiguous pair stays two visible rows
+#     (what the policy wants) but each is on the CURRENT fold, so add() still dedupes
+#     against it and Played can still find it. Skipping the rekey too would strand both on
+#     a stale key that no later pass revisits — the rung stamps regardless — which is the
+#     invisible row this whole migration exists to prevent.
+#
+#     Only rows whose OWN service holds both statuses stay on their old keys: they cannot
+#     both take the one new key, and choosing between them is exactly the guess we refuse.
 #
 # Idempotent: a second run recomputes the same keys, finds them already stored, and
 # changes nothing. Gated once on PRAGMA user_version regardless.
+
+# Merge one same-status logical-key group transactionally. This is shared by the one-off
+# refold and the live key-changing backfills below, so cross-source identity cannot be
+# repaired at upgrade and then recreated later by updateArtist/updateYear.
+#
+# `source` and the ref pair are ONE replay bundle. Album ids and passthrough shapes are
+# interpreted by the adapter selected from source; for tracks, Played also derives source
+# from the play url before findTrackByUrl. Copying a Tidal ref into a Qobuz survivor while
+# leaving source unchanged therefore makes a row that cannot replay or auto-mark. The
+# earliest row keeps its own bundle when it has one. If it has none, the first replayable
+# loser's source/ref bundle moves together.
+sub _mergeKeyRows {
+    my ($h, $rows, $newKey) = @_;
+    return { ok => 0, error => 'no rows to merge' }
+        unless $rows && @$rows && defined $newKey;
+
+    my @sorted = sort { ($a->{added_at} // 9**15) <=> ($b->{added_at} // 9**15)
+                     || $a->{id} <=> $b->{id} } @$rows;
+    my $keep = shift @sorted;
+
+    for my $lose (@sorted) {
+        $keep->{play_count} = ($lose->{play_count} // 0) > ($keep->{play_count} // 0)
+                            ? $lose->{play_count} : $keep->{play_count};
+        $keep->{played_at} = $lose->{played_at}
+            if !defined $keep->{played_at}
+            || (defined $lose->{played_at} && $lose->{played_at} > $keep->{played_at});
+        for my $f (qw(artist album_title track_title artwork year)) {
+            $keep->{$f} = $lose->{$f} if !defined $keep->{$f} && defined $lose->{$f};
+        }
+        if (!length($keep->{ref_kind} // '') && length($lose->{ref_kind} // '')) {
+            @{$keep}{qw(track_count rel_type)} = (undef, undef)
+                if ($keep->{source} // '') ne ($lose->{source} // '');
+            @{$keep}{qw(source ref_kind ref_json)} = @{$lose}{qw(source ref_kind ref_json)};
+        }
+        # A streaming count is the number of tracks THIS service actually made playable in
+        # this account/region, and rel_type can likewise be a service's own catalogue claim.
+        # Carry either only from the replay source the survivor now uses (including the loser
+        # whose whole source/ref bundle was just adopted). A different service gets to resolve
+        # and classify itself later.
+        if (($keep->{source} // '') eq ($lose->{source} // '')) {
+            for my $f (qw(track_count rel_type)) {
+                $keep->{$f} = $lose->{$f} if !defined $keep->{$f} && defined $lose->{$f};
+            }
+        }
+    }
+
+    unless (eval { $h->begin_work; 1 }) {
+        return { ok => 0, fatal => 1, error => "could not begin transaction: $@" };
+    }
+
+    my $err;
+    for my $lose (@sorted) {
+        my $rv = eval { $h->do('DELETE FROM albums WHERE id = ?', undef, $lose->{id}) };
+        if ($@ || !defined $rv || $rv eq '0E0') {
+            $err = "could not delete id $lose->{id}: " . ($@ || 'row was no longer present');
+            last;
+        }
+    }
+    if (!defined $err) {
+        my $rv = eval {
+            $h->do('UPDATE albums SET source = ?, artist = ?, album_title = ?, track_title = ?,
+                                      dedupe_key = ?, played_at = ?, play_count = ?,
+                                      track_count = ?, rel_type = ?, artwork = ?, year = ?,
+                                      ref_kind = ?, ref_json = ?
+                     WHERE id = ?',
+                undef, $keep->{source}, $keep->{artist}, $keep->{album_title},
+                $keep->{track_title}, $newKey, $keep->{played_at}, $keep->{play_count} // 0,
+                $keep->{track_count}, $keep->{rel_type}, $keep->{artwork}, $keep->{year},
+                $keep->{ref_kind}, $keep->{ref_json}, $keep->{id});
+        };
+        $err = "could not rekey id $keep->{id}: " . ($@ || 'row was no longer present')
+            if $@ || !defined $rv || $rv eq '0E0';
+    }
+    if (!defined $err) {
+        eval { $h->commit; 1 } or $err = "could not commit the merge of id $keep->{id}: $@";
+    }
+    if (defined $err) {
+        my $rolled = _rollbackTransaction($h, "dedupe-key merge of id $keep->{id}");
+        return { ok => 0, fatal => ($rolled ? 0 : 1), error => $err };
+    }
+
+    return { ok => 1, id => $keep->{id}, merged => scalar @sorted };
+}
+
+# Rung 7: settle exact logical-key duplicates already left across services by the original
+# rung-5 grouping, or created when an older live artist/year backfill converged on another
+# source. Do NOT recompute keys here — rung 5 owns the fold. This pass repairs databases that
+# already stamped that rung, so the key currently stored is the fact to reconcile.
+sub _migrateCrossSourceIdentity {
+    my ($h) = @_;
+    my $rows = eval { $h->selectall_arrayref('SELECT * FROM albums', { Slice => {} }) }
+        or return;
+    return 1 unless @$rows;
+
+    my %group;
+    push @{ $group{ $_->{dedupe_key} // '' } }, $_ for @$rows;
+
+    my ($merged, $skipped, $failed) = (0, 0, 0);
+  GROUP:
+    for my $g (grep { @$_ > 1 } values %group) {
+        # PARTITION BY STATUS — never skip the whole group on one dissenter. The documented
+        # rule is that same-list duplicates collapse while conflicting lists stay separate,
+        # and a wholesale skip breaks the first half: in a group of later:qobuz, later:tidal
+        # and played:spotify, the two 'later' rows are an ordinary duplicate the user sees
+        # twice, and the rung stamps either way so nothing ever revisits them.
+        #
+        # Unlike the refold this pass NEVER RECOMPUTES A KEY — every row here already stores
+        # the identical key — so a subset merge only deletes rows and rewrites the survivor to
+        # the key it already holds. UNIQUE(source, dedupe_key) additionally means the rows in
+        # one group are all on DIFFERENT services, so no collision is reachable here at all.
+        my %byStatus;
+        push @{ $byStatus{ $_->{status} // '' } }, $_ for @$g;
+        if (keys %byStatus > 1) {
+            $log->warn('Listen Later: cross-source identity repair found different statuses ('
+                . join(', ', map { "id $_->{id} [" . ($_->{status} // '?') . ']' } @$g)
+                . ') — each list is settled on its own, merge by hand if you want them as one');
+        }
+
+        for my $u (values %byStatus) {
+            # Alone in its list: nothing to merge it with, and its conflicting neighbours are
+            # exactly what policy leaves standing.
+            if (@$u < 2) {
+                $skipped += @$u if keys %byStatus > 1;
+                next;
+            }
+
+            my $settled = _mergeKeyRows($h, $u, $u->[0]{dedupe_key});
+            unless ($settled->{ok}) {
+                $failed++;
+                $log->warn("Listen Later: cross-source identity repair $settled->{error} — "
+                    . 'the group is untouched and will be retried at the next start');
+                last GROUP if $settled->{fatal};
+                next;
+            }
+            $merged += $settled->{merged};
+        }
+    }
+
+    $log->info("Listen Later: cross-source identity repair — $merged duplicate(s) merged, "
+        . "$skipped mixed-status row(s) left unchanged") if $merged || $skipped;
+    return $failed ? 0 : 1;
+}
+
 sub _migrateRefold {
     my ($h) = @_;
 
@@ -409,142 +634,59 @@ sub _migrateRefold {
         # tail over a rebuild, which is exactly what this migration needs: re-normalise the
         # TITLE segment under the new fold, never touch the segment that identifies the row.
         $r->{_new} = _keyForRow($r);
-        push @{ $group{ ($r->{source} // '') . "\0" . $r->{_new} } }, $r;
+        push @{ $group{ $r->{_new} } }, $r;
     }
 
     my ($rekeyed, $merged, $skipped, $failed) = (0, 0, 0, 0);
+  GROUP:
     for my $g (values %group) {
         # Untouched by the fold: nothing to do, and no group to settle.
         next if @$g == 1 && $g->[0]{dedupe_key} eq $g->[0]{_new};
 
-        if (@$g > 1) {
-            my %status = map { ($_->{status} // '') => 1 } @$g;
-            if (keys %status > 1) {
-                $skipped += @$g;
-                $log->warn("Listen Later: refold would merge rows with different statuses ("
-                    . join(', ', map { "id $_->{id} [" . ($_->{status} // '?') . "]" } @$g)
-                    . ") — left on their old keys, merge by hand if you want them as one");
+        # One unit per thing that may be settled as a whole. Same status throughout: the
+        # group is one unit and merges. Mixed: split by SERVICE, because the merge is what
+        # the policy above forbids and the constraint that would stop a rekey is per source.
+        my @units = ($g);
+        my %status = map { ($_->{status} // '') => 1 } @$g;
+        if (keys %status > 1) {
+            my %bySource;
+            push @{ $bySource{ $_->{source} // '' } }, $_ for @$g;
+            my @stuck;
+            @units = ();
+            for my $u (values %bySource) {
+                my %s = map { ($_->{status} // '') => 1 } @$u;
+                keys %s > 1 ? push(@stuck, @$u) : push(@units, $u);
+            }
+            $log->warn('Listen Later: refold will not merge rows with different statuses ('
+                . join(', ', map { "id $_->{id} [" . ($_->{status} // '?') . ']' } @$g)
+                . ') — each service\'s rows are rekeyed on their own, merge by hand if you '
+                . 'want them as one') if @units;
+            if (@stuck) {
+                $skipped += @stuck;
+                $log->warn('Listen Later: refold cannot rekey different statuses on one '
+                    . 'service ('
+                    . join(', ', map { "id $_->{id} [" . ($_->{status} // '?') . ']' } @stuck)
+                    . ') — left on their old keys, merge by hand if you want them as one');
+            }
+        }
+
+        for my $u (@units) {
+            # A single row the fold did not move: the group only existed for its twin.
+            next if @$u == 1 && $u->[0]{dedupe_key} eq $u->[0]{_new};
+
+            my $settled = _mergeKeyRows($h, $u, $g->[0]{_new});
+            unless ($settled->{ok}) {
+                $skipped += @$u;
+                $failed++;
+                $log->warn("Listen Later: refold $settled->{error} — the whole group is left "
+                    . 'on its old key(s), untouched; it is retried at the next start');
+                last GROUP if $settled->{fatal};
                 next;
             }
+
+            $merged  += $settled->{merged};
+            $rekeyed++;
         }
-
-        # Earliest save wins; added_at can be NULL on a very old row, so sort those last
-        # rather than letting undef order arbitrarily.
-        my @sorted = sort { ($a->{added_at} // 9**15) <=> ($b->{added_at} // 9**15)
-                         || $a->{id} <=> $b->{id} } @$g;
-        my $keep = shift @sorted;
-
-        for my $lose (@sorted) {
-            $keep->{play_count} = ($lose->{play_count} // 0) > ($keep->{play_count} // 0)
-                                ? $lose->{play_count} : $keep->{play_count};
-            $keep->{played_at}  = $lose->{played_at}
-                if !defined $keep->{played_at}
-                || (defined $lose->{played_at} && $lose->{played_at} > $keep->{played_at});
-            for my $f (qw(track_count rel_type artwork year)) {
-                $keep->{$f} = $lose->{$f} if !defined $keep->{$f} && defined $lose->{$f};
-            }
-            # A ref is what makes a row REPLAYABLE, so a row that has one beats a row
-            # that does not — taken as a pair, since ref_kind describes ref_json.
-            if (!length($keep->{ref_kind} // '') && length($lose->{ref_kind} // '')) {
-                @{$keep}{qw(ref_kind ref_json)} = @{$lose}{qw(ref_kind ref_json)};
-            }
-        }
-
-        # ONE TRANSACTION PER GROUP — the merge is all-or-nothing.
-        #
-        # The deletes MUST land before the survivor's UPDATE, or the new key collides with a
-        # row that is about to be removed. The handle is AutoCommit, so without a transaction
-        # that ordering is a trap: a failed UPDATE leaves the losers already COMMITTED AWAY
-        # and the survivor still on its stale key — a saved album and its play history gone,
-        # silently, with nothing left to retry from. The rekey CAN fail: a MIXED-STATUS group
-        # (skipped just above, left on its OLD keys) can hold the very key this survivor is
-        # moving to, and UNIQUE(source, dedupe_key) then refuses the UPDATE. No SERVICE-
-        # supplied pair of titles reaches that state (Review Ledger A2 works through why, and
-        # it has been raised twice) — so this transaction is a guard, not a hot path. Keep it
-        # anyway: it costs one begin_work per changed group, and the alternative is silent,
-        # permanent data loss on a path with no retry.
-        #
-        # Rolled back, the group is exactly as it was — on the old keys, which is what
-        # $skipped already means for the mixed-status case and what the ladder's unstamped
-        # version (see _migrate) gets to retry.
-        #
-        # begin_work is guarded: it dies on a handle already inside a transaction, and one
-        # group is not worth taking the whole ladder down for. Failing that, do the same work
-        # unwrapped — no worse than what this replaces — and say so in the warn, because then
-        # the failure really can be partial.
-        my $txn = eval { $h->begin_work; 1 } ? 1 : 0;
-
-        my $err;
-        for my $lose (@sorted) {
-            next if eval { $h->do('DELETE FROM albums WHERE id = ?', undef, $lose->{id}); 1 };
-            $err = "could not delete id $lose->{id}: $@";
-            last;
-        }
-        if (!defined $err) {
-            eval {
-                $h->do('UPDATE albums SET dedupe_key = ?, played_at = ?, play_count = ?,
-                                          track_count = ?, rel_type = ?, artwork = ?, year = ?,
-                                          ref_kind = ?, ref_json = ?
-                         WHERE id = ?',
-                    undef, $keep->{_new}, $keep->{played_at}, $keep->{play_count} // 0,
-                    $keep->{track_count}, $keep->{rel_type}, $keep->{artwork}, $keep->{year},
-                    $keep->{ref_kind}, $keep->{ref_json}, $keep->{id});
-                1;
-            } or $err = "could not rekey id $keep->{id}: $@";
-        }
-
-        # A commit that fails leaves nothing applied, so it is the same outcome as any other
-        # failure in the group and is reported as one.
-        if (!defined $err && $txn) {
-            eval { $h->commit; 1 } or $err = "could not commit the merge of id $keep->{id}: $@";
-        }
-
-        if (defined $err) {
-            if ($txn && !eval { $h->rollback; 1 }) {
-                # begin_work turned AutoCommit OFF, and ONLY a completed commit or rollback
-                # turns it back on. A rollback that RAISED leaves it off on a handle this sub
-                # does not own and does not close, and the damage runs far past the migration:
-                # every later begin_work dies "Already in a transaction" so the remaining groups
-                # run unwrapped, and every plugin write for the REST OF THE SERVER RUN joins a
-                # transaction nothing ever commits — DBI discards it at handle destruction, so
-                # saves and play counts vanish silently at shutdown with nothing in the log.
-                # Restore it by hand, and ABANDON: the transactional state is the very thing we
-                # just failed to settle, so there is nothing safe for the rest of the loop to run
-                # against. $failed withholds the version stamp, so the whole pass is retried at
-                # the next start — which is what the untouched groups need anyway.
-                $log->error("Listen Later: refold rollback failed: $@");
-                # Undo the group by hand FIRST, and by raw SQL since it is ->rollback that just
-                # failed. Order is not cosmetic: assigning AutoCommit = 1 while a transaction is
-                # still open COMMITS it, which would turn "the rollback failed" into "the
-                # half-applied group is now permanent" — the losers deleted for good and the
-                # survivor left on its stale key, precisely the loss the transaction exists to
-                # prevent. If this fails too there is nothing left to try: SQLite has almost
-                # certainly rolled back on its own already (it does that on a full disk or an I/O
-                # error, which is also the likeliest reason ->rollback raised), and that is the
-                # outcome we wanted anyway.
-                eval { $h->do('ROLLBACK'); 1 }
-                    or $log->error("Listen Later: refold could not roll back by hand either "
-                        . "(SQLite has most likely done it already): $@");
-                eval { $h->{AutoCommit} = 1; 1 }
-                    or $log->error("Listen Later: refold could not restore AutoCommit: $@");
-                $skipped += @$g;
-                $failed++;
-                $log->warn("Listen Later: refold $err — and the rollback failed too, so the "
-                    . 'migration is abandoned here rather than run on a handle whose '
-                    . 'transaction state is unknown; the whole pass is retried at the next start');
-                last;
-            }
-            $skipped += @$g;
-            $failed++;
-            $log->warn("Listen Later: refold $err — "
-                . ($txn ? 'the whole group is left on its old key(s), untouched'
-                        : 'NO transaction was available, so this group may be half-applied')
-                . '; it is retried at the next start');
-            next;
-        }
-
-        $merged  += scalar @sorted;
-        $rekeyed++;
     }
 
     $log->info("Listen Later: dedupe-key refold — $rekeyed row(s) rekeyed, "
@@ -555,7 +697,9 @@ sub _migrateRefold {
     # the likeliest causes (the db locked by another process, a full disk) are transient, and
     # a rolled-back group is in exactly the state a retry wants. A MIXED-STATUS skip does not:
     # that is a deliberate policy decision, not an error, and re-running could never change it
-    # — it would just re-log the same warn at every boot for ever.
+    # — it would just re-log the same warn at every boot for ever. Which is exactly why the
+    # skip is now as NARROW as the policy needs: only rows whose own service holds both
+    # statuses keep an old key, and those are the only ones a retry could never help.
     #
     # DO NOT "TIDY" A UNIQUE COLLISION INTO $skipped. It reads like the same policy case — the
     # squatter is a mixed-status row left alone on purpose — and it is not, because the loop
@@ -808,8 +952,9 @@ sub episodeKey {
     return '' . '|' . _norm($title) . '|' . '' . '|e:' . lc($source // '') . ':' . ($url // '');
 }
 
-# THE ONE PLACE A ROW'S KEY IS DECIDED. Every writer goes through here — add(), updateArtist(),
-# updateYear(), _migrateArtistPrefix() and _migrateRefold() — because "what key does this row
+# THE ONE PLACE A CURRENT-FORMAT ROW'S KEY IS DECIDED. Every current writer goes through here
+# — add(), updateArtist(), updateYear(), _migrateArtistPrefix() and _migrateRefold() — because
+# "what key does this row
 # have" was answered in five places and they had already drifted: updateArtist() and
 # updateYear() rebuilt with dedupeKey($artist,$album,$year) and NO track segment, so calling
 # either on a kind='track' row silently re-keyed it as an ALBUM ('|album x||t:song y' becomes
@@ -914,21 +1059,183 @@ sub get {
     return _rowToHash($row);
 }
 
+sub canonicalId {
+    my ($id) = @_;
+    return unless $id;
+    my %seen;
+    while ($identityCanonical{$id} && !$seen{$id}++) {
+        $id = $identityCanonical{$id};
+    }
+    return $id;
+}
+
+sub getCanonical {
+    my ($id) = @_;
+    $id = canonicalId($id) or return;
+    return get($id);
+}
+
+# The service's own album id for a row, wherever the ref happens to carry it. A playlist ref
+# must never hold one (Plugin::_savePlaylistRecord), which is what keeps findBySourceAlbumId
+# — the one finder with no kind filter — off playlist rows.
+sub refAlbumId {
+    my ($rec) = @_;
+    my $ref = (ref $rec eq 'HASH') ? $rec->{ref} : undef;
+    return '' unless ref $ref eq 'HASH';
+    my $aid = $ref->{album_id};
+    $aid = $ref->{passthrough}{album_id}
+        if !defined $aid && ref $ref->{passthrough} eq 'HASH';
+    return (defined $aid && length $aid) ? "$aid" : '';
+}
+
+# The part of a ref that says WHICH release on the service a row replays: the album id above,
+# else the album/play url a url-keyed source (Bandcamp, saved tracks) replays from. Only the
+# async-write guards use the url arm — findBySourceAlbumId stays on refAlbumId, because
+# widening a REVERSE LOOKUP to match urls would let it answer for rows it never has.
+#
+# Deliberately NOT the whole ref_json. setRefValue stores RESOLVED DECORATION (album_url,
+# buy_url) onto the very rows these guards protect, so a whole-blob compare would reject a
+# row's own follow-up write — the guard would then look like it worked while quietly dropping
+# every Bandcamp url cache. Only the identifying field is compared.
+sub refIdentity {
+    my ($rec) = @_;
+    my $aid = refAlbumId($rec);
+    return $aid if length $aid;
+    my $ref = (ref $rec eq 'HASH') ? $rec->{ref} : undef;
+    return '' unless ref $ref eq 'HASH';
+    for my $u ($ref->{album_url}, $ref->{url}) {
+        return "$u" if defined $u && length $u;
+    }
+    return '';
+}
+
+# Resolve a stale id only while its survivor still replays the SAME RELEASE ON THE SAME
+# SERVICE as the request that produced an asynchronous answer. Counts, release types and
+# resolved URLs describe one service's catalogue/account/region for one release, and must not
+# cross to a different replay bundle.
+#
+# THE SERVICE ALONE IS NOT THE BUNDLE. Two rows for the same release on ONE service exist
+# whenever their keys differ — a Qobuz row saved with a year and another saved without — and a
+# year backfill then merges the later into the earlier. The survivor keeps its OWN ref
+# (_mergeKeyRows only adopts a loser's bundle when the keeper has none), so a callback for the
+# deleted catalogue id passes a source-only check and writes the wrong catalogue's track
+# count, release type and purchase url onto a DIFFERENT release. Compare the ref identity too.
+#
+# An EMPTY identity on either side is no evidence and stays permissive: a library row, a
+# 'search' ref, and a Bandcamp row still resolving its first album_url all carry none, and
+# refusing on absence would drop writes that are correct today.
+sub _sameSourceCanonicalId {
+    my ($id, $expectedSource, $expectedRefId) = @_;
+    return $id unless defined $expectedSource && length $expectedSource;
+    my $rec = getCanonical($id) or return;
+    return unless ($rec->{source} // '') eq $expectedSource;
+    if (defined $expectedRefId && length $expectedRefId) {
+        my $have = refIdentity($rec);
+        return if length $have && $have ne $expectedRefId;
+    }
+    return $rec->{id};
+}
+
+# Apply one of the two live metadata backfills that changes a dedupe key. DB::add checks
+# findAnyByKey before inserting, but a row can still CONVERGE on another service's key later:
+# one source arrives without an artist/year, a second source supplies it and is stored under a
+# different key, then this backfill fills the missing value. UNIQUE(source,dedupe_key) cannot
+# see that collision. Settle it with the same cross-source, same-status policy as the refold.
+# Returns the canonical id because the row being updated may be the later duplicate and be
+# merged into the earlier save.
+sub _updateIdentityField {
+    my ($id, $field, $value) = @_;
+    return unless $id && defined $field && ($field eq 'artist' || $field eq 'year');
+
+    $id = canonicalId($id) or return;
+
+    my $rec = get($id) or return;
+    my %next = (%$rec, $field => $value);
+    my $key = _keyForRow(\%next);
+    my $h = dbh();
+
+    my $others = eval {
+        $h->selectall_arrayref(
+            'SELECT * FROM albums WHERE dedupe_key = ? AND id != ? ORDER BY id',
+            { Slice => {} }, $key, $id)
+    };
+    unless ($others) {
+        $log->warn("ListenLater: update $field for id $id could not check cross-source identity: $@");
+        return $id;
+    }
+
+    my $write = sub {
+        my $rv = eval {
+            $h->do("UPDATE albums SET $field = ?, dedupe_key = ? WHERE id = ?",
+                undef, $value, $key, $id)
+        };
+        if ($@ || !defined $rv || $rv eq '0E0') {
+            $log->warn("ListenLater: update $field for id $id failed: "
+                . ($@ || 'row was no longer present'));
+        }
+        return $id;
+    };
+
+    return $write->() unless @$others;
+
+    my @group = (\%next, @$others);
+    my %status = map { ($_->{status} // '') => 1 } @group;
+    if (keys %status > 1) {
+        # Refuse the MERGE, not the WRITE — the same asymmetry the refold's collision policy
+        # spells out. dedupe_key is UNIQUE per SERVICE, so unless one of those differently-
+        # statused rows sits on THIS row's own source, the resolved value and its recomputed
+        # key still land and the ambiguous pair simply stays two rows. Dropping the value
+        # instead is not a neutral 'leave it alone': a streaming row that never takes its
+        # backfilled artist keys as 'artist-less' for ever, so Played's artist|album lookup
+        # can never match it and it can never auto-move — the exact invisibility this carrier
+        # exists to close. Only a same-source holder of the new key blocks the write, because
+        # then the two rows really cannot both have it.
+        my $blocked = grep { ($_->{source} // '') eq ($rec->{source} // '') } @$others;
+        $log->warn("ListenLater: update $field for id $id will not merge rows with different "
+            . 'statuses (' . join(', ', map { "id $_->{id} [" . ($_->{status} // '?') . ']' } @group)
+            . ') — ' . ($blocked ? 'left unchanged' : 'settled within each list')
+            . ', merge by hand if you want them as one');
+        return $id if $blocked;
+
+        # THE CONFLICT IS PER LIST, NOT PER GROUP. A dissenting row on another list bars the
+        # merge WITH IT — it does not make this row's own-list twin stop being a duplicate.
+        # Narrow the group to the rows sharing this row's status and settle those; the other
+        # lists keep their rows and their keys untouched. Without this the pair stays visible
+        # for good, because rung 7 has already stamped and nothing revisits a live backfill.
+        my @sameList = grep { ($_->{status} // '') eq ($rec->{status} // '') } @$others;
+        return $write->() unless @sameList;
+        @group = (\%next, @sameList);
+    }
+
+    my $settled = _mergeKeyRows($h, \@group, $key);
+    unless ($settled->{ok}) {
+        $log->warn("ListenLater: update $field for id $id could not reconcile its duplicate: "
+            . $settled->{error});
+        return $id;
+    }
+    # Publish the lineage only after _mergeKeyRows has committed. Every pending carrier of a
+    # deleted member can now reach the survivor; failed/rolled-back merges publish nothing.
+    for my $member (@group) {
+        next unless $member->{id} && $member->{id} != $settled->{id};
+        $identityCanonical{$member->{id}} = $settled->{id};
+    }
+    $log->warn("ListenLater: update $field for id $id merged " . $settled->{merged}
+        . " cross-source duplicate(s) into id $settled->{id}");
+    return $settled->{id};
+}
+
 # Backfill the artist on an existing row (and recompute its dedupe_key, which now includes
 # the artist — so Played's artist|album lookup and future dedupe both work). Used when a
 # service supplies no artist at add time (Tidal) and it's fetched from the album afterwards.
-# Won't clobber an existing artist. Eval-guarded: recomputing the key could in principle hit
-# the UNIQUE(source,dedupe_key) constraint (a twin already stored with the artist) — leave
-# the row as-is if so.
+# Won't clobber an existing artist. Returns the surviving id; a backfill can reveal that this
+# row and a row saved from another service are the same logical release.
 sub updateArtist {
     my ($id, $artist) = @_;
     return unless $id && defined $artist && length $artist;
+    $id = canonicalId($id) or return;
     my $rec = get($id) or return;
-    return if defined $rec->{artist} && length $rec->{artist};   # don't overwrite a real artist
-    my $key = _keyForRow({ %$rec, artist => $artist });
-    eval { dbh()->do('UPDATE albums SET artist = ?, dedupe_key = ? WHERE id = ?', undef, $artist, $key, $id); 1 }
-        or $log->warn("ListenLater: updateArtist($id) failed: $@");
-    return;
+    return $id if defined $rec->{artist} && length $rec->{artist}; # don't overwrite a real artist
+    return _updateIdentityField($id, 'artist', $artist);
 }
 
 # Fill in a MISSING release year, and recompute the dedupe key with it — the exact shape of
@@ -944,24 +1251,23 @@ sub updateArtist {
 sub updateYear {
     my ($id, $year) = @_;
     return unless $id && defined $year && $year =~ /^(?:19|20)\d{2}$/;
+    $id = canonicalId($id) or return;
     my $rec = get($id) or return;
-    return if $rec->{year};                                       # don't overwrite a real year
-    my $key = _keyForRow({ %$rec, year => $year });
-    eval { dbh()->do('UPDATE albums SET year = ?, dedupe_key = ? WHERE id = ?', undef, $year, $key, $id); 1 }
-        or $log->warn("ListenLater: updateYear($id) failed: $@");
-    return;
+    return $id if $rec->{year};                                  # don't overwrite a real year
+    return _updateIdentityField($id, 'year', $year);
 }
 
 # Persist a resolved value into the row's ref_json (e.g. a Bandcamp purchase URL
 # discovered on first open), so later lookups are instant. Merges into existing ref.
 sub setRefValue {
-    my ($id, $key, $value) = @_;
+    my ($id, $key, $value, $expectedSource, $expectedRefId) = @_;
     return unless $id && defined $key;
+    $id = _sameSourceCanonicalId($id, $expectedSource, $expectedRefId) or return;
     my $rec = get($id) or return;
     my $ref = (ref $rec->{ref} eq 'HASH') ? $rec->{ref} : {};
     $ref->{$key} = $value;
     dbh()->do('UPDATE albums SET ref_json = ? WHERE id = ?', undef, $JSON->encode($ref), $id);
-    return;
+    return $id;
 }
 
 # Find a saved album by artist+album REGARDLESS of year — the Played detector's lookup.
@@ -1031,22 +1337,24 @@ sub _sane {
 # fact about the release re-measured on every resolve, and the newest measurement is the
 # one to keep (a service that fixes an incomplete tracklist should correct the row).
 sub updateTrackCount {
-    my ($id, $count) = @_;
+    my ($id, $count, $expectedSource, $expectedRefId) = @_;
     my $n = _sane($count) or return;
     return unless $id;
+    $id = _sameSourceCanonicalId($id, $expectedSource, $expectedRefId) or return;
     eval { dbh()->do('UPDATE albums SET track_count = ? WHERE id = ?', undef, $n, $id); 1 }
         or $log->warn("Listen Later: updateTrackCount($id) failed: $@");
-    return;
+    return $id;
 }
 
 sub updateRelType {
-    my ($id, $relType, $force) = @_;
+    my ($id, $relType, $force, $expectedSource, $expectedRefId) = @_;
     return unless $id && defined $relType && $relType =~ /^(?:album|ep|single)$/;
+    $id = _sameSourceCanonicalId($id, $expectedSource, $expectedRefId) or return;
     my $sql = "UPDATE albums SET rel_type = ? WHERE id = ?"
         . ($force ? '' : ' AND rel_type IS NULL');
     eval { dbh()->do($sql, undef, $relType, $id); 1 }
         or $log->warn("Listen Later: updateRelType($id) failed: $@");
-    return;
+    return $id;
 }
 
 # All saved albums for a source whose NORMALISED album title matches, regardless of artist
@@ -1102,8 +1410,10 @@ sub findBySourceAlbumId {
         'SELECT * FROM albums WHERE source = ?', { Slice => {} }, $source);
     for my $row (@$rows) {
         my $h = _rowToHash($row);
-        my $aid = $h->{ref}{album_id} // ($h->{ref}{passthrough} && $h->{ref}{passthrough}{album_id});
-        return $h if defined $aid && "$aid" eq "$albumId";
+        # Same extractor the async-write guards compare on (_sameSourceCanonicalId), so a
+        # reverse lookup and a guard can never disagree about which release a row replays.
+        my $aid = refAlbumId($h);
+        return $h if length $aid && $aid eq "$albumId";
     }
     return undef;
 }
@@ -1156,12 +1466,14 @@ sub list {
 
 sub remove {
     my ($id) = @_;
+    $id = canonicalId($id) or return;
     dbh()->do('DELETE FROM albums WHERE id = ?', undef, $id);
     return;
 }
 
 sub setStatus {
     my ($id, $status) = @_;
+    $id = canonicalId($id) or return;
     my $played_at = $status eq 'played' ? time() : undef;
     dbh()->do('UPDATE albums SET status = ?, played_at = COALESCE(?, played_at) WHERE id = ?',
         undef, $status, $played_at, $id);
@@ -1170,6 +1482,7 @@ sub setStatus {
 
 sub markPlayed {
     my ($id) = @_;
+    $id = canonicalId($id) or return;
     dbh()->do(
         "UPDATE albums SET status = 'played', played_at = ?, play_count = play_count + 1 WHERE id = ?",
         undef, time(), $id);

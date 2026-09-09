@@ -548,7 +548,9 @@ sub _cacheBandcampUrl {
     my $url = $pt && ($pt->{album_url} || $pt->{url});
     return unless $url && !ref $url && $url =~ m{^https?://}i;
     eval {
-        Plugins::ListenLater::DB::setRefValue($rec->{id}, 'album_url', $url);
+        Plugins::ListenLater::DB::setRefValue(
+            $rec->{id}, 'album_url', $url, $rec->{source},
+            Plugins::ListenLater::DB::refIdentity($rec));
         $rec->{ref}{album_url} = $url;   # reflect it on the in-hand record too
     };
 }

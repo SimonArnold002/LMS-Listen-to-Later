@@ -1,6 +1,6 @@
 # Listen Later — LMS Plugin
 
-A plugin for **Lyrion Music Server (LMS)** that lets you save an album, an individual track, a curated playlist or a podcast episode — from your **local library**, any **streaming service** (Qobuz, Tidal, Bandcamp, Deezer, Spotify) or your **podcast subscriptions** — into a curated list, browse it like a playlist, and have things move to a **Played** section once you've heard them. A separate **Wish List** sits alongside for things you mean to buy, and items move freely between the three lists.
+A plugin for **Lyrion Music Server (LMS)** that lets you save an album, an individual track, a curated playlist or a streaming-service podcast episode — from your **local library** or a **streaming service** (Qobuz, Tidal, Bandcamp, Deezer, Spotify) — into a curated list, browse it like a playlist, and have things move to a **Played** section once you've heard them. A separate **Wish List** sits alongside for things you mean to buy, and items move freely between the three lists.
 
 Tested on LMS 9.x with the **Material Skin** (the classic skin works for the basics).
 
@@ -56,7 +56,7 @@ sudo systemctl restart lyrionmusicserver
 
 ## Quick start
 
-1. Browse to any album, track or podcast episode — in your library, a streaming service (including Deezer and Spotify podcasts) or your podcast subscriptions.
+1. Browse to any album or track in your library or a streaming service, or to a podcast episode in Deezer or Spotify.
 2. Open its **"…"** menu and choose **Add to Listen Later** (or **Add to Wish List**).
 3. Open **Apps → Listen Later** to see your lists. Tap a row to play it.
 4. Play most of it and it moves itself to **Played**.
@@ -91,25 +91,22 @@ Playlists end up under the same two rules as podcast episodes, for the same reas
 **One kind that can't be saved as a playlist: a Qobuz *personal* playlist with no cover of its own.** Qobuz gives those a constituent track's album art and no identifiable link, which makes them indistinguishable from an album row — so they're saved the way they always were rather than as a playlist. Editorial Qobuz playlists, which have their own artwork, are fine.
 
 ### Podcasts
-Podcast **episodes** can be saved to *Listen Later* — which is, after all, exactly what a podcast queue is for. Add one from its **"…"** menu just like anything else. Three sources can supply them, and they behave slightly differently because each identifies an episode in its own way:
+Podcast **episodes** from Deezer and Spotify can be saved to *Listen Later*. Add one from its **"…"** menu just like anything else. Both services identify the episode from its own play link:
 
 | Source | How an episode is saved | Shown in your list as |
 |---|---|---|
-| **Podcasts app** (LMS's built-in) | Matched against the shows you subscribe to — see below | **Podcast** · *show* |
 | **Deezer** | Saved directly from its own play link | **Podcast** · **Deezer** |
 | **Spotify** (via Spotty) | Saved directly from its own play link | **Podcast** · **Spotify** |
 
-A Podcasts-app episode always shows its **show name**, because the plugin reads it from the RSS feed while identifying the episode. A Deezer or Spotify episode shows one only *sometimes*: the browse row those services hand over carries just the episode title and a description, so the show has to come from the service's own metadata cache — which is filled if you reached the episode by browsing its show, and empty if you didn't. Either way the episode saves, plays and marks itself Played exactly the same; it's only the subtitle that may be shorter.
+A Deezer or Spotify episode shows its **show name** only *sometimes*: the browse row those services hand over carries just the episode title and a description, so the show has to come from the service's own metadata cache — which is filled if you reached the episode by browsing its show, and empty if you didn't. Either way the episode saves, plays and marks itself Played exactly the same; it's only the subtitle that may be shorter.
 
 Qobuz, Tidal and Bandcamp have no podcasts, so there's nothing to save there.
 
-A Podcasts-app episode plays back through the Podcasts plugin, so its resume position keeps working. A Deezer or Spotify episode plays through that service, exactly as it would if you'd started it from the service's own menu.
+A Deezer or Spotify episode plays through that service, exactly as it would if you'd started it from the service's own menu.
 
-There's no *Add to Wish List* for a podcast — you don't buy podcast episodes. This holds for all three sources alike. The entry can still *appear* over an episode, because Material builds a menu per surface rather than per row: in a mixed list such as Favourites, and on a Deezer or Spotify episode browsed inside that service's own app. Pressing it saves the episode to *Listen Later* instead, and the confirmation says so; **Move to Wish List** isn't offered on the saved row either.
+There's no *Add to Wish List* for a podcast — you don't buy podcast episodes. This holds for both services. The entry can still *appear* over an episode, because Material builds a menu per surface rather than per row: in a mixed list such as Favourites, and on a Deezer or Spotify episode browsed inside that service's own app. Pressing it saves the episode to *Listen Later* instead, and the confirmation says so; **Move to Wish List** isn't offered on the saved row either.
 
-**Whole shows can't be saved — only episodes.** A podcast series isn't a release: it has no end, and it changes under you, so "have you finished it" has no answer. Adding a *show* rather than an episode is refused, on every source — the Podcasts app, Deezer and Spotify alike.
-
-**Podcasts-app episodes are matched against the podcasts you subscribe to.** A row in that app carries no playable link of its own, so the plugin identifies the episode by weighing its title and its artwork together against your subscribed feeds — the title tells episodes of one show apart, and the artwork tells the shows apart. That means an episode from a show you've subscribed to can be saved from anywhere — the Podcasts app, a favourited feed, the home screen — but an episode you found through **Search feeds** on a show you *haven't* subscribed to can't be, and is refused rather than saved as something that would never play. Subscribe to the show first. **This limit is specific to that app**: a Deezer or Spotify episode carries its own play link, so it saves whether you follow the show or not.
+**Whole shows can't be saved — only episodes.** A podcast series isn't a release: it has no end, and it changes under you, so "have you finished it" has no answer. Adding a *show* rather than an episode is refused on Deezer and Spotify alike.
 
 ### The three lists
 Open **Apps → Listen Later** and you'll see one page with three headed sections, each showing a live count:
@@ -167,7 +164,6 @@ Open **Settings → Advanced → Listen Later** (also linked as **Plugin Setting
 - **Outside-the-plugin Played detection** is reliable for the local library (matched by album id); for streaming it's best-effort, matched on the now-playing artist + album.
 - **Material custom actions on home-shelf cards** only appear after you've opened a streaming browse page in the same session — a Material limitation in how the home shelves render menus.
 - **Internet-radio stations don't show *Add*.** Radio is a live stream, not something you can save and replay, so the *Add to Listen Later* / *Add to Wish List* entries are deliberately hidden on radio browse rows (BBC Sounds, TuneIn's Music/News/Sports/… categories, etc.). This applies to radio *browse* rows; a radio card on a Material home shelf can't be suppressed the same way, but adding one there is simply ignored. *(After updating, reload Material once — Ctrl/Cmd+Shift+R — so it re-reads its custom-actions file.)*
-- **Podcast episodes from the built-in Podcasts app must belong to a show you subscribe to** — that's how the plugin identifies them (see *Podcasts* above). Episodes found via *Search feeds* on an unsubscribed show are refused rather than saved unplayable. Deezer and Spotify episodes carry their own play link and are not subject to this.
 - **A whole podcast show can't be saved, only an episode.** A series has no end and changes under you, so it isn't something you can finish. Adding one is refused rather than saved as a row that could never play.
 - **Saving an individual track needs the Material Skin.** On the classic skin a track's "…" menu offers the *album* it belongs to, which is what that menu has always been able to reach.
 - **Storage** is a SQLite database in the server cache directory, so your lists survive restarts and rescans.

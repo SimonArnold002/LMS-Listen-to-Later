@@ -146,9 +146,45 @@ is('...so the row is still there to retry',
 # ...and the mirror: a clean run DOES stamp, or the purge would run on every single start.
 $DB->can('_migrate')->($h);
 my ($ver2) = $h->selectrow_array('PRAGMA user_version');
-is('a successful pass stamps version 6', $ver2, 6);
+is('a successful pass completes the ladder through version 7', $ver2, 7);
 is('...and the doomed row is gone this time',
    scalar @{ $h->selectall_arrayref("SELECT id FROM albums WHERE track_title='Doomed'") }, 0);
+
+section('a PARTIAL delete failure rolls the whole purge back and keeps the report complete');
+$h->do('PRAGMA user_version = 5');
+$h->do('DELETE FROM albums');
+seed(source=>'podcast', album=>'Retry Show', track=>'Episode A',
+     key=>'|retry show||t:episode a', ref=>'{"url":"podcast://a"}');
+seed(source=>'podcast', album=>'Retry Show', track=>'Episode B',
+     key=>'|retry show||t:episode b', ref=>'{"url":"podcast://b"}');
+{
+    my $real = \&DBI::db::do;
+    my $seen = 0;
+    no warnings 'redefine';
+    local *DBI::db::do = sub {
+        my ($self, $sql, @rest) = @_;
+        die "injected second-delete failure\n"
+            if $sql =~ /^DELETE FROM albums WHERE id/ && ++$seen == 2;
+        return $real->($self, $sql, @rest);
+    };
+    $DB->can('_migrate')->($h);
+}
+is('the partial failure leaves the version at 5',
+   ($h->selectrow_array('PRAGMA user_version'))[0], 5);
+is('the first DELETE was rolled back too',
+   scalar @{ $h->selectall_arrayref("SELECT id FROM albums WHERE album_title='Retry Show'") }, 2);
+my $partialReport = do { open my $fh, '<:encoding(UTF-8)', $report or die $!; local $/; <$fh> };
+is('the failed pass report contains episode A', (($partialReport =~ /Episode A/) ? 'y' : 'n'), 'y');
+is('...and episode B',                         (($partialReport =~ /Episode B/) ? 'y' : 'n'), 'y');
+
+$DB->can('_migrate')->($h);
+is('the retry commits and completes the ladder through version 7',
+   ($h->selectrow_array('PRAGMA user_version'))[0], 7);
+is('the retry removes both rows',
+   scalar @{ $h->selectall_arrayref("SELECT id FROM albums WHERE album_title='Retry Show'") }, 0);
+my $retryReport = do { open my $fh, '<:encoding(UTF-8)', $report or die $!; local $/; <$fh> };
+is('the retry report still contains episode A', (($retryReport =~ /Episode A/) ? 'y' : 'n'), 'y');
+is('...and episode B',                          (($retryReport =~ /Episode B/) ? 'y' : 'n'), 'y');
 
 section('the NO-PODCASTS case — the only path most upgrades will take');
 # Simon's own library has no podcast rows at all, and a user who never used the built-in
@@ -161,8 +197,8 @@ $h->do('DELETE FROM albums');
 unlink $report;
 seed(source=>'qobuz', kind=>'album', artist=>'B', album=>'Only Music', key=>'b|only music|2024', ref=>'{}');
 $DB->can('_migrate')->($h);
-is('an empty purge still stamps the version, so it runs once',
-   ($h->selectrow_array('PRAGMA user_version'))[0], 6);
+is('an empty purge still completes the ladder, so it runs once',
+   ($h->selectrow_array('PRAGMA user_version'))[0], 7);
 is('...writes NO report file',            (-e $report ? 'written' : 'absent'), 'absent');
 is('...and leaves the library alone',
    scalar @{ $h->selectall_arrayref('SELECT id FROM albums') }, 1);

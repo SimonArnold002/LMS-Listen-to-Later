@@ -34,7 +34,11 @@
 #                                                                 stay GREEN, which is the
 #                                                                 asymmetry §5 exists for)
 #   - skip _migrateRefold in the ladder               -> 14 red
-#   - let the migration merge MIXED-status rows       ->  3 red
+#   - let the migration merge MIXED-status rows       ->  4 red
+#   - strand a whole MIXED-status group on its old    ->  1 red  (the bar is on the MERGE,
+#     keys instead of rekeying it per service                     not on the rekey: a
+#                                                                 cross-source pair still
+#                                                                 takes the new key — §4c2)
 #   - stamp user_version regardless of the refold's   ->  6 red
 #     result
 #   - drop the per-group transaction (delete, then    ->  4 red  (and the 3 rows §4h says
@@ -173,7 +177,7 @@ my $ins = sub {
     });
     my $r = $h->selectall_arrayref('SELECT dedupe_key FROM albums', { Slice => {} });
     is('a stale key is rewritten',  $r->[0]{dedupe_key}, 'janes addiction|ritual de lo habitual|1990');
-    is('...and the ladder is stamped', ($h->selectrow_array('PRAGMA user_version'))[0], 6);
+    is('...and the ladder is stamped', ($h->selectrow_array('PRAGMA user_version'))[0], 7);
 }
 
 section('4b. …and it COLLAPSES the duplicates the new fold merges');
@@ -201,11 +205,13 @@ section('4b. …and it COLLAPSES the duplicates the new fold merges');
     is('under the folded key',                  $r->[0]{dedupe_key}, 'janes addiction|ritual|1990');
 }
 
-section('4c. MIXED STATUS IS LEFT ALONE — never guess which list the user wanted');
+section('4c. MIXED STATUS IS NEVER MERGED — never guess which list the user wanted');
 {
     # One finished with, one still to hear. Collapsing would have to silently resurrect
-    # something marked played or mark something the user still has queued. An old key
-    # costs one un-deduped row; guessing costs a list entry that vanishes unexplained.
+    # something marked played or mark something the user still has queued. Two rows costs
+    # one un-deduped save; guessing costs a list entry that vanishes unexplained. Both rows
+    # are on ONE service here, so neither can be rekeyed either — 4c2 has the cross-source
+    # case, where the merge is still refused but both rows do take the folded key.
     my $h = $mig->(sub {
         $ins->($_[0], status => 'later',  artist => "Jane's Addiction", album => 'Ritual',
                year => 1990, key => 'jane s addiction|ritual|1990', added => 100);
@@ -217,6 +223,225 @@ section('4c. MIXED STATUS IS LEFT ALONE — never guess which list the user want
     is('the later row keeps its OLD key',       $r->[0]{dedupe_key}, 'jane s addiction|ritual|1990');
     is('...and its status',                     $r->[0]{status}, 'later');
     is('the played row is untouched too',       $r->[1]{status}, 'played');
+}
+
+section('4c2. CROSS-SOURCE IDENTITY MATCHES add(), WITHOUT CROSSING REPLAY WIRES');
+{
+    # add() has treated one logical album as one row across every source since 0.1.33. The
+    # migration must apply the same rule to spellings that only become equal under this fold.
+    # The earliest Qobuz row already has a replay ref, so its complete source/ref bundle wins;
+    # Tidal's regional track count must not be borrowed by the Qobuz survivor.
+    my $h = $mig->(sub {
+        $ins->($_[0], source => 'qobuz', artist => "Jane's Addiction", album => 'Ritual',
+               year => 1990, key => 'jane s addiction|ritual|1990', added => 100,
+               ref_kind => 'album_id', ref_json => '{"_svc":"qobuz","album_id":"q1"}');
+        $ins->($_[0], source => 'tidal', artist => 'Janes Addiction', album => 'Ritual',
+               year => 1990, key => 'janes addiction|ritual|1990', added => 200,
+               count => 11, rel => 'single', ref_kind => 'album_id',
+               ref_json => '{"_svc":"tidal","album_id":"t1"}');
+    });
+    my $r = $h->selectall_arrayref('SELECT * FROM albums', { Slice => {} });
+    is('cross-source twins become one',                scalar(@$r), 1);
+    is('the earliest source survives',                 $r->[0]{source}, 'qobuz');
+    is('...with its own ref',
+       JSON::XS->new->decode($r->[0]{ref_json})->{album_id}, 'q1');
+    is('...without a different service\'s track count', $r->[0]{track_count}, undef);
+    is('...or its catalogue release type',              $r->[0]{rel_type}, undef);
+}
+
+{
+    # If the earliest row has no replay carrier, adopting a later row's ref is still the
+    # right repair — but its source has to move with it, and then its measured count is safe.
+    my $h = $mig->(sub {
+        $ins->($_[0], source => 'qobuz', artist => "Jane's Addiction", album => 'Strays',
+               year => 2003, key => 'jane s addiction|strays|2003', added => 100,
+               count => 7, ref_kind => '', ref_json => '');
+        $ins->($_[0], source => 'tidal', artist => 'Janes Addiction', album => 'Strays',
+               year => 2003, key => 'janes addiction|strays|2003', added => 200,
+               count => 13, rel => 'album', ref_kind => 'album_id',
+               ref_json => '{"_svc":"tidal","album_id":"t2"}');
+    });
+    my $r = $h->selectall_arrayref('SELECT * FROM albums', { Slice => {} });
+    is('the earliest row id still survives',            $r->[0]{added_at}, 100);
+    is('the adopted ref brings its source atomically',  $r->[0]{source}, 'tidal');
+    is('...and its id',
+       JSON::XS->new->decode($r->[0]{ref_json})->{album_id}, 't2');
+    is('...so its own measured count may follow',       $r->[0]{track_count}, 13);
+    is('...and its own release type',                    $r->[0]{rel_type}, 'album');
+}
+
+{
+    # MIXED STATUS BARS THE MERGE, NOT THE REKEY. These two are on different SERVICES, and
+    # dedupe_key is UNIQUE per service — so both can hold the folded key. Leaving the Qobuz
+    # row on its old spelling instead would strand it: rung 5 stamps whether it skipped or
+    # not, so nothing revisits it, add() stops deduping against it and Played stops finding
+    # it. Two visible rows is the policy; two INVISIBLE rows is the bug it caused.
+    my $h = $mig->(sub {
+        $ins->($_[0], source => 'qobuz', status => 'later', artist => "Jane's Addiction",
+               album => 'Nothing', year => 2011, key => 'jane s addiction|nothing|2011');
+        $ins->($_[0], source => 'tidal', status => 'played', artist => 'Janes Addiction',
+               album => 'Nothing', year => 2011, key => 'janes addiction|nothing|2011');
+    });
+    my $r = $h->selectall_arrayref('SELECT * FROM albums ORDER BY id', { Slice => {} });
+    is('cross-source mixed statuses both survive',      scalar(@$r), 2);
+    is('...neither is merged into the other',           $r->[1]{status}, 'played');
+    is('...and the stale spelling is rekeyed, not guessed away', $r->[0]{dedupe_key},
+       'janes addiction|nothing|2011');
+    is('...on the same key as its cross-source twin',   $r->[1]{dedupe_key},
+       'janes addiction|nothing|2011');
+    is('...with the un-merged row keeping its own list', $r->[0]{status}, 'later');
+    is('...and the ladder still stamps',                ($h->selectrow_array('PRAGMA user_version'))[0], 7);
+}
+
+{
+    # THE CONTROL for the rekey above, and the reason the split is by SOURCE rather than
+    # simply dropping the mixed-status bar. One service cannot hold the same key twice, so
+    # here there is no rekey to be had — picking which of the two takes it IS the guess the
+    # policy refuses. Same seed as 4c, asserted from the other direction: 4c pins that the
+    # rows survive, this pins that the fold really would have moved them if it could.
+    my $h = $mig->(sub {
+        $ins->($_[0], source => 'qobuz', status => 'later', artist => "Jane's Addiction",
+               album => 'Something', year => 2011, key => 'jane s addiction|something|2011');
+        $ins->($_[0], source => 'qobuz', status => 'played', artist => 'Janes Addiction',
+               album => 'Something', year => 2011, key => 'janes addiction|something|2011');
+    });
+    my $r = $h->selectall_arrayref('SELECT * FROM albums ORDER BY id', { Slice => {} });
+    is('same-source mixed statuses both survive',       scalar(@$r), 2);
+    is('...and neither is rekeyed onto the other',      $r->[0]{dedupe_key},
+       'jane s addiction|something|2011');
+    # Control: the fold DID want to move it — a single row of that spelling is rekeyed.
+    my $h2 = $mig->(sub {
+        $ins->($_[0], source => 'qobuz', status => 'later', artist => "Jane's Addiction",
+               album => 'Something', year => 2011, key => 'jane s addiction|something|2011');
+    });
+    is('...only because its own service already holds that key',
+       ($h2->selectrow_array('SELECT dedupe_key FROM albums'))[0],
+       'janes addiction|something|2011');
+}
+
+{
+    # These identity tails already contain the service. Grouping by the complete logical key
+    # must therefore leave same-named containers/media from different services independent.
+    my $h = $mig->(sub {
+        $ins->($_[0], source => 'qobuz', kind => 'playlist', album => "Today's Hits",
+               key => '|today s hits||p:qobuz:77');
+        $ins->($_[0], source => 'deezer', kind => 'playlist', album => "Today's Hits",
+               key => '|today s hits||p:deezer:77');
+        $ins->($_[0], source => 'spotify', kind => 'track', track => 'Trailer',
+               key => '|trailer||e:spotify:spotify://episode:77');
+        $ins->($_[0], source => 'deezerpodcast', kind => 'track', track => 'Trailer',
+               key => '|trailer||e:deezerpodcast:deezerpodcast://77');
+    });
+    my $r = $h->selectall_arrayref('SELECT * FROM albums', { Slice => {} });
+    is('playlist/episode source tails keep all four rows', scalar(@$r), 4);
+}
+
+section('4c3. RUNG 7 REPAIRS DATABASES THAT ALREADY STAMPED THE OLD REFOLD');
+{
+    # Editing rung 5 fixes released upgrades, but a development database may already have run
+    # the old (source,key)-grouped implementation and stamped 5 or 6. Reproduce its surviving
+    # state directly: the two services carry the exact same logical key.
+    my $h = $mig->(sub { });
+    $h->do('DELETE FROM albums');
+    $h->do('PRAGMA user_version = 6');
+    $ins->($h, source => 'qobuz', artist => 'Carrier Band', album => 'Carrier Album',
+           year => 2024, key => 'carrier band|carrier album|2024', added => 100,
+           ref_kind => 'album_id', ref_json => '{"_svc":"qobuz","album_id":"q7"}');
+    $ins->($h, source => 'tidal', artist => 'Carrier Band', album => 'Carrier Album',
+           year => 2024, key => 'carrier band|carrier album|2024', added => 200,
+           count => 12, rel => 'album', ref_kind => 'album_id',
+           ref_json => '{"_svc":"tidal","album_id":"t7"}');
+
+    Plugins::ListenLater::DB::_migrate($h);
+    my $r = $h->selectall_arrayref('SELECT * FROM albums', { Slice => {} });
+    is('rung 7 collapses the exact cross-source twins', scalar(@$r), 1);
+    is('...keeps the earliest replay source',          $r->[0]{source}, 'qobuz');
+    is('...and that source\'s ref',
+       JSON::XS->new->decode($r->[0]{ref_json})->{album_id}, 'q7');
+    is('...without borrowing another service\'s count', $r->[0]{track_count}, undef);
+    is('...and stamps the repair rung',
+       ($h->selectrow_array('PRAGMA user_version'))[0], 7);
+
+    # A different list choice remains a policy conflict even when the stored keys are already
+    # identical. The repair completes (otherwise it would warn on every boot) but guesses none.
+    $h->do('DELETE FROM albums');
+    $h->do('PRAGMA user_version = 6');
+    $ins->($h, source => 'qobuz', status => 'later', artist => 'Mixed Band', album => 'Same',
+           key => 'mixed band|same|', added => 100);
+    $ins->($h, source => 'tidal', status => 'played', artist => 'Mixed Band', album => 'Same',
+           key => 'mixed band|same|', added => 200);
+    Plugins::ListenLater::DB::_migrate($h);
+    is('rung 7 leaves mixed-status twins visible',
+       scalar(@{ $h->selectall_arrayref('SELECT id FROM albums') }), 2);
+    is('...but still stamps the deliberate skip',
+       ($h->selectrow_array('PRAGMA user_version'))[0], 7);
+
+    # 0.1.139 — THE POLICY IS PER LIST, NOT PER GROUP. The pair above is the whole group, so
+    # there is nothing to collapse and leaving both is right. Add a THIRD row and the two
+    # halves come apart: two 'later' saves on different services are an ordinary duplicate the
+    # user sees twice, and one 'played' row alongside them must not buy their survival.
+    # Skipping wholesale strands them for good — the rung stamps either way.
+    $h->do('DELETE FROM albums');
+    $h->do('PRAGMA user_version = 6');
+    $ins->($h, source => 'qobuz', status => 'later', artist => 'Three Ways',
+           album => 'One Album', key => 'three ways|one album|', added => 100,
+           ref_kind => 'album_id', ref_json => '{"album_id":"q1"}');
+    $ins->($h, source => 'tidal', status => 'later', artist => 'Three Ways',
+           album => 'One Album', key => 'three ways|one album|', added => 200,
+           count => 12, ref_kind => 'album_id', ref_json => '{"album_id":"t1"}');
+    $ins->($h, source => 'spotify', status => 'played', artist => 'Three Ways',
+           album => 'One Album', key => 'three ways|one album|', added => 300,
+           ref_kind => 'album_id', ref_json => '{"album_id":"s1"}');
+    Plugins::ListenLater::DB::_migrate($h);
+    my $mix = $h->selectall_arrayref(
+        'SELECT status, source, track_count FROM albums ORDER BY added_at', { Slice => {} });
+    is('a same-list subset still collapses inside a mixed group', scalar(@$mix), 2);
+    is('...keeping the earliest save of that list',
+       join(':', $mix->[0]{status}, $mix->[0]{source}), 'later:qobuz');
+    is('...without borrowing the merged twin\'s regional count',
+       $mix->[0]{track_count}, undef);
+    is('...and the conflicting list is left exactly as it was',
+       join(':', $mix->[1]{status}, $mix->[1]{source}), 'played:spotify');
+    is('...with the rung stamped',
+       ($h->selectrow_array('PRAGMA user_version'))[0], 7);
+
+    # THE CONTROL for the count above: a rung-7 merge is not a merge that drops every column.
+    # When the keeper carries NO replay bundle it adopts the loser's whole source/ref, and the
+    # count then belongs to the service the survivor actually replays from, so it carries.
+    #
+    # Note what canNOT be seeded here: two rows on ONE service sharing one key. Every row in a
+    # rung-7 group stores the SAME key, and UNIQUE(source, dedupe_key) makes that impossible —
+    # which is exactly why splitting the group by status can never produce a collision. This
+    # block asserted it before the constraint refused the insert.
+    $h->do('DELETE FROM albums');
+    $h->do('PRAGMA user_version = 6');
+    $ins->($h, source => 'qobuz', status => 'later', artist => 'One Way',
+           album => 'One Album', key => 'one way|one album|', added => 100);
+    $ins->($h, source => 'tidal', status => 'later', artist => 'One Way',
+           album => 'One Album', key => 'one way|one album|', added => 200,
+           count => 12, ref_kind => 'album_id', ref_json => '{"album_id":"t1"}');
+    Plugins::ListenLater::DB::_migrate($h);
+    my $adopt = $h->selectall_arrayref(
+        'SELECT source, track_count FROM albums', { Slice => {} });
+    is('a keeper with no bundle adopts the loser\'s service', $adopt->[0]{source}, 'tidal');
+    is('...and the count carries with it',                    $adopt->[0]{track_count}, 12);
+
+    # A read failure is operational, not policy: keep 6 so the repair has a path to retry.
+    $h->do('PRAGMA user_version = 6');
+    {
+        no warnings 'redefine';
+        my $orig = \&DBI::db::selectall_arrayref;
+        local *DBI::db::selectall_arrayref = sub {
+            die "simulated rung-7 read failure\n" if ($_[1] // '') eq 'SELECT * FROM albums';
+            goto &$orig;
+        };
+        Plugins::ListenLater::DB::_migrate($h);
+    }
+    is('a failed repair withholds rung 7',
+       ($h->selectrow_array('PRAGMA user_version'))[0], 6);
+    Plugins::ListenLater::DB::_migrate($h);
+    is('the next start retries and stamps rung 7',
+       ($h->selectrow_array('PRAGMA user_version'))[0], 7);
 }
 
 section('4d. TRACK and PLAYLIST keys keep their identity segments');
@@ -297,7 +522,7 @@ section('4h. A MERGE THAT CANNOT LAND TAKES NOTHING WITH IT');
     is('...under the folded key',              $r2->[0]{dedupe_key}, 'janes addiction|ritual|1990');
     is('...keeping the higher play count',     $r2->[0]{play_count}, 3);
     is('...and the loser\'s ref',              $r2->[0]{ref_kind}, 'album_id');
-    is('...and now the ladder is stamped',     ($h->selectrow_array('PRAGMA user_version'))[0], 6);
+    is('...and now the ladder is stamped',     ($h->selectrow_array('PRAGMA user_version'))[0], 7);
 }
 
 section('4i. A ROLLBACK THAT FAILS MUST NOT POISON THE HANDLE');
@@ -398,7 +623,7 @@ section('4g. A FAILED PASS DOES NOT STAMP THE LADDER');
        ($h->selectrow_array('SELECT dedupe_key FROM albums'))[0],
        'janes addiction|ritual|1990');
     is('...and stamps the ladder',
-       ($h->selectrow_array('PRAGMA user_version'))[0], 6);
+       ($h->selectrow_array('PRAGMA user_version'))[0], 7);
 }
 
 # ---------------------------------------------------------------------------

@@ -53,6 +53,90 @@ was **1.6 ms** for a 2,968-episode feed (863 KB frozen) — waste, not a stall; 
 resolve walk was **synchronous across cached feeds by design** (12 feeds → 12 cache reads,
 stack depth 38). Neither was ever a performance defect.
 
+### 2026-09-09 carrier audit — cross-source rekeys and purge retries
+
+- **Every key-changing carrier now converges on the same cross-source identity as `add()`.**
+  `_migrateRefold` groups by the complete logical key rather than `(source,key)`, and the
+  live `updateArtist` / `updateYear` backfills use the same transactional merge. The fifth
+  writer, `_migrateArtistPrefix`, remains earlier in the ladder and is reconciled by the
+  refold afterwards; the legacy year-append SQL is reconciled there too. End-to-end schema-0
+  fixtures pin both paths. Schema rung 7 repairs development databases that already stamped
+  the older source-scoped refold before this correction.
+- **Never separate a replay ref from its source.** A cross-source merge keeps
+  `source + ref_kind + ref_json` as one bundle. If the earliest row has no replay carrier,
+  all three move from the same loser. A service's `track_count` and `rel_type` move only with
+  that same source because one measures what that account/region can actually play and the
+  other may be that service's catalogue claim. Playlist and episode keys already embed their
+  source in `|p:` / `|e:` and remain distinct across services.
+- **A live rekey returns the canonical id and records process-local lineage for every deleted
+  member.** Exact `get()` still answers whether that physical row exists; `getCanonical()` and
+  logical Move/Remove/Played carriers follow the survivor, including already-rendered taps and
+  timers. Late artist/year identity metadata may cross services. Track counts, release types
+  and resolved URLs take an expected-source AND an expected-ref argument and follow only a
+  survivor that still uses that service/ref bundle. `_verifyRelease`, its retry, first-play
+  measurement, drill resolution and Bandcamp URL caching all enforce that boundary.
+- **MIXED STATUS BARS THE MERGE, NOT THE REKEY (0.1.138) — and that asymmetry is the fix,
+  not an oversight.** Once `_migrateRefold` grouped by the complete logical key, a wholesale
+  skip of a mixed-status group started stranding rows that the older `(source,key)` grouping
+  had rekeyed perfectly legally: the rung stamps either way, so nothing revisits them, and a row
+  on a stale key is invisible to `add()` and to `Played`. `UNIQUE(source, dedupe_key)` is per
+  SERVICE, so the group is split by source and every single-status service unit is rekeyed
+  and merged on its own; only rows whose OWN service holds both statuses stay put, because
+  they cannot both take the one new key. `_updateIdentityField` carries the same rule: a
+  differently-statused twin on ANOTHER service no longer cancels the artist/year write, since
+  dropping it leaves a streaming row keyed artist-less for ever and it can then never
+  auto-move to Played. Same-source controls in `t_refold.pl` §4c/§4c2 and `t_db.pl` pin both
+  halves; do not "simplify" either back into one status check.
+
+### 2026-09-09 carrier audit, part 2 (0.1.139) — what part 1 got wrong
+
+Two of part 1's claims above were written ahead of the code. Both are now true; both were
+reproduced first, and each has a test that fails without its fix. Do not re-report either, and
+do not assume the surrounding entries were verified to the same standard.
+
+- **THE SERVICE IS NOT THE BUNDLE — `_sameSourceCanonicalId` compared only `source`.** Part 1
+  says these writes "follow only a survivor that still uses that service/ref bundle"; the guard
+  never looked at the ref. Two rows for one release on ONE service exist whenever their keys
+  differ (a Qobuz save carrying the year, another without), a year backfill merges them, and
+  `_mergeKeyRows` leaves the survivor on its OWN ref — so the deleted twin's callback passed a
+  source-only check. Measured: catalogue B's track count, release type and purchase url all
+  landed on the catalogue A row. The guard now takes an expected ref identity
+  (`DB::refIdentity` — the album id, else the album/play url) and refuses a mismatch.
+  `_verifyRetryTick` had the same hole one level up: it followed the canonical id, checked the
+  source, then re-issued a request for the OLD album id against the survivor.
+  - **Why not compare the whole `ref_json`:** `setRefValue` writes resolved decoration
+    (`album_url`, `buy_url`) onto the very rows the guard protects, so a blob compare would
+    reject a row's own follow-up write and silently kill every Bandcamp url cache. Only the
+    identifying field is compared, and an EMPTY identity on either side stays permissive
+    (library rows, `search` refs, and a Bandcamp row still resolving its first url carry none).
+  - `findBySourceAlbumId` shares the id extractor but deliberately stays on `refAlbumId`, NOT
+    `refIdentity`: widening a reverse lookup to match urls would let it answer for rows it has
+    no business returning. `t_db.pl` pins the playlist-id exclusion that depends on this.
+- **THE CONFLICT IS PER LIST, NOT PER GROUP — rung 7 and `_updateIdentityField` skipped whole
+  groups.** Part 1 fixed the wholesale skip in `_migrateRefold` only. `_migrateCrossSourceIdentity`
+  (rung 7) and `_updateIdentityField` still abandoned an entire identity group on one dissenting
+  status. Measured on `later:qobuz` + `later:tidal` + `played:spotify`: all three rows survived
+  and the rung stamped, so the two `later` rows stayed a duplicate the user sees twice, for ever.
+  Both now partition by status and settle each list on its own.
+  - **Rung 7 cannot collide, and this is why:** it never recomputes a key — every row in a group
+    already stores the identical key — so a subset merge only deletes rows and rewrites the
+    survivor to the key it already holds. `UNIQUE(source, dedupe_key)` additionally makes two
+    rows of one group impossible on one service. A test that tried to seed that pair was refused
+    by the constraint; the control in `t_refold.pl` §4c3 records it.
+  - **`_migrateRefold` NEEDS NO CHANGE and was not touched.** Its split is by SOURCE because it
+    is the only pass that rekeys, and a source can hold both statuses. Verified end-to-end from
+    a stale mixed group: rung 5 rekeys all three rows correctly and rung 7 then collapses the
+    same-list pair in the SAME boot. Part 1's warning against re-merging its two status checks
+    stands.
+  - **Deliberately NOT taken:** `_updateIdentityField`'s `$blocked` test still refuses on ANY
+    same-source twin, including a same-LIST one that could legally be merged away to free the
+    key. Refusing a write leaves rows untouched, which is the safe direction, and the control at
+    `t_db.pl` "a same-source mixed-status twin does block the year" pins the current behaviour.
+    Raise it only with a real row that needs it.
+- **The podcast purge is one transaction.** A failed second DELETE rolls back the first,
+  leaves schema version 5, and retries with the same complete row set and report. It never
+  falls back to unwrapped destructive deletes.
+
 **`podcasts-album` / `podcasts-track` are now deliberately EMPTY suppressors**, not
 populated entries — the same rule as radio: we don't show an Add we can't honour. The
 clearing and prune machinery still names them ON PURPOSE, so husks written by pre-0.1.136
@@ -666,10 +750,11 @@ concept touched above was then traced to every OTHER place that answers the same
 question, because PFR needed a second round of fixes for exactly this — a finding
 fixed at one carrier while a second carrier kept the old answer.
 
-- The DB side is single-carrier: `_migrate` has one caller (`_dbh`, at connect,
-  never inside a transaction), `_migrateRefold` has one caller, and the new
-  per-group transaction is the only one in the module. The other `DELETE FROM
-  albums` sites (remove-by-id, the played prune) carry no merge policy.
+- At that round the DB side had one migration transaction carrier: `_migrate` has one caller
+  (`_dbh`, at connect) and `_migrateRefold` has one caller. Since the 2026-09-09 carrier
+  audit, `_mergeKeyRows` owns transactional identity merges and the destructive podcast purge
+  has its own all-or-nothing transaction; both share `_rollbackTransaction`'s handle recovery.
+  The other `DELETE FROM albums` sites (remove-by-id, the played prune) carry no merge policy.
 - The Material side was NOT, and the fix for #1 exposed it. "Is our file half
   still wanted" was answered in three subs, and `_pruneMaterialActions` only knew
   `$departing` — so **turning the pref OFF re-wrote the entries registration had
@@ -3526,13 +3611,15 @@ The "Add to Listen Later"/"Add to Wish List" custom actions appear on streaming 
   **THE MIGRATION (`_migrateRefold`, `user_version` 5) — the collision policy is the
   design.** Every key written under the old fold is stale, and a stale key is INVISIBLE:
   `add()` stops deduping against it, Played's lookups stop finding it. Rows are GROUPED by
-  their new `(source, key)` and each group settled as a unit — a per-row loop also collides
-  transiently against rows it has not reached yet, so the constraint error tells you
-  nothing about whether a real duplicate exists.
+  their complete logical key, matching `add()`'s cross-source `findAnyByKey` rule, and each
+  group settled as a unit — a per-row loop also collides transiently against rows it has not
+  reached yet, so the constraint error tells you nothing about whether a real duplicate
+  exists. Playlist/episode keys keep their service scope in their own `|p:` / `|e:` tails.
   - **Same status across the group** → genuinely one album saved twice under two spellings.
-    Collapse into the EARLIEST save, carrying play history, resolved counts, release type
-    and — importantly — **the loser's `ref` if the survivor has none**, since that is what
-    makes a row replayable at all.
+    Collapse into the EARLIEST save, carrying play history and release metadata. A missing
+    replay carrier adopts **source + ref_kind + ref_json atomically**; a resolved count and
+    release type are carried only from the survivor's resulting source, because one is
+    service/region-specific and the other may be service-asserted.
   - **Mixed status** (one `later`, one `played`, one Wish List) → **LEFT ALONE on their old
     keys**, with a WARN naming the ids. Collapsing would have to silently pick a list for
     the user: resurrect something finished with, or mark something still queued. An old key
@@ -3541,9 +3628,10 @@ The "Add to Listen Later"/"Add to Wish List" custom actions appear on streaming 
   - **Playlists keep their identity segment verbatim.** A playlist's identity is the
     service's own id in the `|p:<source>:<id>` tail, which cannot be rebuilt from any
     column — only the title segment is re-folded.
-  - Idempotent, and LAST in the ladder on purpose: it recomputes keys from stored columns,
-    so it must run after the migrations that change what a key is built FROM (0.1.43's year
-    segment, 0.1.71's artist-prefix cleanup).
+  - Idempotent, and LAST among migrations that recompute keys from stored columns, so it
+    must run after the migrations that change what a key is built FROM (0.1.43's year segment,
+    0.1.71's artist-prefix cleanup). Rung 7 follows only to reconcile exact cross-source keys
+    left by already-stamped development databases; it introduces no second key shape.
 
   **Two existing fixtures broke and were REWRITTEN rather than renumbered**, which is what
   they were for: `t_addpath.pl` pinned `'tomorrow s people|open soul|'` with a note saying
@@ -4571,10 +4659,10 @@ session scratchpads and are gone — so nothing carried forward. Anything worth 
 
 | suite | protects |
 |---|---|
-| `t_db.pl` | dedupe keys and migrations against real SQLite: 0.1.43 (same title, different year), 0.1.33 (cross-source), 0.1.74+ (track vs album keys), 0.1.81 (same track from two surfaces), 0.1.88 (`track_count`, forced `rel_type`), and an old schema file upgrading with its rows intact |
+| `t_db.pl` | dedupe keys and migrations against real SQLite: 0.1.43 (same title, different year), 0.1.33 (cross-source), 0.1.74+ (track vs album keys), 0.1.81 (same track from two surfaces), 0.1.88 (`track_count`, forced `rel_type`), an old schema file upgrading with its rows intact, and the live `updateArtist`/`updateYear` carriers reconciling a newly-equal key across services without separating source from ref or guessing across statuses. Also pins the inverse async race (year merge deletes the artist callback's id), exact vs canonical lookup, logical Move/Remove following, same-source result propagation, and cross-source rejection for counts/types/URLs |
 | `t_played.pl` | the thresholds that keep regressing in both directions: 0.1.82 (a single/short EP CAN reach Played), 0.1.83 (a one-track release does NOT mark when it starts), 0.1.88 (a real total beats the 4-track floor), plus the live-library-count rule |
 | `t_reltype.pl` | 0.1.88's classification: `singleIsWrong`, the full `relTypeFor` table, `classifyRelType` end to end, that the Qobuz album-object path fetches **no** tracklist, and that a CATALOGUE count comes back flagged provisional while a resolved one doesn't (the flag is the only thing stopping an inflated Played total) |
-| `t_verify_retry.pl` | 0.1.90's retry: that it retries, retries EXACTLY once (an unbounded retry would be worse than the bug), never gives up silently, and re-reads the row first — plus the three distinct answers `_verifyRelease` must keep apart (real count → store; provisional → neither store nor retry; no count → retry) |
+| `t_verify_retry.pl` | 0.1.90's retry: that it retries, retries EXACTLY once (an unbounded retry would be worse than the bug), never gives up silently, and re-reads the row first — plus the three distinct answers `_verifyRelease` must keep apart (real count → store; provisional → neither store nor retry; no count → retry), canonical-id propagation after a year rekey, service-independent year propagation to a cross-service survivor, and the rule that an in-flight result from one service never writes its count/type onto another service's survivor |
 | `t_learn_count.pl` | 0.1.93's in-flight guard on `Played::_learnTrackCount` and specifically its EXPIRY: that a lost request stops blocking after `COUNT_STALE_SECS`, that it is logged rather than swallowed, that an answered request stays immediately re-askable, that records don't block each other, and that a library release is never asked at all. Uses `TestClock::advance()` |
 | `t_favurl.pl` | the private favurl handshake (`Plugin::_stripPrivateParams`): `?cover=`/`?b=`/`&a=`/`&y=`/`&al=`/`&rt=`/`&tc=` — what each yields, that junk is stripped-but-rejected, that `&a=` can't eat `&al=`, that `&rt=`+`&tc=` really do reach `singleIsWrong`, and that a NATIVE favurl comes back byte-for-byte unchanged with no field set. Calls the real sub — see the `&tc=` lesson below |
 | `t_addpath.pl` | the ADD PATH end to end — a Material action into `_addCtxCommand`, out as a row in SQLite. Also 0.1.92's `ref.svc_title`: that the service label is kept when it differs and not when it doesn't, that a play of the QUALIFIED title finds the row while a different artist's doesn't, and that the dedupe key still ignores the label. What the handshake params become on the stored row, that `&tc=` settles the type but never fills `track_count`, that the cross-kind single dedupe eats a REAL single but not a disproved one, that an UNKNOWN type defers instead of inserting a guess, and that unreplayable/unidentifiable adds are refused. Plus the NOW-PLAYING FALLBACK's gate on BOTH paths (0.1.98): on the album path, that a browse row with a non-service container verb does NOT adopt the playing track, while a genuine Now Playing add (no `svc` at all) still recovers its source; on the TRACK path, that a tapped row whose `trackid` resolves to NOTHING (no svc — it shares `$trackCmd` with Now Playing) and an online-track row with a container verb are both refused, while a real Now Playing track add still recovers the playing song and its url. In both cases both directions are needed, or "doesn't adopt" passes with the fallback simply switched off. And the other side of that gate: a REMOTE queue row (negative `trackid`, no favurl) is resolved by its id and stored as the row that was TAPPED — its own title, its own play url, its source read off that url and not hardcoded `library` — while the library row on the same branch still takes its album/year from the Album row — and, since the RemoteTrack that row resolves to is normally BARE, that a `''` title/artist off the object never overwrites what Material sent (the stub answers `''` for a negative id, so this cannot pass by the test having supplied the metadata itself). Also what a REJECTED add logs (0.1.98): that an empty source reads `(none identified)` rather than `''`, that the container verb is named, and that the clause which actually failed is named — a missing play url and an empty title each say so instead of blaming the service, while a genuinely unsupported source still reads exactly as it did. The reject is silent to the user, so that one line is the whole trace. Needs no service: the whole path asks only `client`/`getParam`/`setStatusDone`/`setStatusProcessing`/`addResult`/`addResultLoop`, and `client => undef` makes the background jobs no-op (pass `_client` for the Now Playing cases — it is pulled out of the params, not passed as one). **The service plugins must be declared** (`_serviceCan`) or the gate rejects everything and every assertion passes against an empty DB |
@@ -4585,8 +4673,8 @@ session scratchpads and are gone — so nothing carried forward. Anything worth 
 | `t_addpath.pl` (Spotify section) | 0.1.113's Spotify support end to end: a bare `spotify:album:<id>` URI storing as an album with source `spotify` and its id captured, a track URI storing a playable `spotify://track:<id>`, both playlist spellings landing the same short id, `svc:'spotty'` resolving to source `spotify` with no cover to sniff — and **the rebuild test**, replaying each stored row and asserting Spotty received a full URI rather than a bare id (a bare id matches nothing in `API::album` and returns an empty tracklist, i.e. a row that plays once and is then gone). The Spotty stubs are declared at the END of the file on purpose, so every test above it runs with Spotty ABSENT and the `->can` refusal is covered by the same file |
 | `t_favurl.pl` (Spotify sections) | `normaliseFavurl` itself, and then the four readers that consume it — including that none of them reaches `favurlIsTrack`'s fail-open branch, which the file's no-warnings check enforces. Plus `sourceFromSvc`: `spotty` → `spotify`, while a home-shelf id still answers `''` so the cover sniff keeps its turn. Plus 0.1.115's `spottyArtistName`, the ONE reader of a Spotty album object's artist: both legitimate shapes (the cache's plain `artist` string and the raw API's `artists` array), the string winning when both are present, and seven miss cases — including a hash in `artist`, which is the TIDAL/DEEZER shape and must NOT be read here, so a fold of the two extractions fails rather than quietly losing a Tidal row's artist. Calls are `eval`'d because a shape the sub fails to guard DIES rather than returning, and a dying assertion aborts the run instead of reporting it. Plus source checks that both modules ask through the sub and neither open-codes the `artists[0]{name}` read outside its body (`LL_SOURCES_SRC=`/`LL_PLUGIN_SRC=` point those at mutated copies) |
 | `t_reltype.pl` (Spotify section) | That a Spotify EP — `album_type: 'single'` with `total_tracks: 5` — is NOT stored as a single, that it resolved a real tracklist to prove it, and that a 9-track "single" demotes to `album` rather than `ep`. Also that the album is requested by full URI, and that no album object at all falls through to the tracklist instead of dying or inventing |
-| `t_podcast_purge.pl` | The 0.1.136 purge (schema rung 6), which is the one rung that DESTROYS user data, so the suite is about blast radius. Rows are seeded BELOW the rung by hand, not through `DB::add`, because the shapes under test are what OLDER builds wrote. It pins that every `source='podcast'` row goes; that a MIS-KEYED pre-0.1.126 streaming episode goes (a `|t:` key, and for Spotify the bare `spotify:episode:` spelling — only the url identifies those, which is why the test is `spotifyEpisodeUri` and not one SQL predicate); and that a CORRECTLY-keyed Spotify **or Deezer** episode SURVIVES, both being supported paths. Controls: an ordinary Spotify track, an album and a playlist are untouched. Also pins the report file — written BEFORE the delete, naming what went and nothing that stayed — the empty-library no-op (stamp, no report, the path most upgrades take), and the LADDER rule: a failed delete withholds the stamp, and rung 6 refuses to stamp over an earlier rung that failed. Anti-tested 4/4/2/2/3 red |
-| `t_refold.pl` | 0.1.112's fleet fold and the migration it owes: apostrophe elision (and the `'n'` guard) plus `%FOLD` in ALL THREE normalisers, that the three punctuation passes still differ where they must (the key keeps "(Deluxe)", the gate strips it, the ranker keeps "(LP4)"), that the lenient empty-artist gates are untouched, and `_migrateRefold` end to end against real SQLite — a stale key rewritten, same-status duplicates collapsed into the earliest save with the loser's `ref` carried across, MIXED-status rows left alone on their old keys, track `|t:` and playlist `|p:<svc>:<id>` identity segments preserved, and idempotence. Plus, at source level, that the fold lives in `DB.pm` and that `DB::_norm` calls it DIRECTLY while `Sources` goes through `->can` — the failure that guards is a permanent wrong key in a UNIQUE column, which no passing call can show. Plus §4i (0.1.119): a rollback that ITSELF fails must not poison the handle — `AutoCommit` restored, a later transaction still openable, the failed pass still withholding the ladder stamp, and the assertion that actually matters, that an ordinary write made AFTER the failure is durable rather than discarded at shutdown. DBD::SQLite will not fail a rollback on demand, so only the rollback is injected (a `RootClass` subclass); the failing GROUP is 4h's planted collision. Its squatter pair differs by an apostrophe rather than reusing 4h's accented one — that is fixture history, not a hazard in accents |
+| `t_podcast_purge.pl` | The 0.1.136 purge (schema rung 6), which is the one rung that DESTROYS user data, so the suite is about blast radius. Rows are seeded BELOW the rung by hand, not through `DB::add`, because the shapes under test are what OLDER builds wrote. It pins that every `source='podcast'` row goes; that a MIS-KEYED pre-0.1.126 streaming episode goes (a `|t:` key, and for Spotify the bare `spotify:episode:` spelling — only the url identifies those, which is why the test is `spotifyEpisodeUri` and not one SQL predicate); and that a CORRECTLY-keyed Spotify **or Deezer** episode SURVIVES, both being supported paths. Controls: an ordinary Spotify track, an album and a playlist are untouched. Also pins the report file — written BEFORE the delete, naming what went and nothing that stayed — the empty-library no-op (stamp, no report, the path most upgrades take), the LADDER rule that failures withhold the stamp, and a partial second-DELETE failure rolling the whole purge back so the retry report still contains every episode. Anti-tested 4/4/2/2/3 red |
+| `t_refold.pl` | 0.1.112's fleet fold and the migration it owes: apostrophe elision (and the `'n'` guard) plus `%FOLD` in ALL THREE normalisers, that the three punctuation passes still differ where they must (the key keeps "(Deluxe)", the gate strips it, the ranker keeps "(LP4)"), that the lenient empty-artist gates are untouched, and `_migrateRefold` end to end against real SQLite — a stale key rewritten, same-status duplicates collapsed into the earliest save, MIXED-status rows left alone, and track/playlist/episode identity tails preserved. Its cross-source cases pin `add()` parity, atomic source/ref adoption, source-scoped track counts, mixed-status restraint, service-qualified `|p:`/`|e:` independence, and schema rung 7 repairing a database that already stamped the old source-scoped refold while retaining a retry on operational failure. Plus, at source level, that the fold lives in `DB.pm` and that `DB::_norm` calls it DIRECTLY while `Sources` goes through `->can` — the failure that guards is a permanent wrong key in a UNIQUE column, which no passing call can show. Plus §4i (0.1.119): a rollback that ITSELF fails must not poison the handle — `AutoCommit` restored, a later transaction still openable, the failed pass still withholding the ladder stamp, and the assertion that actually matters, that an ordinary write made AFTER the failure is durable rather than discarded at shutdown. DBD::SQLite will not fail a rollback on demand, so only the rollback is injected (a `RootClass` subclass); the failing GROUP is 4h's planted collision. Its squatter pair differs by an apostrophe rather than reusing 4h's accented one — that is fixture history, not a hazard in accents |
 | `t_query_enc.pl` | 0.1.120's per-branch query encoding in `_searchService`: that Qobuz, Tidal and Spotty (0.1.121) are handed CHARACTERS and Deezer OCTETS, and the CONSEQUENCE rather than just the flag — the URL `uri_escape_utf8` actually builds (called for real) and the name Unidecode actually transliterates to (modelled, since Text::Unidecode is not a dependency here). Plus the fail-safe cases in both directions, since a raw-CLI add arrives as octets and must not be corrupted on the way out. **Its fixture is the fragile part and is asserted rather than assumed:** a `"\x{f3}"` literal is stored latin-1 with `utf8::is_utf8` FALSE, so the encode never fires and every branch looks correct — `utf8::upgrade` models what `sqlite_unicode`/JSON::XS really hand back, and the first assertion fails loudly if it is ever dropped. The ASCII positive control is what stops the suite being satisfied by a change that mangles every query equally. **Bandcamp (0.1.122) is in NEITHER camp and is tested for exactly that**, because "exempt by an invariant" and "nobody checked" look identical from outside: its branch sends the combined `_norm("$artist $album")`, which `s/[^a-z0-9]+/ /g` makes ASCII-only, so the two encodings are byte-identical there and no conversion applies. The assertions pin that INVARIANT — ASCII out for character, octet and latin-1 in, the two encodings identical, and the album half still in the query — so a refactor that sends a raw artist or title down that branch goes red and has to pick a camp (5 red without them) |
 | `t_load.pl` | every shipped module compiles AND loads, plus a called-vs-defined sweep — `perl -c` passes on a call to a sub that doesn't exist, which nearly shipped a runtime crash in 0.1.83 |
 
@@ -5050,4 +5138,3 @@ repo's plugin version AND its match/decision cache versions (LBF: `lbf:stream` +
 shape changed — matching runs live there; LL: none — matching is live), rebuild zips + repo.xml
 sha. Never leave a matcher fix in one repo "to port later" — that is exactly how the 2026-07
 drift happened (LBF missed the P!nk/EP/ascii rules for months).
-

@@ -325,7 +325,9 @@ sub homeShelf {
 sub _albumTracks {
     my ($client, $callback, $args, $pt) = @_;
 
-    my $rec = Plugins::ListenLater::DB::get($pt->{id});
+    # The row may have been identity-merged since this menu was rendered. Follow the logical
+    # release so an already-visible tap still opens the survivor instead of an empty page.
+    my $rec = Plugins::ListenLater::DB::getCanonical($pt->{id});
     unless ($rec) {
         return $callback->({ items => [{ name => cstring($client, 'PLUGIN_LL_EMPTY'), type => 'text' }] });
     }
@@ -374,13 +376,19 @@ sub _albumTracks {
             my $stored = $rec->{rel_type} || '';
             my $wrong  = Plugins::ListenLater::Sources::singleIsWrong($stored, $count);
 
-            Plugins::ListenLater::DB::updateTrackCount($rec->{id}, $count)
+            # The resolve measured THIS record's release on THIS service. If a backfill merged
+            # the row away while the tracklist was in flight, the count belongs to the survivor
+            # only when it still replays the same release — same service AND same ref.
+            my $refId = Plugins::ListenLater::DB::refIdentity($rec);
+
+            Plugins::ListenLater::DB::updateTrackCount($rec->{id}, $count, $rec->{source}, $refId)
                 if ($rec->{source} || '') ne 'library';
 
             if (!$stored || $wrong) {
                 my $rt = Plugins::ListenLater::Sources::relTypeFor(count => $count);
                 if ($rt) {
-                    Plugins::ListenLater::DB::updateRelType($rec->{id}, $rt, $wrong);
+                    Plugins::ListenLater::DB::updateRelType(
+                        $rec->{id}, $rt, $wrong, $rec->{source}, $refId);
                     $log->warn("LL: rec $rec->{id} was stored as a single but resolves to "
                         . "$count tracks — reclassified as $rt") if $wrong;
                 }

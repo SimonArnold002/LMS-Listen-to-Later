@@ -149,7 +149,9 @@ Rows removed:
 
 Correctly-keyed streaming episode rows are **kept** — that path is supported.
 
-**The report** is written before the DELETE so a failed delete cannot lose it:
+**The report** is written before the DELETE, and every selected DELETE is committed in one
+transaction, so a failed later delete rolls the earlier ones back and the retry reports the
+same complete set:
 `<cachedir>/listenlater-removed-podcasts.txt`, beside the DB via the same
 `preferences('server')->get('cachedir')` that `DB::_path` (`DB.pm:30`) uses. One line per
 row: list, show, episode title, play url, date added. Same lines to `log.txt`. No Settings
@@ -246,6 +248,13 @@ not predicted by it.
    keyed Spotify AND Deezer episodes survive, mis-keyed pre-0.1.126 rows go. Anti-test: 3 red.
    **This is the strongest argument in this document for verifying against real data rather
    than a green suite.**
+
+8. **A retry could erase part of the recovery report.** Deletes were individually committed:
+   if episode A was removed and episode B failed, schema version 5 correctly caused a retry,
+   but that retry truncated the report and rewrote it from only B — losing the only record of
+   A. The purge is now one transaction and fails closed if it cannot begin one. The regression
+   injects failure on the second DELETE, proves both rows remain, then proves the successful
+   retry still reports both.
 
 6. **Integration surface was far smaller than the branch count implied.** 130
    podcast-conditional references across four modules, but only **5** cross-module calls

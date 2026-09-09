@@ -2554,7 +2554,7 @@ sub _contextMenuQuery {
 
     my $id     = $request->getParam('id');
     my $client = $request->client;
-    my $rec    = eval { Plugins::ListenLater::DB::get($id) };
+    my $rec    = eval { Plugins::ListenLater::DB::getCanonical($id) };
     # The row's stored ref, at THIS scope because the Wish List rule below needs the play
     # url out of it (a Spotify episode is told from a Spotify track by nothing else). The
     # Bandcamp block further down keeps its own narrower copy.
@@ -2655,7 +2655,7 @@ sub _buyCommand {
 
     my $client = $request->client;
     my $id     = $request->getParam('id');
-    my $rec    = eval { Plugins::ListenLater::DB::get($id) };
+    my $rec    = eval { Plugins::ListenLater::DB::getCanonical($id) };
 
     if (!$rec || ($rec->{source} || '') ne 'bandcamp') {
         $request->addResult('offset', 0);
@@ -2712,7 +2712,11 @@ sub _buyCommand {
         # held request) is freed now rather than lingering for the full 15s.
         Slim::Utils::Timers::killTimers(undef, $timeout);
         if ($url) {
-            eval { Plugins::ListenLater::DB::setRefValue($id, 'buy_url', $url); 1 }
+            eval {
+                Plugins::ListenLater::DB::setRefValue($id, 'buy_url', $url, 'bandcamp',
+                    Plugins::ListenLater::DB::refIdentity($rec));
+                1;
+            }
                 or $log->error("LL: cache buy_url failed: $@");
         }
         else {
@@ -3393,12 +3397,63 @@ sub _verifyRelease {
             Slim::Utils::Timers::killTimers(undef, $timeout);
             return if $done; $done = 1;
 
+            # Artist backfill is another asynchronous key-changing carrier and can finish
+            # before this request. Follow a live merge by its canonical id (or, for an older
+            # same-service merge without process-local lineage, by the stable album id). A
+            # year is release identity metadata and may still fill the survivor; the regional
+            # count/type below is discarded if that survivor uses a different service/ref.
+            # Freeze BOTH halves of the bundle this request was made against, before anything
+            # below reassigns them. $albumId is overwritten from the survivor's ref a few lines
+            # down (the retry needs the id it would actually re-ask for), which destroys the
+            # only evidence of which release the count in hand describes. A same-service merge
+            # is real — two Qobuz rows for one release exist whenever their keys differ — so
+            # the service alone cannot tell a survivor's own answer from a deleted twin's.
+            my $answeredSource  = $source;
+            my $answeredAlbumId = $albumId;
+            my $fresh = eval { Plugins::ListenLater::DB::getCanonical($recId) };
+            $fresh ||= eval {
+                Plugins::ListenLater::DB::findBySourceAlbumId($answeredSource, $albumId)
+            };
+            return unless $fresh;
+            $recId = $fresh->{id};
+            $rec   = $fresh;
+            $claim = $fresh->{rel_type};
+            $source = $fresh->{source} || $source;
+
             # A missing release year, filled from the album object this lookup already
             # fetched. Done BEFORE the count check below, because it is worth having even on
             # the path where no count comes back — and it costs nothing extra.
             # DB::updateYear won't overwrite a year we already hold, and recomputes the
-            # dedupe key so the row can't be duplicated by a later add that carries one.
-            Plugins::ListenLater::DB::updateYear($recId, $year) if $year;
+            # dedupe key so the row can't be duplicated by a later add that carries one. A
+            # backfill can also reveal a cross-source twin and merge this row into the earlier
+            # save, so follow the canonical id for every write below.
+            if ($year) {
+                my $canonical = Plugins::ListenLater::DB::updateYear($recId, $year);
+                $fresh = eval { Plugins::ListenLater::DB::get($canonical || $recId) } or return;
+                $recId = $fresh->{id};
+                $rec   = $fresh;
+                $claim = $fresh->{rel_type};
+                $source = $fresh->{source} || $source;
+                my $ref = (ref $fresh->{ref} eq 'HASH') ? $fresh->{ref} : {};
+                $albumId = $ref->{album_id}
+                    || ($ref->{passthrough} && $ref->{passthrough}{album_id})
+                    || $albumId;
+
+                # The count in THIS callback describes the service request already in
+                # flight. If reconciliation retained a different service's row, neither
+                # its regional playable count nor a retry may be borrowed from the old
+                # source. Its own first resolve will measure it correctly.
+                if ($source ne $answeredSource) {
+                    $log->warn("LL: rec $recId became the canonical $source row while "
+                        . "$answeredSource verification was in flight — not applying that "
+                        . 'service\'s count or type');
+                    return;
+                }
+            }
+
+            # With no year there was no identity metadata to preserve. Counts and release
+            # types still belong only to the service whose request produced this callback.
+            return if $source ne $answeredSource;
 
             # No count: the service couldn't be reached, or returned nothing playable. Never
             # silent — this was invisible before, which is exactly why it could sit unnoticed.
@@ -3407,12 +3462,14 @@ sub _verifyRelease {
             return _armVerifyRetry($client, $recId, $rec, $source, $albumId, $attempt)
                 unless $count;
 
-            Plugins::ListenLater::DB::updateTrackCount($recId, $count) unless $prov;
+            Plugins::ListenLater::DB::updateTrackCount(
+                $recId, $count, $answeredSource, $answeredAlbumId) unless $prov;
             return unless $rt;
             # A type the source CLAIMED is only ever overwritten to demote a wrong 'single'
             # — MusicBrainz and Qobuz read an EP from an album better than a count does.
             if (Plugins::ListenLater::Sources::singleIsWrong($claim, $count)) {
-                Plugins::ListenLater::DB::updateRelType($recId, $rt, 1);
+                Plugins::ListenLater::DB::updateRelType(
+                    $recId, $rt, 1, $answeredSource, $answeredAlbumId);
                 $log->warn("LL: rec $recId was added as a single but has $count tracks"
                     . " — reclassified as $rt");
             }
@@ -3424,7 +3481,8 @@ sub _verifyRelease {
             # race over a type a drill/play stored in the meantime. Mirrors the same repair in
             # Browse::_albumTracks, which does this on every resolve.
             elsif (!defined $claim || !length $claim) {
-                Plugins::ListenLater::DB::updateRelType($recId, $rt);
+                Plugins::ListenLater::DB::updateRelType(
+                    $recId, $rt, undef, $answeredSource, $answeredAlbumId);
                 $log->warn("LL: rec $recId had no type — classified as $rt from $count tracks");
             }
         }, $claim);
@@ -3475,7 +3533,20 @@ sub _verifyRetryTick {
     my ($client, $args) = @_;
     return unless ref $args eq 'HASH' && $args->{recId};
 
-    my $rec = eval { Plugins::ListenLater::DB::get($args->{recId}) } or return;
+    my $rec = eval { Plugins::ListenLater::DB::getCanonical($args->{recId}) };
+    $rec ||= eval {
+        Plugins::ListenLater::DB::findBySourceAlbumId($args->{source}, $args->{albumId})
+    };
+    return unless $rec;
+    # A retry has not fetched anything yet. If the logical row now replays from another
+    # service — or from a different release on the SAME service, which a merge of two rows
+    # for one album produces — do not start an old request against its new ref bundle. Both
+    # halves matter: the id below is the one the retry would re-ask for, so a survivor that
+    # no longer carries it would receive another catalogue entry's count and type.
+    return if ($rec->{source} // '') ne ($args->{source} // '');
+    my $have = Plugins::ListenLater::DB::refIdentity($rec);
+    return if length $have && defined $args->{albumId} && length $args->{albumId}
+           && $have ne $args->{albumId};
     return if $rec->{track_count};
 
     # No live player, no service API handler — give up rather than pretend.
@@ -3483,7 +3554,7 @@ sub _verifyRetryTick {
     my $live = eval { Slim::Player::Client::getClient($client->id) };
     return unless $live;
 
-    _verifyRelease($live, $args->{recId}, $rec, $args->{source}, $args->{albumId},
+    _verifyRelease($live, $rec->{id}, $rec, $args->{source}, $args->{albumId},
                    $args->{attempt});
     return;
 }
@@ -3523,8 +3594,9 @@ sub _backfillStreamingArtist {
                 # for the two shapes and why this is NOT the Tidal/Deezer extraction.
                 my $artist = Plugins::ListenLater::Sources::spottyArtistName($album);
                 return unless length $artist;
-                Plugins::ListenLater::DB::updateArtist($recId, $artist);
-                $log->info("LL: backfilled spotify artist '$artist' onto rec $recId");
+                my $canonical = Plugins::ListenLater::DB::updateArtist($recId, $artist);
+                $log->info("LL: backfilled spotify artist '$artist' onto rec "
+                    . ($canonical || $recId));
             }, { uri => "spotify:album:$albumId" });
             1;
         } or $log->warn("LL: spotify artist backfill failed: $@");
@@ -3547,8 +3619,9 @@ sub _backfillStreamingArtist {
               : (ref $first->{artist} eq 'HASH') ? $first->{artist}{name}
               : undef );
             return unless defined $artist && length $artist;
-            Plugins::ListenLater::DB::updateArtist($recId, $artist);
-            $log->info("LL: backfilled $source artist '$artist' onto rec $recId");
+            my $canonical = Plugins::ListenLater::DB::updateArtist($recId, $artist);
+            $log->info("LL: backfilled $source artist '$artist' onto rec "
+                . ($canonical || $recId));
         }, {}, { id => $albumId });
         1;
     } or $log->warn("LL: $source artist backfill failed: $@");
@@ -3706,7 +3779,7 @@ sub _moveCommand {
     # the row was saved) is still tappable on a stale page, and a direct CLI caller never saw
     # a menu at all. Without this the redirect the add path just made is undone in one tap.
     if ($status eq 'wishlist') {
-        my $rec = eval { Plugins::ListenLater::DB::get($id) };
+        my $rec = eval { Plugins::ListenLater::DB::getCanonical($id) };
         my $rref = ($rec && ref $rec->{ref} eq 'HASH') ? $rec->{ref} : {};
         if ($rec && !_wishListable($rec->{kind}, $rec->{source}, $rref->{url})) {
             $log->warn('LL: refusing to move a ' . ($rec->{kind} // 'kind-less')

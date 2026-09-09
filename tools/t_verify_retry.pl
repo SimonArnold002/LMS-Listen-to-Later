@@ -79,9 +79,10 @@ is('arming a retry logs it too',            (scalar Slim::Utils::Log::lines() ? 
 # ---------------------------------------------------------------------------
 section('the retry re-reads the row before doing anything');
 sub tick_with {
-    my ($row, $args) = @_;
-    no warnings 'redefine';
+    my ($row, $args, $found) = @_;
+    no warnings qw(redefine once);
     local *Plugins::ListenLater::DB::get = sub { $row };
+    local *Plugins::ListenLater::DB::findBySourceAlbumId = sub { $found };
     Slim::Utils::Timers::clear();
     $tick->($client, $args // { recId => 42, source => 'deezer', albumId => 'aid', attempt => 2 });
     return Slim::Utils::Timers::armed();
@@ -99,19 +100,39 @@ section('what _verifyRelease does with each kind of answer');
 # tracks_count) is an ANSWER — the service replied — so it must not retry; but it is not a
 # playable total, so it must not be stored either. Conflating "provisional" with "no answer"
 # would spend a pointless retry on every Qobuz add and then log a failure that never was.
-our @YEARS;
+our (@YEARS, @STORE_IDS, @TYPE_IDS);
 sub verify_with {
     my ($type, $count, $prov, %o) = @_;
     my (@stored, @typed);
     @YEARS = ();
-    no warnings 'redefine';
+    @STORE_IDS = ();
+    @TYPE_IDS = ();
+    no warnings qw(redefine once);
     local *Plugins::ListenLater::Sources::classifyRelType = sub {
         my ($cl, $src, $aid, $r, $cb, $claim) = @_;
         return $cb->($type, $count, $prov, $o{year});
     };
-    local *Plugins::ListenLater::DB::updateYear = sub { push @YEARS, [ @_[0,1] ] };
-    local *Plugins::ListenLater::DB::updateTrackCount = sub { push @stored, $_[1] };
-    local *Plugins::ListenLater::DB::updateRelType    = sub { push @typed, [ @_[1, 2] ] };
+    local *Plugins::ListenLater::DB::updateYear = sub {
+        push @YEARS, [ @_[0,1] ];
+        return $o{canonicalId} // $_[0];
+    };
+    local *Plugins::ListenLater::DB::get = sub {
+        my ($id) = @_;
+        return undef if $o{initialMissing} && "$id" eq '42';
+        return $o{currentRec} if $o{currentRec};
+        return $o{canonicalRec}
+            if $o{canonicalRec} && defined $o{canonicalId} && "$id" eq "$o{canonicalId}";
+        return $o{rec} || $rec->();
+    };
+    local *Plugins::ListenLater::DB::findBySourceAlbumId = sub { $o{foundRec} };
+    local *Plugins::ListenLater::DB::updateTrackCount = sub {
+        push @STORE_IDS, $_[0];
+        push @stored, $_[1];
+    };
+    local *Plugins::ListenLater::DB::updateRelType = sub {
+        push @TYPE_IDS, $_[0];
+        push @typed, [ @_[1, 2] ];
+    };
     Slim::Utils::Timers::clear();
     Slim::Utils::Log::clear();
     my $row = $o{rec} || $rec->();
@@ -190,6 +211,54 @@ verify_with('album', 12, 1, year => 2019);
 is('backfilled even when the count is provisional', (@YEARS ? $YEARS[0][1] : '-'), 2019);
 verify_with(undef, undef, 0, year => 1998);
 is('...and even when no count came back', (@YEARS ? $YEARS[0][1] : '-'), 1998);
+
+section('a year merge follows the canonical id without crossing service results');
+verify_with('album', 9, 0, year => 2026, canonicalId => 77,
+    canonicalRec => { id => 77, source => 'qobuz', rel_type => 'single',
+                      ref => { album_id => 'canonical-q' } });
+is('a same-source count follows the canonical id', $STORE_IDS[0], 77);
+is('...and so does the type correction',            $TYPE_IDS[0], 77);
+
+(undef, my $crossArmed) = verify_with('album', 9, 0, year => 2026, canonicalId => 88,
+    source => 'qobuz', canonicalRec => { id => 88, source => 'tidal', rel_type => 'single',
+                                         ref => { album_id => 'canonical-t' } });
+is('a Qobuz count is not written onto a Tidal winner', scalar @STORE_IDS, 0);
+is('...nor is its type result',                        scalar @TYPE_IDS, 0);
+is('...and no old-service retry is armed',             $crossArmed, 0);
+
+(undef, $crossArmed) = verify_with(undef, undef, 0, year => 2026, canonicalId => 89,
+    source => 'qobuz', canonicalRec => { id => 89, source => 'tidal', rel_type => 'single',
+                                         ref => { album_id => 'canonical-t2' } });
+is('a failed old-service answer also cannot arm a retry', $crossArmed, 0);
+
+verify_with('album', 9, 0, year => 2027, source => 'qobuz',
+    currentRec => { id => 90, source => 'tidal', rel_type => 'single',
+                    ref => { album_id => 'canonical-t3' } });
+is('a cross-service survivor still receives service-independent year metadata',
+   $YEARS[0][0], 90);
+is('...but still receives no old-service count', scalar @STORE_IDS, 0);
+is('...or old-service type',                     scalar @TYPE_IDS, 0);
+
+section('artist-backfill merges retarget callbacks and retry timers');
+verify_with('album', 8, 0, initialMissing => 1,
+    foundRec => { id => 66, source => 'qobuz', rel_type => 'single',
+                  ref => { album_id => 'aid' } });
+is('a callback follows a same-service row found by album id', $STORE_IDS[0], 66);
+verify_with('album', 8, 0, initialMissing => 1);
+is('a callback for a removed/different-service row writes nothing', scalar @STORE_IDS, 0);
+
+{
+    my @ids;
+    no warnings qw(redefine once);
+    local *Plugins::ListenLater::DB::get = sub { undef };
+    local *Plugins::ListenLater::DB::findBySourceAlbumId = sub {
+        { id => 67, source => 'qobuz', track_count => undef, ref => { album_id => 'aid' } }
+    };
+    local *Slim::Player::Client::getClient = sub { $client };
+    local *Plugins::ListenLater::Plugin::_verifyRelease = sub { push @ids, $_[1] };
+    $tick->($client, { recId => 42, source => 'qobuz', albumId => 'aid', attempt => 2 });
+    is('a retry timer follows the same-service canonical id too', $ids[0], 67);
+}
 
 # ---------------------------------------------------------------------------
 section('a callback that NEVER ARRIVES is the third failure route');

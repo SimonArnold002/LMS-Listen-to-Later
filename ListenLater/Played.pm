@@ -111,7 +111,11 @@ sub _onChange {
             return;
         }
 
-        if ($cur && $cur->{rec_id} == $rec->{id}) {
+        if ($cur && Plugins::ListenLater::DB::canonicalId($cur->{rec_id}) == $rec->{id}) {
+            # An identity backfill may have merged the id captured on the previous newsong.
+            # Keep the in-progress counter on the logical survivor instead of finalising and
+            # restarting the same release halfway through playback.
+            $cur->{rec_id} = $rec->{id};
             $cur->{seen}{$url} = 1;
         }
         else {
@@ -194,12 +198,20 @@ sub _learnTrackCount {
                     . "falling back to the streaming floor");
                 return;
             }
-            Plugins::ListenLater::DB::updateTrackCount($id, $n);
-            $log->warn("LL: rec $id is $n track(s) — measured on first play");
+            my $canonical = Plugins::ListenLater::DB::updateTrackCount(
+                $id, $n, $rec->{source}, Plugins::ListenLater::DB::refIdentity($rec));
+            unless ($canonical) {
+                $log->warn("LL: rec $id changed replay service or release while its "
+                    . 'track-count request was in flight — not applying that service\'s count');
+                return;
+            }
+            $log->warn("LL: rec $canonical is $n track(s) — measured on first play");
 
             # Apply it to the play already in progress, if that's still what's on.
             my $t = $tracking{$cid};
-            return unless $t && $t->{rec_id} == $id;
+            return unless $t
+                && Plugins::ListenLater::DB::canonicalId($t->{rec_id}) == $canonical;
+            $t->{rec_id} = $canonical;
 
             # A release that turns out to be a SINGLE track must not now be marked by the
             # counter: it is already "1 of 1 seen", so it would be marked the instant it
@@ -329,10 +341,10 @@ sub _deferredMarkTick {
     }
 
     # Re-read: the row may have been moved or removed while the timer ran.
-    my $cur = Plugins::ListenLater::DB::get($info->{rec_id});
+    my $cur = Plugins::ListenLater::DB::getCanonical($info->{rec_id});
     return unless $cur && ($cur->{status} || '') eq 'later';
-    Plugins::ListenLater::DB::markPlayed($info->{rec_id});
-    $log->warn("LL: marked rec $info->{rec_id} ('$info->{title}') as Played — played through");
+    Plugins::ListenLater::DB::markPlayed($cur->{id});
+    $log->warn("LL: marked rec $cur->{id} ('$info->{title}') as Played — played through");
     return;
 }
 

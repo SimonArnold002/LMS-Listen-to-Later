@@ -203,7 +203,10 @@ section('_learnTrackCount — measuring a release at the moment it starts playin
         push @asked, $rec->{id};
         $cb->($answer) if defined $answer;      # undef = a service that never answers
     };
-    local *Plugins::ListenLater::DB::updateTrackCount = sub { push @stored, [ @_[0,1] ] };
+    local *Plugins::ListenLater::DB::updateTrackCount = sub {
+        push @stored, [ @_[0,1] ];
+        return $_[0];
+    };
     my $client = bless {}, 'FakeClient';
     sub FakeClient::id         { 'aa:bb:cc:dd:ee:ff' }
     sub FakeClient::playingSong { undef }
