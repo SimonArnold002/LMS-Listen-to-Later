@@ -590,9 +590,11 @@ is('the clear pass deletes it outright, husk and all',
     join(',', map { (exists read_file()->{$_} ? 'y' : 'n') } qw(podcasts-album podcasts-track)),
     'n,n');
 
-# The same clear, but with every feed unsubscribed first — _materialActionSet stops emitting
-# podcasts-* the moment hasFeeds() goes false, so a list read from IT would no longer name
-# them and the husks would survive. This is why the clear pass hardcodes the pair.
+# The same clear, but with every feed unsubscribed first — _materialActionSet stopped emitting
+# podcasts-* the moment the built-in path had no subscribed feed, so a list read from IT would
+# no longer name them and the husks would survive. Since 0.1.136 removed that path %fileOnly
+# never names the pair in ANY state, which only sharpens the point. This is why the clear pass
+# hardcodes the pair.
 reset_all();
 install_api();
 seed_husk('podcasts-album', 'podcasts-track');

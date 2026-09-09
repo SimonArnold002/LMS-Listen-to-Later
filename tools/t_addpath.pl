@@ -1016,25 +1016,25 @@ sub landed_in {
     return ('nothing stored', undef);
 }
 
-# The built-in Podcasts path resolves an episode against the subscribed feeds before it
-# stores anything, so it needs a feed to get as far as the list decision. Installed HERE,
-# at the end of the file, so every "no feeds" assertion above runs in the world it expects.
+# Widen the scheme handler for the streaming-episode cases below. Installed HERE, at the end
+# of the file, so every narrower assertion above runs in the world it expects.
+#
+# 0.1.136 removed the built-in Podcasts path, and with it the two stubs that used to sit in
+# this block — Plugins::ListenLater::Podcast::hasFeeds and ::resolveEpisode. They are NOT
+# reinstated: the package no longer exists, nothing in the plugin calls either sub, and a stub
+# standing in for a deleted implementation can only ever MASK its absence, never catch it. The
+# built-in row's behaviour is asserted directly instead, at the end of this file, where it must
+# now store nothing.
 {
     no strict 'refs'; no warnings 'redefine';
-    # The section above answers handlerForURL for 'deezerpodcast://' ONLY, which is right for
-    # it and leaves the built-in 'podcast://' unplayable — so an episode added here would be
-    # turned away by _isReplayableSource before it ever reached the list decision. Answer for
-    # both schemes now. Defined fresh, NOT chained onto the existing glob: capturing
-    # \&handlerForURL here resolves to THIS sub at call time and recurses (see above).
+    # The section above answers handlerForURL for 'deezerpodcast://' ONLY. Answer for the bare
+    # 'podcast://' spelling too, so a fixture carrying one is not turned away by a missing
+    # handler rather than by the gate under test. Defined fresh, NOT chained onto the existing
+    # glob: capturing \&handlerForURL here resolves to THIS sub at call time and recurses
+    # (see above).
     *{'Slim::Player::ProtocolHandlers::handlerForURL'} = sub {
         return ($_[1] // '') =~ m{^(?:deezer)?podcast://} ? 'Plugins::Deezer::ProtocolHandler'
                                                           : undef;
-    };
-    *{'Plugins::ListenLater::Podcast::hasFeeds'} = sub { 1 };
-    *{'Plugins::ListenLater::Podcast::resolveEpisode'} = sub {
-        my ($title, $img, $cb) = @_;
-        $cb->({ url => 'podcast://https://example.com/ep.mp3', title => $title,
-                show => 'Some Show' });
     };
 }
 

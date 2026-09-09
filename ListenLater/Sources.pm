@@ -164,9 +164,12 @@ sub favurlIsTrack {
 # server (0.1.122), 'spotify://show:…' as an ALBUM row with no album id (replayed by a fuzzy
 # title search against the show's description as the artist), and 'deezer://podcast:…' out of
 # favurlIsTrack's fail-open branch as a kind='track' row pointing type => 'audio' at a
-# container url. The built-in Podcasts app already refuses the same add — a feed row there
-# resolves no episode and is rejected (Podcast::resolveEpisode) — so this is the streaming
-# side catching up. It is NOT a step toward series support: we save podcast EPISODES only,
+# container url. The built-in Podcasts app refused the same add — a feed row there resolved
+# no episode and was rejected — so this was the streaming side catching up. That path was
+# REMOVED in 0.1.136 and a feed row is now refused by _isReplayableSource instead ('https' has
+# no _serviceCan arm), which changes nothing here: this gate was never the built-in path's and
+# still has to answer for the two streaming ones. It is NOT a step toward series support: we
+# save podcast EPISODES only,
 # and 'spotify://episode:…' still stores as a track exactly as before.
 #
 # 'mix' is TIDAL's shape ('tidal://mix:<id>'). Spotify's mixes are plain 'spotify:playlist:'
@@ -185,9 +188,12 @@ sub unsupportedContainer {
     my ($u) = @_;
     return undef unless defined $u && length $u;
     # Split the scheme off rather than matching the whole url unanchored, for ONE reason:
-    # 'podcast' is both a type name (Deezer) and OUR OWN scheme — Podcast.pm stores an
-    # episode as 'podcast://<enclosure url>'. Matching unanchored would refuse every saved
-    # episode, and would additionally be reading type names out of a third party's feed url.
+    # 'podcast' is both a type name (Deezer) and a scheme of OUR OWN — the built-in Podcasts
+    # path, removed in 0.1.136, stored an episode as 'podcast://<enclosure url>'. Matching
+    # unanchored would refuse every such row, and would additionally be reading type names out
+    # of a third party's feed url. THE SCHEME SPLIT STAYS after that removal: t_favurl.pl pins
+    # it with three real harvested rows, and the split is what makes this sub read a scheme AS
+    # a scheme rather than as text occurring anywhere in the url.
     return undef unless $u =~ m{^(\w+)://(.*)$}s;
     my ($scheme, $rest) = (lc $1, $2);
     return undef if $scheme eq 'podcast';
@@ -1402,12 +1408,21 @@ sub _serviceCanPlaylist {
     return 0;
 }
 
-# Is this row a podcast EPISODE? THREE sources supply them and they answer in two different
+# Is this row a podcast EPISODE? TWO sources supply them and they answer in two different
 # ways, which is the whole reason this takes a URL as well as a source:
 #
-#   built-in Podcasts app   source 'podcast'         — its own source tag
 #   Deezer                  source 'deezerpodcast'   — its own scheme, so its own source tag
 #   Spotify (Spotty)        source 'spotify'         — NO tag of its own; only the url says
+#
+# THE BUILT-IN Podcasts app was a third until 0.1.136, under source 'podcast'. That path is
+# REMOVED and its rows are DELETED by migration rung 6 (DB::_purgeRemovedPodcasts) rather than
+# recognised here — so the absence of a 'podcast' arm below is deliberate, not an oversight,
+# and re-adding one was raised and declined. It would be unreachable: no writer can produce
+# that source any more (Sources::_serviceCan has no arm for it, so every add path's
+# _isReplayableSource gate rejects it, and Plugin's @KNOWN_RADIO_CMDS suppresses the Add on
+# the app's browse rows), and no row survives the purge. The only window where one could be
+# asked about is a boot in which rung 5 withheld its stamp so rung 6 waited — and such a row
+# is unplayable in that boot regardless, so the arm would buy a glyph and nothing else.
 #
 # Spotify is the one that cannot be answered from the source. Spotty plays an episode through
 # 'spotify://episode:<id>' — the same scheme as a music track — so a source-only predicate

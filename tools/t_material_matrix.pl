@@ -17,7 +17,9 @@
 #      {live, not-live} x {subscribed, unsubscribed} in three of four cells: every $live case
 #      there subscribes a feed first. (live, unsubscribed) is the missing one, and it is
 #      exactly where _clearMaterialActions's hardcoded @fileOnlySup disagrees with
-#      _materialActionSet's hasFeeds()-gated %fileOnly.
+#      _materialActionSet's %fileOnly — which was gated on the built-in Podcasts path having
+#      a subscribed feed until 0.1.136 removed that path, and now never names the pair at
+#      all, in any state.
 #
 # So this suite does not add scenarios. It enumerates a MATRIX — starting file x Material
 # API x podcast subscriptions x user journey — drives real op SEQUENCES over it, and checks

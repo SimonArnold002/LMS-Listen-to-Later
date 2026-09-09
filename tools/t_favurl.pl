@@ -333,8 +333,10 @@ is('bandcamp page url addable', $unsup->('https://foo.bandcamp.com/album/x'), un
 # reach playlistFromRow, whose container match is unanchored and finds the 'playlist:' tail.
 is('legacy user playlist addable', $unsup->(norm('spotify:user:bob:playlist:37i9dQZ')), undef);
 
-# ANTI-TEST: 'podcast' is both a Deezer type name and OUR OWN scheme. Matching the whole url
-# unanchored would refuse every saved episode — Podcast.pm stores them 'podcast://'-wrapped.
+# ANTI-TEST: 'podcast' is both a Deezer type name and a scheme of OUR OWN. Matching the whole
+# url unanchored would refuse every saved episode — the built-in Podcasts path, removed in
+# 0.1.136, stored them 'podcast://'-wrapped. These three stay AFTER that removal: they pin the
+# scheme split itself, which is what keeps this sub reading a scheme as a scheme.
 # NOT hypothetical: the first of these is a REAL row, harvested from the test server's
 # Podcasts app during the 2026-09-03 false-positive sweep and already saved in the list. It
 # matches '^podcast:' at position 0, so without the scheme split this sub would refuse every

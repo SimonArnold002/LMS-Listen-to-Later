@@ -147,6 +147,59 @@ assertions red.
 them only if you have genuinely NEW information — a case the recorded reasoning
 does not cover. Say which ledger entry you are challenging and what changed.
 
+### 2026-09-09 carrier audit, part 3 (0.1.140) — two findings DECLINED, and the comment rot behind both
+
+A review round raised two findings against the podcast carriers. **Both were declined as code
+changes**, and the round's real output was a comment sweep. Do not re-report either; the
+reachability analysis below is the answer.
+
+- **`Sources::isPodcastEpisode` has no `'podcast'` arm — DECLINED, and the absence is
+  DELIBERATE.** The finding was that the sub's own comment table named three sources and the
+  body tested two, so a built-in episode reads as a music track (wrong Browse glyph, and
+  `_wishListable` lets it move to the Wish List). True as stated, and unreachable. **No writer
+  can produce `source = 'podcast'` any more**, on three independent gates: `_serviceCan` has no
+  arm for it so every add path's `_isReplayableSource` rejects it; `podcasts` sits in
+  `@KNOWN_RADIO_CMDS` so no Add renders on the app's browse rows; and rung 6
+  (`_purgeRemovedPodcasts`) DELETES every surviving row. The only window where such a row can be
+  asked about is a boot in which rung 5 withheld its stamp so rung 6 waited — and released
+  `main` is 0.1.93, so that upgrade is the one path where rung 5 does real work at all. In that
+  window the row is unplayable regardless, so the arm would buy a glyph and nothing else.
+  **The DEFECT was the comment, not the code**, and the comment now says so in the sub.
+  - **On the "~40% of runs" figure** in `_migrateRefold`'s closing comment: that measures a
+    SEEDED collision pair under randomised `values %group` order, not 40% of real upgrades.
+    Do not cite it as a stall probability.
+
+- **`_addedMsg` used `ucfirst` rather than `Sources::sourceLabel` — APPLIED, but as one-carrier
+  hygiene, NOT as a live fix.** `%SOURCE_LABEL` has exactly one entry (`deezerpodcast` →
+  `Deezer`), so the two spellings differ for that source alone, and that row cannot reach the
+  branch: `DB::episodeKey` puts the source INSIDE the `|e:<svc>:<url>` tail, so the cross-source
+  `findAnyByKey` in `add()` can never return an episode for an add from another service, and the
+  three `findTrackByUrl` / `findByArtistAlbum` / `findTrackByArtistTitle` call sites are all
+  filtered to `source = ?` so their existing source always EQUALS the new one. "Already saved
+  from Deezerpodcast" is not reachable today. The swap is there so a finder that later widens
+  its scope cannot reintroduce it by inheriting a private spelling.
+
+**The root cause of both, and what was actually fixed.** 0.1.136 removed the built-in path but
+left its CONTRACT COMMENTS describing it, so the code and its documentation disagreed in seven
+places and a review read the documentation as the spec. All swept in this round:
+`isPodcastEpisode`'s source table, `_wishListable`'s "three sources", `_materialActionSet`'s
+`%fileOnly` (which had not held `podcasts-*` since 0.1.136), the four `Podcast::hasFeeds()`-based
+justifications in `Plugin.pm`, and the `resolveEpisode` refusal note on the `unsupportedContainer`
+gate. **A feed row is still refused twice** — `sourceFromUrl` answers `'https'`, which
+`_serviceCan` has no arm for, and the Add never renders anyway.
+
+**Two things that STAY, and why:**
+
+| kept | why |
+|---|---|
+| the `$scheme eq 'podcast'` guard in `Sources::unsupportedContainer` | three anti-tests in `t_favurl.pl` pin it with REAL rows harvested from the test server. It guards the scheme SPLIT — that this sub reads a scheme as a scheme, not as text anywhere in the url — which outlives the built-in path |
+| `podcasts-*` in `@fileOnlySup` / `%ours` / `_ownedCats` | unchanged from part 2 above: husks from pre-0.1.136 builds still need sweeping |
+
+**Removed:** `t_addpath.pl`'s stubs for `Plugins::ListenLater::Podcast::hasFeeds` and
+`::resolveEpisode`. The package no longer exists and nothing called them — a stub standing in for
+a DELETED implementation can only mask its absence, never catch it (fleet rule). The suite reports
+the same 214 assertions with and without them, which is what proved they were dead.
+
 ### Identity: what Played actually matches on — READ THIS BEFORE ANY NAMING CHANGE
 
 Four review rounds re-derived this per service and got it wrong in a different way each time.

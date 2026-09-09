@@ -197,12 +197,15 @@ our %REGISTERED_EMPTY;
 
 # Which POSITIVE sections have already been handed to Material. `$REGISTERED` alone was enough
 # while the positive set was fixed at startup, which is what its comment above claims — and on
-# tier 2 that stopped being true: the `podcasts-*` override is gated on
-# Podcast::hasFeeds() and FOLDS INTO %positive there, so a user who subscribes to their first
-# podcast mid-session grows a section the latch then refuses to ever offer. It reached neither
-# half — the prune only writes back what registration REFUSED — so podcast rows had no "Add"
-# until a server restart. Per category, latched on the ATTEMPT exactly as the single flag was,
-# so a section present at startup behaves precisely as before and only a NEW one is offered.
+# tier 2 that stopped being true. The case that proved it: the `podcasts-*` override was gated
+# on the built-in Podcasts path having a subscribed feed and FOLDED INTO %positive there, so a
+# user who subscribed to their first podcast mid-session grew a section the latch then refused
+# to ever offer. It reached neither half — the prune only writes back what registration
+# REFUSED — so podcast rows had no "Add" until a server restart. That PATH was removed in
+# 0.1.136, but the latch stays per category for the reason the case exposed rather than for the
+# case: any section that can first appear mid-session has the same shape. Latched on the
+# ATTEMPT exactly as the single flag was, so a section present at startup behaves precisely as
+# before and only a NEW one is offered.
 our %REGISTERED_POS;
 
 # How many entries per category the API half actually DELIVERED: what we built, minus what
@@ -603,8 +606,10 @@ sub _clearMaterialActions {
     # still registered would put "Add" back on Podcasts rows, and leaving it behind when
     # nothing is registered hides Add there for good (nothing else ever cleans it: the write
     # pass that would is the one the pref being OFF stops from running). Hardcoded rather than
-    # read from _materialActionSet's %fileOnly, because that only emits 'podcasts-*' while
-    # Podcast::hasFeeds() is true — a user who unsubscribed everything would keep the husks.
+    # read from _materialActionSet's %fileOnly, which used to emit 'podcasts-*' only while the
+    # built-in Podcasts path had a subscribed feed — and since 0.1.136 removed that path does
+    # not emit the pair AT ALL. Either way %fileOnly cannot name the husks that need sweeping,
+    # so the list is stated here.
     my @radioSup = _radioSuppressorCats();
     my @fileOnlySup = qw( podcasts-album podcasts-track );
     my %suppressor = map { $_ => 1 } @radioSup, @fileOnlySup;
@@ -635,8 +640,10 @@ sub _clearMaterialActions {
         $data->{$_} = [] for @ourSuppressors;
         $data->{$_} ||= [] for @radioSup, @fileOnlySup;
         # Write down what we just asserted. THIS is the half that produced the 0.1.103 husks:
-        # the branch CREATES podcasts-* for a user with no subscriptions, a pair no write pass
-        # can emit — so a category written here and not recorded is one the next write cannot
+        # the branch CREATES podcasts-*, a pair no write pass can emit — originally because the
+        # built-in override was gated on a subscribed feed, and since 0.1.136 removed that path
+        # because nothing emits the pair as a POSITIVE at all — so a category written here and
+        # not recorded is one the next write cannot
         # recognise as ours, and therefore can never sweep. Held until the write lands, for the
         # same reason as the write path — a ledger set against a failed write retires the seed.
         $record = { %owned, map { $_ => 1 } @ourSuppressors, @radioSup, @fileOnlySup };
@@ -704,9 +711,11 @@ sub _unsupportedRadioCommands {
 # strip pass just empty it?" (%emptied); the clear pass asked a hardcoded list. Both are
 # guesses, and a category one of them creates is a category the other cannot recognise —
 # which is exactly the podcasts-* case, since the clear path's $live re-assert writes a pair
-# no write pass would ever emit (Podcast::hasFeeds() is false for a user with no
-# subscriptions). No single derived set fixes that, because there is nothing to derive it
-# from: the category is not in %fileOnly, by design.
+# no write pass would ever emit — originally because the built-in override was gated on a
+# subscribed feed, and since 0.1.136 removed that path because nothing emits the pair as a
+# POSITIVE at all; it now exists ONLY as an empty suppressor. No single derived set fixes
+# that, because there is nothing to derive it from: the category is not in %fileOnly, by
+# design.
 #
 # So don't infer it — RECORD it. Both passes read this list, and the rule is simply that
 # whatever LL writes to the file, LL writes down.
@@ -788,11 +797,15 @@ sub _ownSurfaceSuppressorCats {
 #
 # What sits in which set is entirely a function of the tier:
 #
-#   tier 0/1 — %fileOnly holds `track` + `queue-track` (Material resolves those two in the
-#              BROWSER and snapshots them ONCE, off a bus event only the customactions.json
-#              fetch fires — so a registered entry is typically not there yet and never
-#              recovers; 0.1.97) and the `podcasts-*` per-app override (Material tests
-#              `appCat in customActions`, the FILE object alone). @emptyCats is empty because
+#   tier 0/1 — %fileOnly holds `track` + `queue-track`, and since 0.1.136 nothing else
+#              (Material resolves those two in the BROWSER and snapshots them ONCE, off a bus
+#              event only the customactions.json fetch fires — so a registered entry is
+#              typically not there yet and never recovers; 0.1.97). It ALSO held a `podcasts-*`
+#              per-app override (Material tests `appCat in customActions`, the FILE object
+#              alone) until 0.1.136 removed the built-in Podcasts path; that pair is now only
+#              ever written as an empty SUPPRESSOR by the clear path, never emitted as a
+#              positive here, which is exactly why the ownership ledger above must RECORD it
+#              rather than derive it from this set. @emptyCats is empty because
 #              `registerCustomAction` on those Materials takes an action and pushes it, so
 #              "this category exists and is empty" has no spelling at all.
 #   tier 2   — upstream PR #1257 closed all three of those gaps (customactions.js re-emits
@@ -1762,9 +1775,9 @@ sub _wantedList {
 }
 
 # Could you BUY this? The Wish List is for things you mean to buy, and two kinds of row
-# never are: a podcast episode — from ANY of the three sources, which is the whole reason
-# this asks Sources::isPodcastEpisode rather than testing one spelling — and a curated
-# playlist.
+# never are: a podcast episode — from EITHER source that still supplies one, which is the
+# whole reason this asks Sources::isPodcastEpisode rather than testing one spelling — and a
+# curated playlist.
 #
 # ONE carrier for the rule, because it has four consumers and they used to answer it
 # separately: the built-in podcast add (removed 0.1.136) and _savePlaylistRecord each their own
@@ -1779,9 +1792,10 @@ sub _wantedList {
 # offers "Add to Wish List" over rows of every kind and the menu cannot be the guard.
 #
 # THE URL IS NOT OPTIONAL, and leaving it out is how the 0.1.125 fix still missed Spotify.
-# That release made this the one carrier and asked it of (kind, source) — which answers for
-# the two podcast sources that have a source tag of their own and CANNOT answer for the
-# third: Spotty stores an episode under source 'spotify', identical to a music track, and
+# That release made this the one carrier and asked it of (kind, source) — which answered for
+# the podcast sources that HAD a source tag of their own (the built-in 'podcast', removed in
+# 0.1.136, and 'deezerpodcast', which is now the only one left) and CANNOT answer for the
+# other: Spotty stores an episode under source 'spotify', identical to a music track, and
 # says "episode" only in the url. So a Spotify episode went on being Wish-Listable through
 # every one of the four consumers below. Pass the row's play url wherever there is one.
 sub _wishListable {
@@ -1804,11 +1818,22 @@ sub _redirectWishList {
 # The confirmation toast, varying by list and whether it was already present.
 # When it's already saved from a DIFFERENT service, name that service so it's
 # clear why the add was a no-op (e.g. "Already saved from Qobuz").
+#
+# The name goes through Sources::sourceLabel, the ONE carrier for "how is this source spelled
+# to a user", rather than a second ucfirst here. Today the two differ for exactly one source
+# ('deezerpodcast' -> 'Deezer') and that row cannot reach this branch: an episode's key carries
+# its source inside the '|e:<svc>:<url>' tail, so the cross-source findAnyByKey in DB::add can
+# never return one for an add from another service, and the three findTrackByUrl /
+# findByArtistAlbum / findTrackByArtistTitle call sites are all filtered to `source = ?` so
+# their existing source always EQUALS the new one. So this is hygiene, not a live fix — it is
+# here so a future finder that widens its scope cannot reintroduce "Already saved from
+# Deezerpodcast" by inheriting a private spelling.
 sub _addedMsg {
     my ($client, $list, $already, $existingSource, $newSource) = @_;
     if ($already) {
         if ($existingSource && $newSource && lc($existingSource) ne lc($newSource)) {
-            return sprintf(cstring($client, 'PLUGIN_LL_ALREADY_FROM'), ucfirst($existingSource));
+            return sprintf(cstring($client, 'PLUGIN_LL_ALREADY_FROM'),
+                Plugins::ListenLater::Sources::sourceLabel($existingSource));
         }
         return cstring($client, 'PLUGIN_LL_ALREADY');
     }
@@ -2905,8 +2930,11 @@ sub _addCtxCommand {
     #
     # A row with no favurl at all reaches this with $p{favurl} undef and returns immediately,
     # so the check costs such adds nothing. (A feed row in the Podcasts app carries an
-    # https:// RSS url, which names no container ref either — and that add is already
-    # refused one layer down, by resolveEpisode finding no episode.)
+    # https:// RSS url, which names no container ref either. Until 0.1.136 that add was refused
+    # one layer down, by resolveEpisode finding no episode; with the built-in path removed it
+    # is refused TWICE instead — sourceFromUrl answers 'https', which _serviceCan has no arm
+    # for, so _isReplayableSource rejects it, and the Add never renders in the first place
+    # because 'podcasts' sits in @KNOWN_RADIO_CMDS.)
     if (my $kind = Plugins::ListenLater::Sources::unsupportedContainer($p{favurl})) {
         return _rejectAdd($request,
             Plugins::ListenLater::Sources::sourceFromUrl($p{favurl}),
