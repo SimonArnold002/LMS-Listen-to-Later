@@ -249,6 +249,27 @@ subsystem.
 
 ### A2. NOT FINDINGS — Listen Later specific
 
+- **JUDGE MIGRATION REACHABILITY AGAINST WHATEVER `main` SHIPS TODAY — read it, never quote
+  a number from this file.** House rule across all repos (2026-09-10). A rung that only `dev`
+  has ever stamped describes Simon's own install and nothing else, so a defect needing a
+  database at such a height is not a user-facing defect. **THE BASELINE MOVES AT EVERY
+  RELEASE**: the moment `dev` merges to `main`, its ladder height becomes the released one and
+  what was dev-only becomes reachable. Re-read it at the start of every round:
+
+  ```
+  git show main:ListenLater/install.xml | grep -m1 '<version>'
+  git show main:ListenLater/DB.pm | grep -o 'user_version = [0-9]*' | sort -u
+  ```
+
+  Judge the ENTRY POINT the same way — what a released database can be stamped at, and which
+  rungs therefore run on the way up — not the top of the ladder in this tree.
+
+  *Snapshot at 2026-09-10, already stale if a release has happened since:* `main` was 0.1.93,
+  topping out at stamp 4, with no refold rung and no cross-source identity rung. Entering at
+  4, rung 5 refolded every key BEFORE rung 7 grouped anything, so rung 7 never saw a stale
+  key — MEASURED, see the 2026-09-10 round in C. **That conclusion expires with the merge that
+  releases those rungs**; re-measure, do not re-cite it.
+
 - **LL's matcher copy is a deliberately LENIENT, hash-pinned variant**, not drift.
   A saved streaming item replays with EMPTY artist metadata (0.1.66), so an empty
   artist must match. The pins live in
@@ -1085,6 +1106,70 @@ The version history below records review fixes inline (0.1.26, 0.1.32 onward).
 Check it before reporting — the July `%counting`, `classifyRelType` and
 `_verifyRelease` findings are all fixed and verified (`COUNT_STALE_SECS` is the
 escape for the first).
+
+**Review round of 2026-09-10, 0.1.145 — CLOSED, one finding, applied as diagnostics only.**
+(Distinct from the standing-entries sweep of the same date further down this section, which was
+not a review round.)
+Run against the 17-commit `dev` lead over `origin/dev` (0.1.140 → 0.1.145). The tree was
+clean; the code diff was confined to `DB.pm`, `Plugin.pm` and `Sources.pm`.
+
+| # | finding | disposition |
+|---|---|---|
+| 1 | rung 7's summary reported fold-split skips as "mixed-status row(s) left unchanged" | **FIXED** — separate counter, see below. Log wording only, no data effect, and **unreachable from a released install** |
+
+**The finding, and what it actually was.** `_migrateCrossSourceIdentity`'s new fold-split
+guard added its rows to `$skipped`, and the rung's closing `info` called every row in that
+counter mixed-status. So a database whose only skip was a fold split logged *"3 mixed-status
+row(s) left unchanged"* and told the user to merge by hand — rows no two statuses were ever
+involved in, and which the refold rung rekeys moments later. REPRODUCED by driving `_migrate`
+on a seeded v6 database with 中島みゆき/歌姫, サカナクション/新宝島 and Кино/Группа крови all
+on `'||'`: all three survive with distinct keys, `user_version` reaches 9, and the summary
+still said "mixed-status".
+
+**The fix is ONE COUNTER PER CAUSE, and the summary names the cause it counts.** `$split` is
+now separate from `$skipped`, the `info` line joins only the clauses that are non-zero, and
+neither clause claims what a LATER rung will do with a row — a failed group here withholds
+the stamp, and the refold rung then waits rather than running, so any such promise would be a
+lie in exactly the case that matters. If a third reason to leave a row alone ever appears in
+this rung, give it a third counter; a counter here is one CAUSE, not "rows untouched".
+
+**Carriers checked, and the two left alone deliberately:**
+
+| carrier | verdict |
+|---|---|
+| `_migrateRefold`'s `$skipped` (mixed-status-stuck + merge failure) | LEFT — its summary says "left on the old key", which is true of both causes. Not the same defect |
+| the live backfill warn in `update()` ("left unchanged") | LEFT — it sits inside a genuine `keys %status > 1` branch |
+| tests, docs, `CLAUDE.md` | no assertion or document quoted the old string |
+
+**REACHABILITY — why this was dev-only.** Simon raised it during the round and it is the
+reason the finding is diagnostics-grade rather than user-facing. Released `main` was 0.1.93 AT
+THE TIME OF THIS ROUND, stamping at most 4 — a baseline that moves at every release, so this
+paragraph is a record of what was true on 2026-09-10, not a standing fact. A database entering at 4 is refolded by rung 5 first, so its non-Latin
+rows are split into distinct keys BEFORE rung 7 groups anything; rung 7 then finds no shared
+key and logs nothing at all. MEASURED both ways: entry at 6 fires the guard, entry at 4 does
+not, and in neither case is a row lost. The only rows rung 5 can strand on an old key are
+mixed-status ones on a single service, and those land in rung 7's mixed-status branch, where
+the wording was already correct. Recorded as a standing rule in A2 above.
+
+**Cleared under verification, not by reading** (do not re-derive these):
+
+- **The 0.1.143 refold is a PURE SPLIT.** 82k distinct inputs over an alphabet mixing ASCII,
+  punctuation, accented Latin, CJK, Cyrillic and daggers: ZERO cases where two previously
+  distinct old keys collapse onto one new key. The underscore-before-hyphen ordering holds
+  for `01_-_Intro`, `Artist_-_Album`, `under_score` and `M_A_N_D_Y`.
+- **The missing `ESCAPE` on `findSavedTrack` / `findTrackByArtistTitle` is safe.** 250k
+  fuzzed inputs through `DB::_norm`, including raw random byte strings: no output ever
+  contained `%`, `_` or `|`, on the main path or the all-punctuation fallback.
+- **`add()`'s nameless-track `|u:` re-key cannot duplicate.** The second `findAnyByKey`
+  blocks a third row, `_keyForRow`'s `(\|[eu]:.*)$` tail cannot be forged because `|` never
+  survives `_norm`, and delete-then-re-add is caught by `_insertTrackRow`'s `findTrackByUrl`
+  guard first.
+- **`_albumMatches`' short-title branch** is strictly stricter than the `return 0` it
+  replaced. Its one soft spot — a candidate whose own artist is empty passes `_artistMatch` —
+  is a VERBATIM copy of `LMS-Discography/Discography/Sources.pm` and matches the normal
+  path's existing behaviour. Fixing it locally would break the matcher sync. Not a regression,
+  do not re-raise.
+- Full suite green throughout: 15 suites, 1562 assertions, 0 failures.
 
 **Round of 2026-09-03 — CLOSED, all four findings dispositioned.** Run against
 the 0.1.113 tree (Spotify support). Recorded here as a round because the
@@ -2003,8 +2088,9 @@ keys with a genuine collision in them, and the Bandcamp octets path, which needs
 Bandcamp album with no stored album url. Both are covered by the suite and, for Bandcamp, by a
 live measurement against the server.
 
-**State at close**, so the next review can tell what it is looking at: 0.1.145 in `install.xml`
-and `repo.xml`, zip rebuilt with `<sha>` equal to it, README regenerated to match, 15/15 suites
+**State at close**, so the next review can tell what it is looking at: **0.1.146** in
+`install.xml` and `repo.xml` (0.1.145 plus the review round below, which changed a log line and
+nothing else), zip rebuilt with `<sha>` equal to it, README regenerated to match, 15/15 suites
 green at 1,562 assertions, and the live build on the server verified as the RUNNING module rather
 than the version on disk. Bandcamp was exercised end to end against it — an add, a resolve to a
 full tracklist, and a Buy link to the real album page. Commits sit on `dev` UNPUSHED, which is the
@@ -5281,6 +5367,28 @@ The "Add to Listen Later"/"Add to Wish List" custom actions appear on streaming 
   passing a favurl, and `length $mine && length $their` could be deleted with all 15 suites
   green. What it prevents is a `|u:` key built around an EMPTY url. Five new assertions in
   `t_addpath.pl` (1,452 → 1,457), each shown red against the code with its guard removed.
+
+- **0.1.146 — the 2026-09-10 review round: one finding, DIAGNOSTICS ONLY. No behaviour
+  change, no rung, no cache bump (nothing in the tree carries a `CACHE_VER` since the podcast
+  path went in 0.1.136).**
+  `_migrateCrossSourceIdentity` counted its new fold-split skips into `$skipped`, whose summary
+  called every row in it mixed-status — so a database whose only skip was a fold split logged
+  *"3 mixed-status row(s) left unchanged"* about rows no two statuses were ever involved in, and
+  which the refold rung rekeys moments later. REPRODUCED by driving `_migrate` on a seeded v6
+  database (中島みゆき/歌姫, サカナクション/新宝島, Кино/Группа крови, all on `'||'`), and
+  confirmed against a mixed-status CONTROL that must keep the old wording.
+  **Fix: one counter per cause.** `$split` is separate from `$skipped`, the `info` line joins
+  only its non-zero clauses, and no clause claims what a LATER rung will do — a failed group
+  here withholds the stamp and the refold rung then waits, so such a promise would be a lie in
+  exactly the case that matters. A third skip reason gets a THIRD counter; a counter here is one
+  cause, not "rows untouched".
+  **Reachability, and why this is dev-only TODAY.** Released `main` was 0.1.93 at the time,
+  stamping at most 4, so a released database is refolded by rung 5 before rung 7 groups anything
+  and the guard never fires — MEASURED at entry 4 and entry 6, no row lost either way. **That
+  verdict expires at the merge that releases these rungs.** The standing rule is in §A2: read the
+  baseline off `main` every round, never quote a remembered number.
+  Also in this build: the round written up in §C, and §A2's new reachability rule. Suite
+  unchanged and green — 15 suites, 1,562 assertions.
 
 - **0.1.145 — LL takes the two fleet matcher rules it never received. MATCHER ONLY; nothing
   here is persisted, so no rung and no cache bump.**

@@ -639,7 +639,15 @@ sub _migrateCrossSourceIdentity {
     my %group;
     push @{ $group{ $_->{dedupe_key} // '' } }, $_ for @$rows;
 
-    my ($merged, $skipped, $failed) = (0, 0, 0);
+    # ONE COUNTER PER REASON, AND THE SUMMARY NAMES THE REASON IT COUNTS. $skipped used to
+    # carry both of these and the summary called all of them 'mixed-status', so a database
+    # whose only skip was a fold split told the user to merge by hand rows that no two
+    # statuses were ever involved in — and that the refold rung fixes moments later. If a
+    # third reason to leave a row alone ever appears here, give it a third counter rather
+    # than borrowing one of these; a counter here is not 'rows untouched', it is one cause.
+    # (Named $foldSplit, not $split: the guard below uses a lexical %split hash. Perl keeps
+    # the two apart by sigil, a reader does not.)
+    my ($merged, $skipped, $foldSplit, $failed) = (0, 0, 0, 0);
   GROUP:
     for my $g (grep { @$_ > 1 } values %group) {
         # PARTITION BY STATUS — never skip the whole group on one dissenter. The documented
@@ -686,7 +694,7 @@ sub _migrateCrossSourceIdentity {
             # because it holds however the rungs are ordered and on every later retry.
             my %split = map { ( _keyForRow($_) => 1 ) } @$u;
             if (keys %split > 1) {
-                $skipped += @$u;
+                $foldSplit += @$u;
                 $log->warn('Listen Later: cross-source identity repair will not merge rows '
                     . 'the current fold tells apart ('
                     . join(', ', map { "id $_->{id} [" . ($_->{artist} // '?') . ' / '
@@ -709,8 +717,16 @@ sub _migrateCrossSourceIdentity {
         }
     }
 
-    $log->info("Listen Later: cross-source identity repair — $merged duplicate(s) merged, "
-        . "$skipped mixed-status row(s) left unchanged") if $merged || $skipped;
+    # Every row counted below has already been warned about individually, with its ids and
+    # its cause, so the summary states only what this rung DID — no clause claims what a
+    # later rung will do with a row, because a failed group here withholds the stamp and the
+    # refold rung then waits instead of running.
+    $log->info('Listen Later: cross-source identity repair — '
+        . join(', ', "$merged duplicate(s) merged",
+            ($skipped ? "$skipped mixed-status row(s) left unchanged" : ()),
+            ($foldSplit ? "$foldSplit row(s) left unmerged, the current fold tells them apart"
+                        : ())))
+        if $merged || $skipped || $foldSplit;
     return $failed ? 0 : 1;
 }
 
