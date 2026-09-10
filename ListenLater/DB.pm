@@ -1157,6 +1157,19 @@ sub trackUrlKey {
 # empty artist, empty album, empty year. Deliberately strict — a key with any of the three
 # filled in is a real name and its collisions are real duplicates, which is what the
 # cross-source dedupe exists to catch.
+#
+# THIS BRANCH IS ALL BUT UNREACHABLE, AND THAT IS THE POINT — do not report a defect in what it
+# does without first naming a WRITER that can produce the shape. No service checked produces a
+# track with an empty artist (a Qobuz browse row carries "Title\nArtist - Album"), the add gate
+# in Plugin::_saveTrackRecord requires only source + play url + TITLE so an artist is optional
+# THERE and the search tends to stop at that gate, and the two handlers that genuinely answer no
+# artist — lms-deezer's PodcastProtocolHandler (no artist key, ever) and Spotty on an episode
+# with no artists ('') — are EPISODES, routed to episodeKey's '|e:' tail by isPodcastEpisode and
+# never seen here. Until 0.1.143 the fold manufactured the shape out of any non-Latin name
+# (米津玄師 -> ''), which is the only reason it ever looked common; that is fixed above.
+# Two findings against this branch were retracted on exactly this point — see the 2026-09-10
+# entry in CLAUDE.md's Review Ledger. A direct DB::add call with artist => '' proves the branch,
+# not the population.
 sub _keyIsNamelessTrack { return (($_[0] // '') =~ m{^\|\|\|t:}) ? 1 : 0 }
 
 # THE ONE PLACE A CURRENT-FORMAT ROW'S KEY IS DECIDED. Every current writer goes through here

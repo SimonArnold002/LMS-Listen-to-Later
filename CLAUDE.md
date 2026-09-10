@@ -201,6 +201,65 @@ a DELETED implementation can only mask its absence, never catch it (fleet rule).
 the same 214 assertions with and without them, which is what proved they were dead. (That count
 was current at 0.1.140. The suite has grown since — do not re-run it expecting 214.)
 
+### 2026-09-10 review (0.1.146) — two `|u:` findings RETRACTED: the branch is real, the INPUT is not
+
+A review round raised two findings against the new `DB::trackUrlKey` disambiguation. **Both are
+withdrawn**, and not because the analysis of the branch was wrong — it was right about what the
+code does once it runs. Neither finding established that anything can make it run. Do not
+re-report either; the reachability analysis below is the answer.
+
+**The two findings, stated so the next round recognises them:**
+
+- *"The nameless-track disambiguation re-keys on the play url, which always differs between
+  services, so the same artist-less track saved from Qobuz then Tidal stores two rows instead of
+  deduping — it drops the cross-source dedupe contract stated ten lines above."*
+- *"`findSavedTrack` and `findTrackByArtistTitle` anchor their LIKE pattern on a `|t:<title>`
+  suffix, so a row re-keyed to a `|u:<svc>:<url>` tail is invisible to both, and a played track
+  reporting no artist and no album marks the wrong row."*
+
+**Both need a track with an EMPTY artist, album AND year, and no surface produces one.**
+`_keyIsNamelessTrack` is strict `^\|\|\|t:` — all three segments empty. Three independent
+reasons that shape cannot be reached by a music track:
+
+- **The only real generator was the FOLD, and it is fixed in this same diff.** Until 0.1.143
+  `_norm` deleted every non-Latin character, so 米津玄師 or Кино produced `|||t:<title>` while
+  the RECORD carried a perfectly good artist. That is why the nameless shape looked common
+  enough to be worth code. It was a key bug, not a metadata one, and 0.1.143 closes it — see the
+  `_norm` header and the entry at "THE `|u:` KEY IS DELIBERATE" below.
+- **The two genuine empty-artist producers are podcast handlers, and they route elsewhere.**
+  lms-deezer's `PodcastProtocolHandler` has NO artist key, ever; Spotty answers `''` when an
+  episode lists no artists. Both are episodes, so `Sources::isPodcastEpisode` sends them to
+  `DB::episodeKey` and the `|e:` tail. They never reach the track key at all.
+- **The ledger already said so and the user already declined it.** The "A TRACK ROW'S IDENTITY IS
+  ITS PLAY URL AT THE ADD END TOO (0.1.129)" entry records that the case "needs a track with no
+  artist at all, which no service checked produces (a Qobuz browse row carries
+  `Title\nArtist - Album`)", and the user's decision of 2026-09-04 — *"the chances of that is
+  very slight to occur"*. **The 0.1.141 fix superseded the DECLINED VERDICT, not the population
+  argument.** That wording is now corrected at the entry itself, because reading "superseded" as
+  covering both is exactly how this round got here.
+
+**THE METHOD ERROR, which is the transferable half.** Both findings were called *measured*, and
+both measurements were real: `DB::add` was invoked directly with `artist => ''` and it did insert
+a second row. **A hand-built input proves the BRANCH, never the POPULATION.** Nothing upstream
+contradicted it either — the add gate in `_saveTrackRecord` requires only a replayable source, a
+play url and a title, so an artist is genuinely optional *at that gate* and the search stopped
+there. **Before reporting a defect in a guarded branch, find the writer that reaches it**: name a
+surface, or say in the finding that you could not. This is the producing-end twin of the existing
+"assert at the layer the fix lives" rule.
+
+**What is NOT settled by this entry, and is the only live question from the round:** whether
+`trackUrlKey` should exist at all. It is new code on a UNIQUE column — this repo's most expensive
+bug class — written for a population the same diff's fold fix removes the last mechanism for.
+That is a SCOPE question for the user, not a correctness finding, and it is open.
+
+**Two comment claims the round flagged, recorded so they are not re-raised as defects.** Both are
+accurate observations about comments, neither is a code defect:
+
+| claim | status |
+|---|---|
+| `_norm`'s "THE NEW FOLD IS A PURE SPLIT" does not hold for the 8→9 re-entry — collisions ARE reachable there | true; `_migrateRefold` handles them, so the property is narrower than the comment states, not absent |
+| a released database below rung 5 runs `_migrateRefold` twice per upgrade, not "one pass either way" | true; wasted work on a one-off upgrade path, not a wrong result |
+
 ### Identity: what Played actually matches on — READ THIS BEFORE ANY NAMING CHANGE
 
 Four review rounds re-derived this per service and got it wrong in a different way each time.
@@ -248,6 +307,44 @@ subsystem.
   two rules above.
 
 ### A2. NOT FINDINGS — Listen Later specific
+
+- **AN ARTIST-LESS MUSIC ROW DOES NOT EXIST, ON EITHER SIDE OF ANY COMPARE — DECLINED FOR THE
+  THIRD TIME (Simon, 2026-09-10). Podcast episodes are the ONLY exception and they route
+  elsewhere.** *"empty artists do not exist, if they did we just don't add, we need an artist
+  field, unless its a podcast."* Two earlier rounds declined this on the RECORD side (the
+  `|||t:` nameless key, §2026-09-10 above and "A TRACK ROW'S IDENTITY IS ITS PLAY URL AT THE
+  ADD END TOO" in §C). The 0.1.146 round found it a third door — the CANDIDATE side of the new
+  0.1.145 short-title branch in `_albumMatches` — and that door is closed by the same argument.
+  **State the rule once, for every door:**
+
+  - **CANDIDATE side (`$candArtist`, the service's answer).** All five branches derive it from
+    an ALBUM SEARCH result: Qobuz `$a->{artist}{name}`, TIDAL/Deezer `$a->{artist} ||
+    $a->{artists}[0]`, Spotty `spottyArtistName`, MAI `$pt->{artist}`. Every one of the four
+    services credits an artist on an album — the `''` in `ref $a->{artist} eq 'HASH' ? … : ''`
+    is a SHAPE default against a malformed response, not a population. No service surface
+    returns an artist-less album.
+  - **RECORD side (`$artistNorm`, our stored row).** Declined twice already; the only generator
+    was the pre-0.1.143 fold erasing non-Latin names, and that is fixed.
+  - **PLAYING side (`Played`).** Already strict on its own: `_albumFallback` returns undef
+    unless both sides carry an artist.
+  - **The 0.1.146 finding needed BOTH non-populations at once** — a saved album whose title
+    normalises under 2 characters (`( )`) AND a service row for it with a missing artist shape.
+    A compound of two things that do not happen is not a defect. **RETRACTED.**
+
+  **`_artistMatch`'s `return 1 unless length $a && length $b` STAYS**, and reading it as the
+  bug is the mistake this entry exists to stop. It is the 0.1.66 replay leniency, pinned; with
+  no artist-less writer on either side it can only ever be reached by a malformed response,
+  where accepting is the same answer the branch gave before the guard was written.
+
+  **THE ADD GATE IS NOT GOING TO ENFORCE IT, AND THAT IS SETTLED (Simon, 2026-09-10).**
+  `_saveTrackRecord` requires source + play url + TITLE only, so "we need an artist field" is a
+  property of the SERVICES, not a rule LL applies. Adding an artist requirement was RAISED IN
+  THE SAME BREATH AS THE RULE AND IMMEDIATELY WITHDRAWN by Simon — *"no dont change that, that
+  was just my assumption"*. **The rule above describes what arrives; it was never a spec for
+  the gate.** So the gate's leniency is NOT a gap, NOT deferred and NOT a finding: there is
+  nothing to enforce against, because nothing artist-less arrives to be rejected. Do not
+  propose the gate change, and do not cite this entry's own rule as the reason to.
+
 
 - **JUDGE MIGRATION REACHABILITY AGAINST WHATEVER `main` SHIPS TODAY — read it, never quote
   a number from this file.** House rule across all repos (2026-09-10). A rung that only `dev`
@@ -442,9 +539,14 @@ subsystem.
   finding. Pinned as a limitation in `t_addpath.pl`; it would only be worth a migration rung if
   artist-less track rows turn out to be common in the field, which nothing suggests.
   **FIXED 2026-09-10, and WITHOUT the migration rung this entry said it owed. Read this before
-  proposing a key change anywhere else in the file.** The declined verdict above is superseded;
-  the reasoning is kept because the population argument still holds and is why this was not
-  urgent.
+  proposing a key change anywhere else in the file.** **ONLY THE DECLINED VERDICT IS SUPERSEDED.
+  THE POPULATION ARGUMENT ABOVE STILL HOLDS IN FULL** — no service checked produces a track with
+  no artist at all, and since 0.1.143 the fold no longer manufactures one out of a non-Latin
+  name either, so the empty-artist generator that made this look reachable is GONE. The fix
+  shipped because it was cheap and lazy, not because the case became reachable.
+  **A finding against the `|u:` branch therefore needs a WRITER named, not just the branch
+  traced** — two were raised and retracted on exactly this in the 2026-09-10 round; see that
+  ledger entry before reporting a third.
 
   **What made it look expensive was assuming the fix had to be a KEY SHAPE.** Re-keying every
   track row on its url would indeed owe a rung on a UNIQUE column — this repo's most expensive
@@ -2088,11 +2190,13 @@ keys with a genuine collision in them, and the Bandcamp octets path, which needs
 Bandcamp album with no stored album url. Both are covered by the suite and, for Bandcamp, by a
 live measurement against the server.
 
-**State at close**, so the next review can tell what it is looking at: **0.1.146** in
-`install.xml` and `repo.xml` (0.1.145 plus the review round below, which changed a log line and
-nothing else), zip rebuilt with `<sha>` equal to it, README regenerated to match, 15/15 suites
-green at 1,562 assertions, and the live build on the server verified as the RUNNING module rather
-than the version on disk. Bandcamp was exercised end to end against it — an add, a resolve to a
+**State at close**, so the next review can tell what it is looking at: **0.1.147** in
+`install.xml` and `repo.xml` (0.1.146 plus a ledger entry and ONE comment moved back onto
+`_albumMatches` — no executable change at all), zip rebuilt with `<sha>` equal to it, 15/15 suites
+green at 1,562 assertions. **README/CHANGELOG deliberately NOT regenerated** — this is a dev
+build, and those are merge-to-`main` artifacts. The 0.1.146 note about verifying the RUNNING
+module still applies to any build that changes behaviour; this one does not, so it was not
+re-verified on the server. Bandcamp was exercised end to end against it — an add, a resolve to a
 full tracklist, and a Buy link to the real album page. Commits sit on `dev` UNPUSHED, which is the
 review gate and not an oversight.
 
@@ -5367,6 +5471,30 @@ The "Add to Listen Later"/"Add to Wish List" custom actions appear on streaming 
   passing a favurl, and `length $mine && length $their` could be deleted with all 15 suites
   green. What it prevents is a `|u:` key built around an EMPTY url. Five new assertions in
   `t_addpath.pl` (1,452 → 1,457), each shown red against the code with its guard removed.
+
+- **0.1.147 — the empty-artist finding RETRACTED for the third time, and a comment moved back
+  onto the sub it describes. DOCS + ONE COMMENT. No behaviour change, no rung, no cache bump.**
+  The 0.1.146 review round raised the artist gate in `_albumMatches`'s new short-title branch:
+  the branch rejects an empty artist on OUR side but `_artistMatch` answers 1 whenever either
+  side is empty, so a candidate with no artist would pass. **True about the branch, false about
+  the world.** Simon: *"empty artists do not exist … we need an artist field, unless its a
+  podcast"*, and then, of enforcing that at the add gate, *"no dont change that, that was just
+  my assumption"*. Both halves are now in §A2 — the rule, and the fact that it is NOT a spec for
+  `_saveTrackRecord`.
+  **What made this the third round on one non-population:** the two earlier declines were both
+  written about the RECORD side (our stored row), so a finding about the CANDIDATE side (the
+  artist a service returns) read as new ground. It is not. All five branches take the candidate
+  artist from an ALBUM SEARCH result and every service credits an artist on an album; the `''`
+  in `ref $a->{artist} eq 'HASH' ? … : ''` is a shape default against a malformed response. The
+  finding also needed a saved album normalising under 2 characters AT THE SAME TIME. The §A2
+  entry is therefore written per-SIDE — candidate, record, playing — so the next round cannot
+  find a fourth door.
+  **The one real change:** inserting `_punctNorm` at 0.1.145 stranded `_albumMatches`'s contract
+  line ("Candidate title must BE or START WITH our album, and artists must match") on top of
+  `_punctNorm`, leaving `_albumMatches` with no header and pointing `_punctNorm`'s "the branch
+  below" two subs away. Comment moved back; `_punctNorm` now names the branch it serves.
+  15/15 suites green at 1,562 assertions, unchanged — a comment move cannot move a count, which
+  is the whole reason this build carries no new assertion.
 
 - **0.1.146 — the 2026-09-10 review round: one finding, DIAGNOSTICS ONLY. No behaviour
   change, no rung, no cache bump (nothing in the tree carries a `CACHE_VER` since the podcast

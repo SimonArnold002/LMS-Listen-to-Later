@@ -1638,11 +1638,11 @@ sub _norm {
     return $s;
 }
 
-# Candidate title must BE or START WITH our album, and artists must match.
 # Lowercase and strip whitespace, KEEPING every mark. Copied verbatim from the fleet
-# (0.1.145) as the escape hatch for the branch below. It is not a third normaliser competing
-# with _norm/_normStrict — it is only ever reached when those two have answered (near)
-# nothing, and it deliberately does no folding at all, because the marks ARE the name there.
+# (0.1.145) as the escape hatch for `_albumMatches`'s short-title branch below. It is not a
+# third normaliser competing with _norm/_normStrict — it is only ever reached when those two
+# have answered (near) nothing, and it deliberately does no folding at all, because the marks
+# ARE the name there.
 sub _punctNorm {
     my $s = shift // '';
     if (!utf8::is_utf8($s) && $s =~ /[^\x00-\x7f]/) {
@@ -1654,6 +1654,7 @@ sub _punctNorm {
     return $s;
 }
 
+# Candidate title must BE or START WITH our album, and artists must match.
 sub _albumMatches {
     my ($artistNorm, $albumNorm, $candArtist, $candTitle, $albumRaw) = @_;
 
