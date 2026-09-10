@@ -435,6 +435,36 @@ subsystem.
   Both now ask `DB::add` directly and assert the ANSWER — id and already-saved flag — not the row
   count. **When a fix lives in a lower layer, assert at that layer**: a pass through the command
   path can be produced by any of the three guards above it.
+- **THE `|u:` KEY IS DELIBERATE AND OWES NO MIGRATION RUNG — SETTLED 0.1.141, and both of the
+  obvious findings against it were considered first.** A nameless track key (`|||t:<title>`:
+  no artist, no album, no year) cannot prove a duplicate, so two different songs sharing a title
+  used to collapse into one row. `DB::add` now rebuilds such a key as
+  `trackUrlKey` — `|<title>||u:<svc>:<url>` — but **only at the moment two rows actually
+  collide**, and only when both carry a play url and those urls differ.
+  - **"This changes a UNIQUE column, so it owes a rung" — no.** Nothing already stored is
+    rewritten. The row in the database keeps `|||t:<title>` for ever; the `|u:` shape appears
+    only on the SECOND row, which did not exist at all before the fix. That is the entire reason
+    the disambiguation is lazy and lives in `add()` rather than in `_keyForRow`. Pinned by an
+    assertion that reads the first row's key back unchanged.
+  - **"Then key EVERY track on its url, like an episode" — no, that is a regression.** Two
+    services' rows for the same song dedupe on the name today, and that is a feature. A key
+    carrying any name at all is untouched, which is what keeps it.
+  - **`|u:` is an identity tail like `|e:` and `|p:`,** so `_keyForRow` prefers a stored one over
+    a rebuild: a later artist backfill cannot re-key such a row into its twin, and the refold
+    migration refolds the TITLE segment around it. Pinned in `t_refold.pl` at `_keyForRow`
+    directly, because `updateArtist`'s callers only make album rows today — the guard exists for
+    the first caller that is not.
+  - **A nameless track with no url keeps the OLD behaviour on purpose** — there is nothing better
+    to key on, and treating it as a duplicate is the safer of two guesses.
+  - **`_keyIsNamelessTrack` is strict (`^\|\|\|t:`) on purpose.** A key with an artist, an album
+    or even a year in it is a real name, and its collisions are real duplicates.
+
+  **If you are re-raising any of this, the discriminating tests are in `t_addpath.pl` and they
+  ask `DB::add` DIRECTLY** — through the add command an artist-bearing track never reaches it
+  (`_insertTrackRow`'s guard catches it first) and a colliding INSERT dies on the UNIQUE
+  constraint inside an eval. Both of those made an earlier draft of those assertions pass against
+  a build with the fix removed. See the 2026-09-10 round in §C.
+
 - **A TIDAL `mix:` is refused, and that is NOT a claim that mixes are unaddable — it is that
   TIDAL keeps them off the playlist call.** `Plugins::TIDAL::Plugin::getPlaylist` takes
   `$params->{uuid}` and calls `$api->playlist`; `getMix` takes `$params->{id}` and calls
@@ -1701,6 +1731,14 @@ described playlist support as absent when it shipped at 0.1.107, and
 `material-online-custom-actions-proposal.md` said the feature was in no released Material when it
 shipped in 6.4.4. All three now carry a STATUS line marking them records rather than work orders,
 and the three PR drafts say which PR merged into which Material release.
+
+**CLOSED at 0.1.141 (2026-09-10).** State at close, so the next review can tell what it is
+looking at: version bumped in both carriers, zip rebuilt, `repo.xml <sha>` recomputed and equal
+to it, 15/15 suites green (t_addpath 232, t_material_actions 262, t_podcast_purge 45, t_refold
+119). Two commits on `dev`, UNPUSHED — the review gate, not an oversight. **The code this round
+touched is new, so expect it to attract findings; the four most likely are answered in §A2 above
+under the `|u:` key entry, in §B under the purge guard, and in §A2 under `%ours`/`favorites-*`.**
+Cite one of those entries and what is new about your case, or the round trip is wasted.
 
 ### D. ADDING TO THIS LEDGER
 
