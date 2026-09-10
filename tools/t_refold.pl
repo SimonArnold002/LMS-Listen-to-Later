@@ -292,12 +292,30 @@ section('3e. A TITLE THAT NORMALISES TO NOTHING — the escape hatch LL never to
        !$al->(srcn(u("\x{4e2d}\x{5cf6}\x{307f}\x{3086}\x{304d}")), srcn($cjk),
               u("\x{4e2d}\x{5cf6}\x{307f}\x{3086}\x{304d}"), u("\x{6b4c}"), $cjk));
 
-    # THE ARTIST GATE IS MANDATORY HERE, unlike everywhere else in LL. A match this thin
-    # cannot stand on the title alone.
+    # THE ARTIST GATE IS MANDATORY ON OUR SIDE ONLY. Assert BOTH sides, because asserting
+    # the record side alone is what let the comment read as a promise about the candidate
+    # side too — and four review rounds reported the gap as a bug.
     ok('...and rejects a different artist',
        !$al->(srcn('Sigur Ros'), srcn('( )'), 'Other Band', '( )', '( )'));
     ok('...and refuses an EMPTY artist, where the normal path would accept',
        !$al->('', srcn('( )'), 'Anyone', '( )', '( )'));
+
+    # THE CANDIDATE SIDE IS DELIBERATELY NOT GATED — DECLINED FOUR TIMES (Simon, 2026-09-10).
+    # `_artistMatch` answers 1 when either side is empty, so an artist-less CANDIDATE is
+    # accepted on the title alone. Pinned as a test so the next round finds a DECISION here
+    # rather than an apparent contradiction. Flipping to the fleet's strict variant turns
+    # these two red; that is the intended tripwire, not a regression to fix.
+    ok('an artist-less CANDIDATE is accepted here (0.1.66 leniency, pinned)',
+       $al->(srcn('Sigur Ros'), srcn('( )'), '', '( )', '( )'));
+    ok('...and so is an undef one, which is what the TIDAL/Deezer `|| {}` default yields',
+       $al->(srcn('Sigur Ros'), srcn('( )'), undef, '( )', '( )'));
+
+    # The branch is ORDINARY, correcting the ledger's "( )"-only example: these are four
+    # Ed Sheeran albums and a Beyonce one. Only the artist-less candidate is the rarity.
+    for my $t ('x', "\x{f7}", '=', '-', '4') {
+        ok("a real one-character title enters the branch: '" . u($t) . "'",
+           length(srcn(u($t))) < 2);
+    }
     ok('THE CONTROL: the normal path still accepts an empty artist (0.1.66 replay)',
        $al->('', srcn('Open Soul'), 'Anyone', 'Open Soul', 'Open Soul'));
 

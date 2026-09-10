@@ -304,5 +304,35 @@ ok('the purge warn names the version the ladder stamped, not the entry value',
 is('...and that is the version actually left on the database',
    ($h->selectrow_array('PRAGMA user_version'))[0], 5);
 
+section('the report is readable text, not mojibake');
+# The handle writes CHARACTERS (':encoding(UTF-8)'), and row values arrive already decoded
+# because dbh() sets sqlite_unicode. The module's OWN literals do not: DB.pm has no `use
+# utf8`, so a literal em dash there is three octets that the layer encodes a second time and
+# the first line of the user's only recovery record reads 'Listen Later â<80><94> podcast
+# rows removed'. Hence \x{2014} in _writePurgeReport. The suite could not see it before
+# because every assertion here was ASCII, and a double-encoded file is still VALID UTF-8, so
+# reading it back succeeds and only the eye catches the damage.
+# ANTI-TEST: put the literal dash back in _writePurgeReport and 2 go red (the dash is
+# missing, the mojibake is present) while the CJK assertion stays green — which is the split
+# that says the layer was never the problem, only the literals.
+$h->do('DELETE FROM albums');
+$h->do('PRAGMA user_version = 5');
+unlink $report;
+# Written as escapes so this file needs no `use utf8` either: a character string in, a
+# character string back out of SQLite, and the same characters in the report.
+my $show  = "\x{7C73}\x{6D25}\x{7384}\x{5E2B}";           # a CJK show name
+my $title = "\x{041A}\x{0438}\x{043D}\x{043E} \x{2014} 1";  # Cyrillic + a real em dash
+seed(source=>'podcast', album=>$show, track=>$title, key=>'|cjk||t:cjk',
+     ref=>'{"url":"podcast://cjk"}');
+$DB->can('_migrate')->($h);
+my $enc = do { open my $fh, '<:encoding(UTF-8)', $report or die $!; local $/; <$fh> };
+is('the header em dash survives as one character',
+   (($enc =~ /Listen Later \x{2014} podcast/) ? 'y' : 'n'), 'y');
+is('...and is NOT double-encoded',
+   (($enc =~ /\x{00E2}\x{0080}\x{0094}/) ? 'mojibake' : 'clean'), 'clean');
+is('a CJK show name from the DB is intact', (($enc =~ /\Q$show\E/) ? 'y' : 'n'), 'y');
+is('...as is a Cyrillic track title carrying its own em dash',
+   (($enc =~ /\Q$title\E/) ? 'y' : 'n'), 'y');
+
 printf "\n%d passed, %d failed\n", $pass, $fail;
 exit($fail ? 1 : 0);

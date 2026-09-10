@@ -449,13 +449,19 @@ sub _writePurgeReport {
     my ($rows) = @_;
     my $path = _reportPath();
     my $ok = eval {
+        # The layer encodes CHARACTERS. Row values arrive decoded (the handle sets
+        # sqlite_unicode), but this file has no `use utf8`, so a non-ASCII literal HERE is
+        # octets and would be encoded a second time (an em dash rendered as three
+        # mojibake characters). Hence \x{2014} rather than a literal dash. Do NOT fix this
+        # by adding `use utf8` to the module: that would also reclassify every log literal
+        # below into wide characters bound for a log handle whose layer we do not control.
         open my $fh, '>:encoding(UTF-8)', $path or die "$path: $!\n";
-        print $fh "Listen Later — podcast rows removed by the 0.1.136 upgrade\n";
+        print $fh "Listen Later \x{2014} podcast rows removed by the 0.1.136 upgrade\n";
         print $fh "Built-in Podcasts-app support was removed; these rows could no longer be\n"
                 . "played, so they were deleted. Re-add anything you still want by hand.\n\n";
         for my $r (sort { ($a->{added_at} || 0) <=> ($b->{added_at} || 0) } @$rows) {
             my @when = localtime($r->{added_at} || 0);
-            printf $fh "[%s] %s — %s%s\n    url: %s\n    added: %04d-%02d-%02d\n\n",
+            printf $fh "[%s] %s \x{2014} %s%s\n    url: %s\n    added: %04d-%02d-%02d\n\n",
                 ($r->{status}   // 'later'),
                 ($r->{album_title} // '(no show)'),
                 ($r->{track_title} // '(no title)'),

@@ -1666,10 +1666,28 @@ sub _albumMatches {
     # Compare a punctuation-PRESERVING form instead: "( )" == "()" but != "( ) (live)".
     # EXACT equality only — the prefix rule below would let "x" swallow "xx".
     #
-    # THE ARTIST GATE IS MANDATORY HERE, and that is not a contradiction of LL's leniency
-    # elsewhere: the fleet's stated reason is that a match this thin cannot stand on the title
-    # alone. LL's `return 1 unless length $artistNorm` replay path (0.1.66) is untouched and
-    # still applies to every normal title below.
+    # THE ARTIST GATE IS MANDATORY ON OUR SIDE ONLY, AND THAT ASYMMETRY IS DELIBERATE.
+    # Say it precisely, because saying "the artist gate is mandatory here" (0.1.145–0.1.147)
+    # read as a promise the next line does not keep, and FOUR review rounds reported the
+    # difference as a bug. `return 0 if !defined $artistNorm || $artistNorm eq ''` enforces the
+    # RECORD side. The CANDIDATE side is then handed to `_artistMatch`, which answers 1 when
+    # EITHER side is empty — so a candidate with no artist is accepted on the title alone.
+    # That is not an oversight in the port; it is LL's 0.1.66 replay leniency, pinned.
+    #
+    # DECLINED FOUR TIMES (Simon, 2026-09-10) — do not report it a fifth. The reason is a fact
+    # about the SERVICES, not about this branch: every album search credits an artist, so the
+    # `''` in `ref $a->{artist} eq 'HASH' ? … : ''` at all five call sites is a SHAPE default
+    # against a malformed response, not a population. Tightening to the fleet's strict variant
+    # would change nothing real and would cost the replay leniency. The full per-side argument
+    # is in CLAUDE.md §A2 "AN ARTIST-LESS MUSIC ROW DOES NOT EXIST"; t_refold.pl §6 asserts
+    # this branch's behaviour so the decision is a test, not just prose.
+    #
+    # WHAT IS *NOT* RARE, correcting the ledger's own example: the entry called a saved title
+    # normalising under 2 characters a second non-population and cited only "( )". Measured
+    # 2026-09-10 — `x`, `÷`, `=`, `-` (four Ed Sheeran albums), `4` (Beyoncé), `∞`, `…` and any
+    # one-character CJK title all enter here. The branch is ORDINARY; only the artist-less
+    # candidate is not. Anyone re-opening this needs a NAMED SERVICE SURFACE that returns an
+    # album with no artist, not a hand-built hash — see the ledger's method-error note.
     if (length($albumNorm) < 2) {
         my $ap = _punctNorm($albumRaw);
         return 0 unless length $ap;
