@@ -478,8 +478,16 @@ subsystem.
     the first caller that is not.
   - **A nameless track with no url keeps the OLD behaviour on purpose** — there is nothing better
     to key on, and treating it as a duplicate is the safer of two guesses.
-  - **`_keyIsNamelessTrack` is strict (`^\|\|\|t:`) on purpose.** A key with an artist, an album
-    or even a year in it is a real name, and its collisions are real duplicates.
+  - **`_keyIsNamelessTrack` is strict (`^\|\|\|t:`) on purpose.** A key whose artist, album and
+    year SEGMENTS are all empty carries no name to collide on; a key with any of them filled is
+    a real name and its collisions are real duplicates.
+    - **CORRECTED 0.1.143 — this used to read "a key with an artist … in it", which is true of
+      the KEY and false of the RECORD.** Until 0.1.143 `_norm` deleted every non-Latin
+      character, so a track by 米津玄師 or Кино produced `|||t:<title>` while the record carried
+      a real artist. The gate read the shape, took the `|u:` branch, and minted a duplicate
+      where 0.1.140 had answered "already saved". The gate was not wrong about keys; the key
+      was wrong about names, and the fix is in the fold (see below). This sentence is what hid
+      it for two releases — the gate cannot tell the two apart and was never asked to.
 
   **THE 2026-09-10 ROUND, PART 2 — three findings against this entry, all REPRODUCED, none of
   them the two pre-answered above. Two are now pinned by tests; one is a recorded limitation.
@@ -524,7 +532,84 @@ subsystem.
     the same lesson as the re-add and named-track controls above. Three assertions, all red with
     the guard removed.
 
-  **If you are re-raising any of this, the discriminating tests are in `t_addpath.pl` and they
+- **THE DEDUPE FOLD NO LONGER DELETES A NON-LATIN NAME — 0.1.143, and it closed a SHIPPED
+  data-loss bug, not just the review finding that led to it.** `DB::_norm`'s punctuation pass
+  was `s/[^a-z0-9]+/ /g`, which does not fold a non-Latin name, it ERASES it: 米津玄師,
+  中島みゆき, 아이유, Кино, †††, !!! and +/- every one normalised to `''`. The whole key is built
+  from those segments and sits in a UNIQUE column, so a name that folds to nothing produces a
+  key that identifies nothing.
+  - **ALBUMS WERE SILENTLY LOST, and this was in released 0.1.93.** Artist and title both
+    erased, plus no year or a shared one, collapses unrelated releases onto `||`. Measured at
+    `DB::add`: 中島みゆき/歌姫, サカナクション/新宝島 and Кино/Группа крови (two services, three
+    artists) produced ONE row — the second and third adds refused "already saved" with a
+    success toast. **There is no url fallback on the album path**, so nothing recovered them.
+    This is the half the review that found the track bug did not reach, and it is the worse one.
+  - **The track duplicate was real but never shipped.** `main` is 0.1.93 and `origin/dev` was
+    0.1.140; neither has `trackUrlKey`. The `|u:` regression existed only in the unpushed
+    0.1.141/0.1.142 commits.
+  - **THE REMEDY THE FINDING PROPOSED IS WRONG — do not apply it.** Gating the nameless branch
+    on `$rec->{artist}` having content stops it firing for 米津玄師, which returns those tracks
+    to the plain `|||t:` key — and 感電 and 糸 BOTH normalise to `|||t:`, so the second add is
+    swallowed. It trades a visible duplicate for a silent loss. Pinned by the "two different
+    all-non-Latin tracks are not folded into one row" pair in `t_addpath.pl`.
+  - **THE FIX IS A PURE SPLIT, and that is the whole reason a rung on the UNIQUE column was
+    affordable.** The new pass keeps `\w` (Unicode-aware on a decoded string) and only stops
+    DELETING characters, so two names that folded equal either stay equal or come apart, and
+    nothing that folded apart can come together. `_migrateRefold`'s collision-resolution path —
+    the expensive half of `DB.pm` — is unreachable for this change. Every Latin key is
+    byte-identical (`sigur ros`, `janes addiction`, `album deluxe`, `834 194`, `100 free`,
+    `under score`), so **rung 8 rekeys ZERO rows in a Latin-only library**. Pinned by §4j2 in
+    `t_refold.pl`, which is not decoration: without it every other assertion still passes
+    against a fold that quietly moved every stored key.
+  - **A name that is ALL PUNCTUATION keeps its punctuation** rather than answering `''`. `!!!`,
+    `†††` and `+/-` are real acts and a self-titled album by one of them collided with the next.
+    Three characters are dropped there and each for its own reason: `|` is the key's SEGMENT
+    DELIMITER, so an artist named `|` could otherwise forge a `|p:`/`|t:` tail and be read as
+    another row's identity; `%` and `_` are LIKE metacharacters, and `findSavedTrack` /
+    `findTrackByArtistTitle` build patterns straight out of `_norm` with no ESCAPE. A name made
+    only of those still folds to `''`, exactly as before. Confirmed against real SQLite that
+    `'!!!|%|t:even when'` matches its own row and nothing else.
+  - **Rung 8 is a NEW rung, not an edit to rung 5**, for the reason rung 7 already records: a
+    dev install has stamped 5 and never revisits it, and a released install still needs rung 5
+    doing its own job on the way past. `_migrateRefold` needed NO edit — it recomputes through
+    `_keyForRow`, skips unchanged rows, preserves the `|p:`/`|e:`/`|u:` tails, and withholds
+    its answer on failure so the stamp is retried.
+  - **`|u:` rows left by 0.1.141 are NOT reconciled by rung 8** — after the refold the duplicate
+    pair holds two different keys, and rung 7 groups by identical key. No released build can
+    contain one, so the only affected database is a local dev install.
+  - **THE MATCHER WAS FIXED TOO, in the same release, because there it produced WRONG
+    ANSWERS rather than missing ones.** `Sources::_norm` and `_normStrict` now share
+    `_punctPass` with the same shape as `DB::_norm`. The gates there are lenient BY DESIGN —
+    an empty artist accepts, for LL 0.1.66's Now-Playing replay path — so an ERASED name
+    arrived looking ABSENT and absent means ACCEPT ANYTHING. Measured 2026-09-10: a play of
+    'Lemon' by 米津玄師 MARKED a stored 'Lemon' by 中島みゆき as Played, which is the exact
+    outcome `Played::_albumFallback`'s own comment promises cannot happen; replay had the same
+    hole through `_albumMatches`. A non-Latin album title was also rejected outright by the
+    `length $albumNorm < 2` guard, since it normalised to ''. **The leniency is NOT the bug and
+    was NOT touched** — `_norm('')` is still '' — and two assertions in `t_refold.pl` §3c exist
+    to stop it being "tidied" into strictness, which would break the replay path. Nothing here
+    is persisted, so unlike the key this owed no rung. Anti-tested: restore the old pass and 5
+    go red while both leniency controls stay GREEN, which is the asymmetry that hid it.
+  - **STILL OPEN in LL after 0.1.143:** a ONE-character title (CJK or Latin) is still rejected
+    by `length $albumNorm < 2`, and `_norm` strips parens before the pass so "( )" still
+    normalises to ''. DSC/LBF/PFR handle both with a `_punctNorm` escape hatch on the raw
+    title, gated on a MANDATORY artist check. LL has no equivalent. Not a regression and not
+    urgent; it belongs with the fleet round below.
+  - **`Sources::_norm` still has the old pass and is DELIBERATELY not changed here.** `DB::_norm`
+    is called only inside `DB.pm`, so this change's blast radius is one file plus the stored
+    keys. The same `[^a-z0-9]` fold sits in five repos as the shared fleet matcher; changing it
+    is a sync event and its failure mode is a wrong live match, not an irreversible wrong key.
+    Separate work. **Do not "finish the job" by folding it in without one.**
+  - **The whole thing is anti-tested in both halves**, because either alone would pass against
+    a fix that does nothing: revert the fold entirely and 27 assertions go red across
+    `t_db.pl`, `t_addpath.pl` and `t_refold.pl`; remove ONLY the punctuation fallback and
+    exactly 8 go red, all of them punctuation cases.
+  - **The controls that made this invisible were Latin.** `t_addpath.pl`'s named-track control
+    used the artist `A Band`, which folds to `a band`, so the key carried a name and the
+    nameless branch never fired. The same question asked with 米津玄師 fails on the shipped
+    build. **A control chosen from the ASCII half of the input space is not a control.**
+
+    **If you are re-raising any of this, the discriminating tests are in `t_addpath.pl` and they
   ask `DB::add` DIRECTLY** — through the add command an artist-bearing track never reaches it
   (`_insertTrackRow`'s guard catches it first) and a colliding INSERT dies on the UNIQUE
   constraint inside an eval. Both of those made an earlier draft of those assertions pass against

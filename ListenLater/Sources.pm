@@ -1531,6 +1531,29 @@ sub _fold {
     return $f ? $f->($_[0]) : lc($_[0] // '');
 }
 
+# The punctuation pass the two MATCH normalisers share (0.1.143). Deliberately the same
+# shape as DB::_norm's, so the gate, the ranker and the stored key agree about which
+# characters carry a name — they differ in what they strip BEFORE this point (parens), which
+# is the difference that is meant to exist.
+#
+# \w is Unicode-aware on a decoded string, and _fold decodes. If DB.pm were somehow absent
+# _fold degrades to a plain `lc` with no decode, and this pass then behaves as the old one
+# did on those bytes: a worse live match, discarded at the end of the request, which is the
+# documented trade in _fold's header.
+sub _punctPass {
+    my $s = shift // '';
+    my $w = $s;
+    $w =~ s/[^\w]+/ /g;
+    $w =~ s/_+/ /g;
+    $w =~ s/^\s+|\s+$//g;
+    return $w if length $w;
+    # An all-punctuation name ('!!!', '†††', '+/-') would otherwise read as ABSENT and hand
+    # the lenient gates a free pass, exactly as an erased non-Latin one did.
+    my $p = $s;
+    $p =~ s/\s+//g;
+    return $p;
+}
+
 # Normalise for fuzzy MATCHING. NB: intentionally differs from DB::_norm — this one
 # also STRIPS "(…)"/"[…]" (deluxe/remaster/edition qualifiers) so a saved title
 # matches the service's variant. Don't unify it with DB::_norm, whose dedupe key
@@ -1539,12 +1562,27 @@ sub _fold {
 # FLEET MATCHER SYNC (LL 0.1.112): folding and apostrophe elision came across from
 # DSC/PFR/LBF; the LENIENT gates below (empty artist accepts — saved-item replay,
 # LL 0.1.66) are deliberately NOT aligned and stay pinned as an LL variant.
+#
+# 0.1.143 — AND IT KEEPS LETTERS OF EVERY SCRIPT, for a reason that is sharper here than on
+# the key. `s/[^a-z0-9]+/ /g` does not fold 米津玄師 or Кино, it ERASES them to ''. On the
+# dedupe key that silently merged rows; HERE it aims the LENIENT gates the wrong way, because
+# they read an empty artist as ABSENT and absent means ACCEPT ANYTHING:
+#   * `_artistMatch` answers 1 when either side is empty, so a play of 'Lemon' by 米津玄師
+#     MARKED a stored 'Lemon' by 中島みゆき as Played — the exact outcome the comment above
+#     Played::_albumFallback promises cannot happen. Measured 2026-09-10.
+#   * `_albumMatches` skips its artist check entirely on an empty artist, so a saved album
+#     could replay another artist's release of the same title.
+# The leniency is CORRECT and stays — a streaming Now-Playing add can genuinely carry no
+# artist (LL 0.1.66), and `_norm('')` is still ''. What was wrong is that an ERASED name was
+# indistinguishable from an ABSENT one. Same distinction as DB::_norm; see its header.
+#
+# NOTHING HERE IS PERSISTED, so unlike DB::_norm this owes no migration rung — a match is
+# recomputed every request. That asymmetry is the point of §5 in t_refold.pl.
 sub _norm {
     my $s = _fold($_[0]);
     $s =~ s/\([^)]*\)//g;
     $s =~ s/\[[^\]]*\]//g;
-    $s =~ s/[^a-z0-9]+/ /g;
-    $s =~ s/^\s+|\s+$//g;
+    $s = _punctPass($s);
     return $s;
 }
 
@@ -1718,8 +1756,11 @@ sub libraryAlbumYear {
 sub _normStrict {
     my $s = _fold($_[0]);
     $s =~ s/\((?:hi-res[^)]*|explicit|mono|stereo|album|track|remaster(?:ed)?[^)]*|deluxe[^)]*)\)//g;
-    $s =~ s/[^a-z0-9]+/ /g;
-    $s =~ s/^\s+|\s+$//g;
+    # Shares _punctPass with _norm for the same reason it shares _fold: the gate normalises a
+    # candidate with one and the ranker re-reads it with the other, so a divergence lets a
+    # title clear the gate and then fail its own exact-title tier. 0.1.143 — before this, both
+    # erased a non-Latin title, which agreed but agreed on nothing.
+    $s = _punctPass($s);
     return $s;
 }
 

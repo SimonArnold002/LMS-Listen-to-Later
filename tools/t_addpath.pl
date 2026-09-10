@@ -1508,6 +1508,67 @@ section('the same play url is the same track, whatever the row called it');
     is('...and the row it deduped to is the first one',
         ($n1 ? Plugins::ListenLater::DB::get($n1->{id})->{dedupe_key} : 'nothing'),
         'a band|||t:named song');
+
+    # THE CONTROL ABOVE USED A LATIN ARTIST, AND THAT IS WHY THIS WAS INVISIBLE FOR TWO
+    # RELEASES. 'A Band' folds to 'a band', so the key carries a name and the nameless branch
+    # never fires. Ask the SAME question with a name the pre-0.1.143 fold ERASED: 米津玄師
+    # normalised to '', so the key came out '|||t:lemon' — nameless in SHAPE while the record
+    # carried a real artist — and `_keyIsNamelessTrack` took the '|u:' branch, minting a second
+    # row where 0.1.140 answered "already saved". A visible cross-service duplicate that rung 7
+    # can never reconcile, because after any refold the pair holds two DIFFERENT keys.
+    #
+    # Asked at DB::add DIRECTLY for the reason the block header already gives: through the add
+    # command _insertTrackRow's findTrackByArtistTitle catches an artist-bearing track first,
+    # and it is source-filtered, so a second SERVICE sails past it and this assertion would
+    # pass against a broken build.
+    #
+    # ANTI-TEST: restore the old `s/[^a-z0-9]+/ /g` in DB::_norm and the two pairs below go
+    # red — the first as a stored duplicate, the second as a swallowed row.
+    my $jp = "\xe7\xb1\xb3\xe6\xb4\xa5\xe7\x8e\x84\xe5\xb8\xab";      # 米津玄師, octets as a raw-CLI add sends them
+    my ($jId) = Plugins::ListenLater::DB::add({ source => 'qobuz', kind => 'track',
+        artist => $jp, track_title => 'Lemon', ref_kind => 'url',
+        ref => { url => 'qobuz://777111.flac' } }, 'later');
+    my ($jId2, $jDup) = Plugins::ListenLater::DB::add({ source => 'tidal', kind => 'track',
+        artist => $jp, track_title => 'Lemon', ref_kind => 'url',
+        ref => { url => 'tidal://777222.flac' } }, 'later');
+    is('a track whose artist the fold used to erase still dedupes across services',
+        ($jDup ? 'already saved' : 'stored a second row'), 'already saved');
+    is('...answering with the row that already held it', $jId2, $jId);
+    is('...and its key carries the artist rather than reading as nameless',
+        (Plugins::ListenLater::DB::get($jId)->{dedupe_key} =~ /^\|\|\|t:/
+            ? 'nameless' : 'named'), 'named');
+
+    # THE OTHER DIRECTION, and the half a naive fix gets wrong. Two DIFFERENT songs by two
+    # DIFFERENT non-Latin artists both keyed '|||t:' before 0.1.143 — artist AND title erased —
+    # so the second add was swallowed with a success toast. Gating the nameless branch on
+    # `$rec->{artist}` having content (the remedy this defect first attracted) restores exactly
+    # that loss, which is why the fix is in the fold and not in the gate.
+    my ($k1) = Plugins::ListenLater::DB::add({ source => 'qobuz', kind => 'track',
+        artist => $jp, track_title => "\xe6\x84\x9f\xe9\x9b\xbb", ref_kind => 'url',
+        ref => { url => 'qobuz://777333.flac' } }, 'later');
+    my ($k2, $kDup) = Plugins::ListenLater::DB::add({ source => 'qobuz', kind => 'track',
+        artist => "\xe4\xb8\xad\xe5\xb3\xb6\xe3\x81\xbf\xe3\x82\x86\xe3\x81\x8d",
+        track_title => "\xe7\xb3\xb8", ref_kind => 'url',
+        ref => { url => 'qobuz://777444.flac' } }, 'later');
+    is('two different all-non-Latin tracks are not folded into one row',
+        ($kDup ? 'swallowed' : 'stored'), 'stored');
+    is('...and they are two rows', (($k1 && $k2 && $k1 != $k2) ? 'two' : 'one'), 'two');
+    is('...neither of them needing a |u: tail to be told apart',
+        scalar(grep { (Plugins::ListenLater::DB::get($_)->{dedupe_key} // '') =~ /\|u:/ }
+               ($k1, $k2)), 0);
+
+    # A PUNCTUATION-ONLY ARTIST is the residue the \w pass alone does not reach, so the fold
+    # keeps the punctuation itself. '!!!' and '†††' are real acts.
+    my ($e1) = Plugins::ListenLater::DB::add({ source => 'qobuz', kind => 'track',
+        artist => '!!!', track_title => 'Even When the Waters Cold', ref_kind => 'url',
+        ref => { url => 'qobuz://777555.flac' } }, 'later');
+    my ($e2, $eDup) = Plugins::ListenLater::DB::add({ source => 'tidal', kind => 'track',
+        artist => '!!!', track_title => 'Even When the Waters Cold', ref_kind => 'url',
+        ref => { url => 'tidal://777666.flac' } }, 'later');
+    is('a punctuation-only artist dedupes across services too',
+        ($eDup ? 'already saved' : 'stored a second row'), 'already saved');
+    is('...and its key is the punctuation, not an empty segment',
+        Plugins::ListenLater::DB::get($e1)->{dedupe_key}, '!!!|||t:even when the waters cold');
     # An artist-less track with NO url has nothing better to key on, so it keeps the old
     # behaviour deliberately — the safer of two guesses, and stated so it is not read as an
     # oversight. Asked through DB::add DIRECTLY, because _addCtxCommand refuses an add that

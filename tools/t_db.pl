@@ -235,7 +235,7 @@ is('kind column added',        ($col{kind}        ? 'yes':'no'), 'yes');
 is('track_title column added', ($col{track_title} ? 'yes':'no'), 'yes');
 is('rel_type column added',    ($col{rel_type}    ? 'yes':'no'), 'yes');
 is('track_count column added', ($col{track_count} ? 'yes':'no'), 'yes');
-is('user_version stamped',     ($h->selectrow_array('PRAGMA user_version'))[0], 7);
+is('user_version stamped',     ($h->selectrow_array('PRAGMA user_version'))[0], 8);
 is('the legacy year-append carrier is reconciled cross-source',
    scalar @{ $h->selectall_arrayref('SELECT id FROM albums') }, 1);
 
@@ -266,7 +266,7 @@ is('the legacy year-append carrier is reconciled cross-source',
     is('...and bandcamp too',                    $rows->{bandcamp}{track_count}, undef);
     is('...but a library count is untouched',    $rows->{library}{track_count}, 9);
     is('the label is NOT touched (display only)',$rows->{qobuz}{rel_type}, 'ep');
-    is('...and stamped so it runs once',         ($g->selectrow_array('PRAGMA user_version'))[0], 7);
+    is('...and stamped so it runs once',         ($g->selectrow_array('PRAGMA user_version'))[0], 8);
 }
 
 # _migrateArtistPrefix is the fifth key writer, but it runs before the columns required by
@@ -607,6 +607,108 @@ section('live key backfills reconcile across sources too');
        Plugins::ListenLater::DB::get($s)->{status}, 'played');
     is('...and the survivor took the recomputed key',
        Plugins::ListenLater::DB::get($q)->{dedupe_key}, 'three ways|one album|2026');
+}
+
+# ---------------------------------------------------------------------------
+section('0.1.143 — the fold KEEPS a non-Latin name instead of deleting it');
+# Until 0.1.143 the key pass was `s/[^a-z0-9]+/ /g`, which does not fold a non-Latin name,
+# it ERASES it. Every name below normalised to '' and the whole key is built from these
+# segments, so unrelated releases shared one key in a UNIQUE column.
+#
+# ANTI-TEST for this whole block: restore the old pass and every `is` here goes red except
+# the Latin controls, which is the point of having both halves.
+{
+    my $norm = \&Plugins::ListenLater::DB::_norm;
+    # This file has no `use utf8`, so a non-ASCII literal here is OCTETS — which is the
+    # realistic input, since the raw-CLI add path hands _norm octets. But _norm DECODES, so
+    # every expected value must be decoded too or the comparison is bytes against characters
+    # and fails on a correct fold. That is exactly what it did when this block was written.
+    my $chr = sub { my $x = $_[0]; utf8::decode($x); return $x };
+
+    # THE SCRIPTS. Each was '' before; each must now be its own value.
+    is('CJK survives the fold',      $norm->("\xe7\xb1\xb3\xe6\xb4\xa5\xe7\x8e\x84\xe5\xb8\xab"), $chr->("\xe7\xb1\xb3\xe6\xb4\xa5\xe7\x8e\x84\xe5\xb8\xab"));
+    is('Hangul survives the fold',   $norm->("\xec\x95\x84\xec\x9d\xb4\xec\x9c\xa0"),             $chr->("\xec\x95\x84\xec\x9d\xb4\xec\x9c\xa0"));
+    is('Cyrillic survives, lowercased',
+       $norm->("\xd0\x9a\xd0\xb8\xd0\xbd\xd0\xbe"), $chr->("\xd0\xba\xd0\xb8\xd0\xbd\xd0\xbe"));
+    is('Greek survives, lowercased', $norm->("\xce\xa9"), $chr->("\xcf\x89"));
+
+    # THE LATIN CONTROLS. A pure split means every existing key is byte-identical, which is
+    # what makes rung 8 rekey ZERO rows in a Latin-only library. If any of these move, the
+    # migration stops being free and the claim in _norm's header is false.
+    is('Latin folding is unchanged',        $norm->('Sigur R'."\xc3\xb3".'s'),   'sigur ros');
+    is('apostrophe elision is unchanged',   $norm->("Jane\xe2\x80\x99s Addiction"), 'janes addiction');
+    is("the 'n' guard is unchanged",        $norm->("Rock\xe2\x80\x99n\xe2\x80\x99Roll"), 'rock n roll');
+    is('bracketed text is still KEPT',      $norm->('Album (Deluxe)'), 'album deluxe');
+    is('digits and dots are unchanged',     $norm->('834.194'),        '834 194');
+    is('a percent still separates words',   $norm->('100% Free'),      '100 free');
+    # \w includes '_', so it is stripped explicitly — it is a LIKE metacharacter and the two
+    # finders below build patterns straight out of this sub with no ESCAPE.
+    is('an underscore still separates words', $norm->('under_score'),  'under score');
+
+    # A NAME THAT IS ALL PUNCTUATION keeps its punctuation rather than answering ''. Real
+    # bands ('!!!', '+/-') and a self-titled album by one of them collided with every other
+    # such act before this.
+    is('a punctuation-only name is kept',   $norm->('!!!'),   '!!!');
+    is('...including a symbol name',        $norm->("\xe2\x80\xa0\xe2\x80\xa0\xe2\x80\xa0"), $chr->("\xe2\x80\xa0\xe2\x80\xa0\xe2\x80\xa0"));
+    is('...and a mixed-punctuation one',    $norm->('+/-'),   '+/-');
+
+    # THE THREE CHARACTERS THAT MUST NEVER REACH A KEY. '|' is the segment delimiter: an
+    # artist named '|' would otherwise forge an identity tail and be read as another row.
+    # '%' and '_' are the LIKE metacharacters. A name made only of these still folds to ''.
+    is('a pipe name cannot forge a segment', $norm->('|'),    '');
+    is('...nor a run of them',               $norm->('|||'),  '');
+    is('a LIKE metacharacter name folds away', $norm->('%'),  '');
+    is('...and so does the other one',       $norm->('_'),    '');
+
+    # OCTETS AND CHARACTERS MUST AGREE, or the same album keys two ways depending on which
+    # surface added it — the invisible-row state _migrateRefold exists to prevent. The raw-CLI
+    # add path hands this sub octets; everything else hands it characters.
+    my $octets = "\xe4\xb8\xad\xe5\xb3\xb6\xe3\x81\xbf\xe3\x82\x86\xe3\x81\x8d";
+    my $chars  = $octets;
+    utf8::decode($chars);
+    is('a non-Latin name keys the same as octets and as characters',
+       $norm->($octets), $norm->($chars));
+    is('...and that key is not empty', (length $norm->($chars) ? 'filled' : 'EMPTY'), 'filled');
+}
+
+# ---------------------------------------------------------------------------
+section('0.1.143 — an erased name no longer collapses unrelated rows');
+# THE DEFECT THIS RELEASE EXISTS FOR, asked at DB::add because that is where the loss
+# happened. Before 0.1.143 all three of these keyed '||' and the second and third adds were
+# refused "already saved" with a success toast. There is no url fallback on the album path,
+# so nothing recovered them.
+{
+    my $mk = sub {
+        my ($src, $artist, $album, $year) = @_;
+        return { source => $src, artist => $artist, album_title => $album, year => $year,
+                 ref_kind => 'search', ref => { album_id => "$artist-$album" } };
+    };
+    my ($a1) = Plugins::ListenLater::DB::add($mk->('qobuz', "\xe4\xb8\xad\xe5\xb3\xb6\xe3\x81\xbf\xe3\x82\x86\xe3\x81\x8d", "\xe6\xad\x8c\xe5\xa7\xac"));
+    my ($a2, $dup2) = Plugins::ListenLater::DB::add($mk->('qobuz', "\xe3\x82\xb5\xe3\x82\xab\xe3\x83\x8a\xe3\x82\xaf\xe3\x82\xb7\xe3\x83\xa7\xe3\x83\xb3", "\xe6\x96\xb0\xe5\xae\x9d\xe5\xb3\xb6"));
+    my ($a3, $dup3) = Plugins::ListenLater::DB::add($mk->('tidal', "\xd0\x9a\xd0\xb8\xd0\xbd\xd0\xbe", "\xd0\x93\xd1\x80\xd1\x83\xd0\xbf\xd0\xbf\xd0\xb0 \xd0\xba\xd1\x80\xd0\xbe\xd0\xb2\xd0\xb8"));
+    is('a second all-CJK album is not swallowed by the first', ($dup2 ? 'refused' : 'stored'), 'stored');
+    is('...and it is its own row',            (($a2 && $a2 != $a1) ? 'own row' : 'the same row'), 'own row');
+    is('a Cyrillic album on another service is not swallowed either',
+       ($dup3 ? 'refused' : 'stored'), 'stored');
+    is('...and it is its own row too',        (($a3 && $a3 != $a1) ? 'own row' : 'the same row'), 'own row');
+    is('...so all three are present',
+       scalar @{ Plugins::ListenLater::DB::dbh()->selectall_arrayref(
+           "SELECT id FROM albums WHERE ref_kind='search' AND dedupe_key LIKE '%|%'
+              AND id IN ($a1, $a2, $a3)") }, 3);
+
+    # A self-titled album by a punctuation-only act is the same collision with a year on it.
+    my ($p1) = Plugins::ListenLater::DB::add($mk->('qobuz', '!!!', '!!!', 2004));
+    my ($p2, $pDup) = Plugins::ListenLater::DB::add($mk->('qobuz', "\xe2\x80\xa0\xe2\x80\xa0\xe2\x80\xa0", "\xe2\x80\xa0\xe2\x80\xa0\xe2\x80\xa0", 2004));
+    is('two self-titled punctuation acts of the same year stay apart',
+       ($pDup ? 'refused' : 'stored'), 'stored');
+    is('...and hold different keys',
+       ((Plugins::ListenLater::DB::get($p1)->{dedupe_key} ne
+         Plugins::ListenLater::DB::get($p2)->{dedupe_key}) ? 'different' : 'THE SAME'), 'different');
+
+    # THE CROSS-SOURCE CONTROL. Widening the fold must not cost the dedupe that already
+    # worked: the same non-Latin album from a second service is still one row.
+    my (undef, $same) = Plugins::ListenLater::DB::add($mk->('deezer', "\xe4\xb8\xad\xe5\xb3\xb6\xe3\x81\xbf\xe3\x82\x86\xe3\x81\x8d", "\xe6\xad\x8c\xe5\xa7\xac"));
+    is('the SAME non-Latin album from another service still dedupes', $same, 1);
 }
 
 printf "\n%d passed, %d failed\n", $pass, $fail;

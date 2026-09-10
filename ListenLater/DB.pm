@@ -254,6 +254,40 @@ SQL
                 . "left at version $identityVer so it is retried at the next start");
         }
     }
+
+    # 0.1.143 — re-run the refold under the fold that no longer DELETES a non-Latin name.
+    # See _norm: until this version 米津玄師 / Кино / !!! all normalised to '', so their rows
+    # carry a key that identifies nothing and unrelated releases sit on a shared '||'.
+    #
+    # A NEW RUNG RATHER THAN AN EDIT TO RUNG 5, for the reason rung 7 already records: a dev
+    # install has stamped 5 and would never revisit it, and a released install needs rung 5 to
+    # keep doing its own job on the way past. Both reach the new fold here.
+    #
+    # _migrateRefold needs NO EDIT — it recomputes every key through _keyForRow (so the new
+    # fold applies by construction), skips a row whose key is unchanged, preserves the
+    # '|p:'/'|e:'/'|u:' identity tails, and withholds its answer on operational failure so the
+    # stamp below is retried. What makes this rung cheap is a property of the FOLD, not of the
+    # migration: the new one only stops deleting characters, so it can only SPLIT a group,
+    # never merge two. Every UNIQUE collision _migrateRefold guards against is unreachable
+    # here, and a Latin-only library is rekeyed zero rows.
+    #
+    # It waits on rung 7 exactly as rung 7 waits on 6 — a rung must never advance the version
+    # on behalf of an earlier one that failed, or that rung's retry is lost for good.
+    my ($foldVer) = $h->selectrow_array('PRAGMA user_version');
+    $foldVer = 0 unless defined $foldVer;
+    if ($foldVer < 7) {
+        $log->warn("Listen Later: an earlier migration is still pending (schema $foldVer) "
+            . '— the non-Latin refold waits rather than stamping over it');
+    }
+    elsif ($foldVer < 8) {
+        if (_migrateRefold($h)) {
+            $h->do('PRAGMA user_version = 8');
+        }
+        else {
+            $log->warn('Listen Later: the non-Latin refold did not complete (see the warnings '
+                . "above) — schema left at version $foldVer so it is retried at the next start");
+        }
+    }
     return;
 }
 
@@ -883,11 +917,52 @@ sub foldLatin {
 # CHANGING THIS SUB CHANGES A STORED KEY. It is not a cache — dedupe_key sits in a
 # UNIQUE column on every row, so any edit needs a migration that rewrites existing
 # rows AND resolves the collisions the new fold creates. See _migrateRefold.
+#
+# 0.1.143 — KEEP LETTERS AND DIGITS OF EVERY SCRIPT. Until this version the pass was
+# `s/[^a-z0-9]+/ /g`, which does not fold a non-Latin name, it DELETES it: 米津玄師,
+# 中島みゆき, 아이유, Кино, †††, !!! and +/- every one normalised to ''. The whole key is
+# built from these segments, so a name that folds to nothing produces a key that identifies
+# nothing — and that key sits in a UNIQUE column. Two measured consequences:
+#   * ALBUMS WERE SILENTLY LOST (shipped, 0.1.93). Artist and title both erased plus no year
+#     — or a shared one — collapses unrelated releases onto '||': 中島みゆき/歌姫,
+#     サカナクション/新宝島 and Кино/Группа крови all key '||', so the second and third adds
+#     are refused "already saved". There is no url fallback on the album path to recover them.
+#   * TRACKS DUPLICATED ACROSS SERVICES (0.1.141, never released). `_keyIsNamelessTrack`
+#     tests the key's SHAPE, so a track whose artist merely folded away read as nameless and
+#     took the '|u:' branch — minting a second row where 0.1.140 answered "already saved".
+# The gate was not wrong about keys; the key was wrong about names. Fixing the fold is what
+# lets that gate stay strict, and it fixes both paths at once — the album one has no other fix.
+#
+# THE NEW FOLD IS A PURE SPLIT: it only stops DELETING characters, so two names that folded
+# equal either stay equal or come apart, and nothing that folded apart can come together.
+# `_migrateRefold`'s collision-resolution path — the expensive half, and where this file's
+# worst bugs live — is therefore unreachable for this change. Every Latin key is byte-identical
+# ('sigur ros', 'janes addiction', 'album deluxe', '834 194', '100 free', 'under score'), so a
+# Latin-only library is rekeyed ZERO rows by rung 8. That is the property that made this
+# migration affordable; do not lose it by "tidying" the fallback below into something lossy.
 sub _norm {
     my $s = foldLatin($_[0]);
-    $s =~ s/[^a-z0-9]+/ /g;
-    $s =~ s/^\s+|\s+$//g;
-    return $s;
+
+    # \w on a decoded string is Unicode-aware, so CJK, Hangul and Cyrillic survive while
+    # punctuation still separates words exactly as it did. Underscore is stripped BECAUSE
+    # \w includes it and it is a LIKE metacharacter — findSavedTrack and
+    # findTrackByArtistTitle build LIKE patterns straight out of this sub and pass no ESCAPE.
+    my $w = $s;
+    $w =~ s/[^\w]+/ /g;
+    $w =~ s/_+/ /g;
+    $w =~ s/^\s+|\s+$//g;
+    return $w if length $w;
+
+    # Nothing survived, so the name is ALL punctuation — a real and not-rare shape for a band
+    # ('!!!', '†††', '+/-', '?'). Keep it rather than answering '', or every such act shares
+    # one key again and a self-titled album by one of them collides with the next.
+    # Three characters must not reach a key and are dropped here: '|' is the key's own
+    # SEGMENT DELIMITER (an artist named '|' would otherwise forge a tail like '|p:' or
+    # '|t:' and be read as another row's identity), and '%'/'_' are the LIKE metacharacters
+    # above. A name made only of those still folds to '', exactly as it did before.
+    my $p = $s;
+    $p =~ s/[\s%_|]+//g;
+    return $p;
 }
 
 # The dedupe key is source-agnostic (source is its own column) and includes the release
