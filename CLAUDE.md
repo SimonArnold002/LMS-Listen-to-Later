@@ -1983,6 +1983,16 @@ inside an async coderef where our callback never runs and we log nothing. As oct
 album. Do not repeat Search Hub's comment that a `query_enc` mistake "does not error, it silently
 returns nothing" — true for Qobuz, Tidal and Deezer, false for Bandcamp.
 
+**FIELD-VERIFIED, which outranks everything above it.** Simon confirmed on the installed build
+that non-Latin albums ADD and then correctly move to PLAYED when played through. That is both
+halves of the original defect at once — the dedupe key that used to collide, and the match gate
+that used to read an erased name as ABSENT and therefore accept anything. **If any of this is
+re-opened from a reading of the code, that is the answer.** What the field has NOT exercised, so
+do not claim it has: the rung-7 guard, which only fires on a database still holding pre-0.1.143
+keys with a genuine collision in them, and the Bandcamp octets path, which needs a non-Latin
+Bandcamp album with no stored album url. Both are covered by the suite and, for Bandcamp, by a
+live measurement against the server.
+
 **State at close**, so the next review can tell what it is looking at: 0.1.145 in `install.xml`
 and `repo.xml`, zip rebuilt with `<sha>` equal to it, README regenerated to match, 15/15 suites
 green at 1,562 assertions, and the live build on the server verified as the RUNNING module rather
