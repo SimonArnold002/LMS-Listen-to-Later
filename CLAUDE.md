@@ -597,9 +597,23 @@ subsystem.
     urgent; it belongs with the fleet round below.
   - **`Sources::_norm` still has the old pass and is DELIBERATELY not changed here.** `DB::_norm`
     is called only inside `DB.pm`, so this change's blast radius is one file plus the stored
-    keys. The same `[^a-z0-9]` fold sits in five repos as the shared fleet matcher; changing it
-    is a sync event and its failure mode is a wrong live match, not an irreversible wrong key.
-    Separate work. **Do not "finish the job" by folding it in without one.**
+    keys.
+    - **CORRECTED, same day: "the same fold sits in five repos" is FALSE and was withdrawn.**
+      It came from a grep that hit `_asciiNorm`, a deliberately ASCII-only helper. PFR, LBF and
+      DSC all use `\p{Alnum}` on a DECODED string in their real `_norm`, which matches every
+      script — measured by extracting each shipped `_norm` and running it: 米津玄師, 아이유 and
+      Кино all survive, and two different CJK artists correctly fail to match. **LL was the
+      only repo with this defect**, so 0.1.143 brought it UP to the fleet rather than diverging
+      from it. A second claim from the same round, that LBF's track cache key collides for
+      non-Latin tracks, was also measured and is FALSE — the key is non-empty because LBF's
+      `_norm` preserves the script. Do not re-raise either. See `docs/fleet-fold-rollout.md`.
+    - **What IS still out of sync, and it is the other direction:** LL's MATCHER never received
+      the fleet's stylised-letter fold, so `P!nk` keys `p nk` against the fleet's `pink`, and
+      `Ke$ha` keys `ke ha` against `kesha`. Pre-existing, not caused by 0.1.143. Plus one
+      divergence 0.1.143 DID introduce: LL's punctuation fallback keeps the raw marks (`!!!` →
+      `!!!`) where the fleet folds them to letters (`iii`). Right for the KEY, wrong for the
+      matcher. Tracked as item 1 in `docs/fleet-fold-rollout.md`; DSC and Search Hub are ON
+      HOLD, so the fleet cannot be levelled in one pass and the gap is deliberate meanwhile.
   - **The whole thing is anti-tested in both halves**, because either alone would pass against
     a fix that does nothing: revert the fold entirely and 27 assertions go red across
     `t_db.pl`, `t_addpath.pl` and `t_refold.pl`; remove ONLY the punctuation fallback and
