@@ -56,8 +56,26 @@ Pre-existing, not caused by 0.1.143. `Sources::_norm` in LL has no leetspeak tab
 | `Layo & Bushwacka!` | `layo bushwacka` | `layo bushwacka` |
 
 The consequence is the one PFR 0.7.8 already recorded: `_albumMatches`' artist gate rejects
-every candidate and the page reads as no match. LL's DB key must NOT adopt this — a key is an
-identity and `P!nk` is not `Pink` for dedupe purposes. **Matcher only.**
+every candidate and the page reads as no match. Measured in LL 2026-09-10: `P!nk` vs `Pink`,
+`Ke$ha` vs `Kesha` and `$uicideboy$` vs `Suicideboys` ALL fail to match. `Wham!` and `Panic!`
+already work, because LL strips a decorative `!` as punctuation and the fleet's word-boundary
+rule agrees there — **the divergence is only for a mark standing in for a LETTER.**
+
+**IT WAS MISSED, NOT DECIDED.** An earlier draft of this doc said the DB key must not adopt it
+because "`P!nk` is not `Pink` for dedupe purposes". **That is wrong and is withdrawn** — it is
+the same class as `Jane's Addiction` / `Janes Addiction`, which 0.1.112 DID fold into one key,
+with a migration. The rule landed 2026-07-21 as PFR 0.7.8 across the four full matcher copies
+(LBF, PFR, DSC, SH); LL was not in the matcher sync until 0.1.112 on 2026-09-02, and that port
+was scoped to the THREE Discography-origin rules — it took two and skipped the compound-word
+collapse with a stated reason. The stylised fold is a fourth rule of different origin and date
+and appears in the 0.1.112 entry neither as taken nor as skipped. Nothing ever weighed it for LL.
+
+**BOTH LL normalisers need it, and the key half owes a RUNG.** `P!nk` and `Pink` currently key
+`p nk` and `pink`, so the same album from two services is TWO ROWS. Folding them is a stored-key
+change, i.e. rung 9, exactly as the apostrophe rule was rung 5. Unlike 0.1.143's fold this is
+NOT a pure split — it MERGES keys — so `_migrateRefold`'s collision path is live and its
+mixed-status policy applies. That is the real cost, and the reason to plan it rather than drop
+it in.
 
 **Also introduced by 0.1.143 and to be settled with the above:** LL's punctuation fallback keeps
 the raw marks (`!!!` → `!!!`) where the fleet folds them to letters (`!!!` → `iii`). For the DB
