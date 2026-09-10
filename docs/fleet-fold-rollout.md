@@ -54,9 +54,40 @@ Do not "fix" `_asciiNorm` — being ASCII is its job.
 
 ## What IS outstanding
 
-### 1. LL's matcher never received the fleet's stylised-letter fold — LL work, ACTIVE
+### 1. The stylised-letter fold — MATCHER HALF DONE (0.1.145). The KEY half is still open.
 
-Pre-existing, not caused by 0.1.143. `Sources::_norm` in LL has no leetspeak table, so:
+**0.1.145 took the fleet block verbatim into `Sources::_punctPass`**, which `_norm` and
+`_normStrict` share, so the gate and the ranker fold identically as 0.1.112 requires. P!nk/Pink,
+Ke$ha/Kesha and $uicideboy$/Suicideboys now match. Live check: the Bandcamp query text changes
+(`&` becomes " and ") and recall is unaffected — the same album returned the same hit count in
+both spellings over jsonrpc. Pinned in `t_refold.pl` §3d, anti-tested per rule: the `$`/`@`
+lines 5 red, the `!` branch 3, the `&`/`+` line 2, and no cross-coverage between them.
+
+**THE KEY HALF IS DECLINED — Simon, 2026-09-10. This is a scope decision, not a cost one.**
+
+> "if any service has one variant over another we should not try to merge them they should be
+> two entries. No user will add same album from different service its just not going to happen
+> in real usage. We add what the service gives us."
+
+So `P!nk` and `Pink` add twice, and that is CORRECT for this plugin. LL stores what a service
+handed it; a spelling variant is that service's rendering of the release, not a duplicate to be
+reconciled. The cross-service re-add that folding would fix is not a real usage pattern.
+
+**Already the behaviour — nothing to build.** Verified against 0.1.145: `p nk|funhouse|2008`
+against `pink|funhouse|2008`, two rows. The measured case that prompted this is
+`-ii- – Ars Erotica`, where Bandcamp renders it `Ars Erotica : Volume I` and Deezer renders it
+`Ars Erotica, Vol. I` — keys `ii|ars erotica volume i|` and `ii|ars erotica vol i|2026`. Two
+entries, which is the wanted outcome.
+
+**The matcher not linking those two is ALSO accepted**, and for the same reason: LBF carries one
+streaming match plus a separate Bandcamp link, and those were never expected to agree. Do not
+"fix" `volume` against `vol` on the strength of this pair.
+
+**DO NOT GENERALISE THIS TO THE FLEET. Discography is the opposite case** — it folds variants
+precisely so one artist's albums line up across sources, which is its whole job. The decline is
+LL-only and follows from LL storing what it was given rather than reconciling a catalogue.
+
+Original diagnosis kept, because the MATCHER half of it was real and shipped:
 
 | input | fleet | LL today |
 |---|---|---|
@@ -110,12 +141,14 @@ and the strict artist gate then rejects everything, i.e. a miss.
 Low severity everywhere. LL 0.1.143 already covers it, via the raw-mark fallback. The fleet fix
 is to extend the all-marks fallback to keep the marks when nothing maps.
 
-### 3. LL still has no `_punctNorm` escape hatch — LL work
+### 3. The `_punctNorm` escape hatch — CLOSED (0.1.145)
 
-PFR, LBF and DSC all handle a one-character or all-paren title (`( )` by Sigur Rós) through
-`_punctNorm` on the raw title, gated on a MANDATORY artist check. LL has none, so `length
-$albumNorm < 2` rejects those outright. **LL taking FROM the fleet**, the reverse of the usual
-direction.
+LL rejected any title normalising under two characters, so Sigur Rós's `( )` and a
+one-character CJK title could never match from any source. Ported verbatim from the fleet, with
+the same MANDATORY artist gate on that path — a match that thin cannot stand on the title alone,
+and it is the one place LL is NOT lenient. `_punctNorm` now reports IN SYNC across all five
+copies. Pinned in `t_refold.pl` §3e; removing the branch turns 2 red while the 0.1.66 leniency
+control stays green. **LL took this FROM the fleet**, the reverse of the usual direction.
 
 ---
 
@@ -151,9 +184,12 @@ sync with PFR/LBF/DSC.** It is AHEAD on script preservation and BEHIND on stylis
 Two repos are frozen, so the fleet cannot be brought level in one pass.
 
 Do not report as a finding:
-- that LL keeps `!!!` where the fleet folds it to `iii`
-- that LL lacks the leetspeak table
-- that LL has no `_punctNorm`
+- that LL's `_norm` body looks unchanged while its fold moved — the fold is in `_punctPass`,
+  which is pinned SEPARATELY in `matcher_sync_check.py` since 0.1.145. Before that the check
+  reported LL's `_norm` "variant OK" while the whole pass had changed underneath it
+- that LL keeps `†††` where the fleet folds to `''` — LL's all-marks fallback is BETTER here
+- that LL's dedupe KEY has no stylised-letter rules while its matcher does. Deliberate: the
+  matcher owes nothing, the key owes a rung (see below)
 - that `_asciiNorm` still uses `[^a-z0-9]` in any repo
 - that DSC or Search Hub were left unchanged
 - that LL's pass is TWO substitutions (`_` then `[^\w]`) where the fleet's is one `\p{Alnum}`

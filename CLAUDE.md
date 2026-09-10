@@ -5196,6 +5196,75 @@ The "Add to Listen Later"/"Add to Wish List" custom actions appear on streaming 
   green. What it prevents is a `|u:` key built around an EMPTY url. Five new assertions in
   `t_addpath.pl` (1,452 → 1,457), each shown red against the code with its guard removed.
 
+- **0.1.145 — LL takes the two fleet matcher rules it never received. MATCHER ONLY; nothing
+  here is persisted, so no rung and no cache bump.**
+
+  **It was MISSED, not decided.** The stylised-letter rule landed 2026-07-21 as PFR 0.7.8 across
+  the four full matcher copies. LL did not join the matcher sync until 0.1.112, and that port was
+  scoped to the THREE Discography-origin rules — it took two and skipped the compound-word
+  collapse with a stated reason. This is a fourth rule of different origin and date and appears
+  in the 0.1.112 entry neither as taken nor as skipped. Nothing ever weighed it for LL.
+
+  What it cost: `_artistMatch` is an exact-token SUBSET test, so `P!nk` keyed `p nk` against
+  `pink` and matched NOTHING — **the row silently never moves to Played**, LL's core feature,
+  the same failure the apostrophe rule fixed in 0.1.112. Measured: P!nk/Pink, Ke$ha/Kesha and
+  $uicideboy$/Suicideboys all went from no match to match. `Wham!` and `Panic!` already worked,
+  because a decorative mark falls through the separator pass either way — **the gap was only a
+  mark standing in for a LETTER.**
+
+  - **Placed at the TOP of `_punctPass`, above both existing substitutions.** That sub is shared
+    by `_norm` and `_normStrict`, which 0.1.112 requires (the gate normalises a candidate and
+    `_bestMatches` re-reads the SAME one). **The `_+` before `[^\w]+` order 0.1.144 fixed is
+    untouched** and is pinned by three assertions on the ripped-file shape.
+  - **The `&`/`+` arm changes the token SET and cannot cost a match**, because the subset test
+    absorbs the extra token — asserted in both directions. It DOES change the Bandcamp outbound
+    query text, so that was re-verified LIVE rather than reasoned: the same album returned the
+    same hit count in both spellings over jsonrpc.
+  - **The `else` branch of the `!` rule is the non-obvious half** and is pinned directly
+    (`!!!` → `iii`). Deleting it sends an all-marks name to `''`, and LL's gates read empty as
+    ABSENT, which is the 0.1.143 bug in a new costume. LL's own all-marks fallback still catches
+    a name with NO mapping (`†††`), where the fleet answers `''` — **a BENEFICIAL variant, do not
+    level it away.**
+  - **The short-title escape hatch came FROM the fleet**, the reverse of the usual direction.
+    `length $albumNorm < 2` had rejected `( )` and any one-character CJK title outright.
+    `_punctNorm` is byte-identical to the fleet's and now reports IN SYNC across all five copies.
+    **The artist gate on that path is MANDATORY** — the one place LL is not lenient, because a
+    match that thin cannot stand on the title alone. `_albumMatches` gained a fifth arg
+    (`$albumRaw`); all five call sites are in `Sources.pm`.
+
+  **A GAP IN `matcher_sync_check.py` WAS FOUND AND CLOSED, and it had been giving false
+  assurance.** LL's `_norm` DELEGATES its fold to `_punctPass`, which the check never hashed — so
+  0.1.145 changed LL's entire punctuation pass and the check still reported LL's `_norm`
+  "variant OK". `_punctPass` is now in `SUBS` **and pinned**, because a single copy is never
+  compared against anything and listing it alone would have been theatre. Anti-tested: delete one
+  line of the pass and it reports a `_punctPass` PIN MISMATCH while `_norm` still reads OK.
+  Also re-pinned `_norm`/LLDB, which 0.1.144 changed and left stale, and whose note still said
+  "rung 8".
+
+  **THE KEY HALF IS DECLINED — Simon, 2026-09-10, and it is a SCOPE decision, not a cost one.**
+  `DB::_norm` has none of these rules, so `P!nk` and `Pink` key as two rows. That is CORRECT:
+  *"if any service has one variant over another we should not try to merge them they should be
+  two entries. No user will add same album from different service its just not going to happen in
+  real usage. We add what the service gives us."* LL stores what a service handed it; a spelling
+  variant is that service's rendering of the release, not a duplicate to reconcile.
+  - **Nothing to build — it is already the behaviour.** Verified on 0.1.145: `p nk|funhouse|2008`
+    against `pink|funhouse|2008`. The case that prompted the decision is `-ii- – Ars Erotica`,
+    where Bandcamp renders `Ars Erotica : Volume I` and Deezer renders `Ars Erotica, Vol. I` —
+    keys `ii|ars erotica volume i|` and `ii|ars erotica vol i|2026`, two entries.
+  - **The MATCHER not linking that pair is accepted too**, same reasoning: LBF carries one
+    streaming match plus a separate Bandcamp link and they were never expected to agree. **Do not
+    "fix" `volume` against `vol` on the strength of this pair.**
+  - **DO NOT GENERALISE TO THE FLEET.** Discography is the opposite case — it folds variants so
+    one artist's albums line up across sources, which is its whole job. This decline follows from
+    LL storing what it was given rather than reconciling a catalogue.
+  - The cost argument that previously deferred this (a MERGING rung, the `&` arm alone moving 8
+    of 20 sample names) still holds and is now moot. If it is ever reopened, the guard 0.1.144
+    put on `_migrateCrossSourceIdentity`'s DELETE is what stops rows the new rule brings TOGETHER
+    being settled by a pass that ran against the older spelling — **do not remove it as
+    redundant** — and the ladder in `_migrate` must be re-read for the current top rung.
+
+  Tests 1,527 → 1,562 across 15 suites, all green.
+
 - **0.1.144 — three defects in 0.1.143's own fold release, all REPRODUCED before being fixed.
   The release written to stop non-Latin albums being lost could destroy them, and its "pure
   split" claim was false for ordinary Latin titles.** None of it shipped past `dev`; `main` is
@@ -5251,6 +5320,21 @@ The "Add to Listen Later"/"Add to Wish List" custom actions appear on streaming 
   it as `query_enc => 'bytes'`, encoding at its own call site — two plugins were handing one
   function opposite spellings. Latin and accented artists are unaffected, which is why the suite
   stayed green.
+  **MEASURED LIVE ON THE SERVER AFTER INSTALL (2026-09-10), and it is worse than "wrong results".**
+  The same query was put through the Bandcamp plugin's own Search row over jsonrpc in both
+  spellings. ASCII (`kristin hersh sugar on blackstone`) returns 4 hits either way — the invariant
+  that hid this for a version. `sigur rós von` as CHARACTERS returns `Unknown error: 400 Bad
+  Request` and as octets returns 7 hits. `Кино группа крови` as CHARACTERS **kills the request**:
+  the connection closes with nothing, and the server log shows `Wide character in subroutine entry
+  at Slim/Utils/DbCache.pm line 157` followed by `Bad dispatch!`; as octets it returns 18 hits
+  including the exact `Группа Крови (Album) | Кино`. So Bandcamp caches its search on the query
+  string and `DbCache->set` dies on a wide character — inside an async coderef under
+  `Slim::Plugin::OPMLBased`, where **our callback never runs and we log nothing at all**. Under
+  0.1.143 a saved non-Latin Bandcamp album would therefore have hung on replay with an empty log,
+  not merely mismatched. `Sources::_norm` was confirmed to hand the branch a `utf8`-flagged string
+  for Cyrillic, and the octets `_searchService` now builds are byte-identical to the spelling
+  measured above. Do not repeat Search Hub's comment that a `query_enc` mistake "does not error,
+  it silently returns nothing" — that holds for Qobuz, Tidal and Deezer, not for Bandcamp.
   **`t_query_enc.pl`'s Bandcamp section was the guard for exactly this and it did not fire**,
   because every fixture was accented LATIN and `Sigur Rós` still folds to `sigur ros`. All three
   ASCII-only assertions passed while the exemption underneath them was gone. **An invariant about

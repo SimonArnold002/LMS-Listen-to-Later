@@ -196,6 +196,116 @@ section("3c. AN ERASED NAME IS NOT AN ABSENT ONE — the lenient gates aimed bac
        $am->('', 'anyone'));
 }
 
+section('3d. STYLISED LETTERS — the fourth fleet rule LL never received (0.1.145)');
+# A punctuation mark standing in for a LETTER. The rule landed 2026-07-21 as PFR 0.7.8 across
+# the four full matcher copies; LL did not join the matcher sync until 0.1.112, and that port
+# was scoped to the three Discography-origin rules — two taken, the compound-word collapse
+# skipped with a stated reason. This one appears there neither as taken nor as skipped. MISSED,
+# not decided. Without it `_artistMatch`'s token SUBSET test shares no token and the row
+# silently never moves to Played — the same failure the apostrophe rule fixed in 0.1.112.
+#
+# ANTI-TEST, per rule and separately, or one assertion covers for another: drop the `$`/`@`
+# lines -> 4 red; drop the `!` branch -> 3 red; drop the `&`/`+` line -> 3 red.
+{
+    my $am = \&Plugins::ListenLater::Sources::_artistMatch;
+
+    is('a mark standing in for a letter folds to it', srcn('P!nk'),        'pink');
+    is('...unconditionally for $',                    srcn('Ke$ha'),       'kesha');
+    is('...including a trailing one',                 srcn('$uicideboy$'), 'suicideboys');
+    is('...and @',                                    srcn('M@ss'),        'mass');
+    is('currency marks fold too',                     srcn(u("M\x{a3}\x{a5}")), 'mly');
+    ok('so a stylised name now MATCHES its plain spelling',
+       $am->(srcn('P!nk'), srcn('Pink')));
+    ok('...and so does the $ pair',    $am->(srcn('Ke$ha'), srcn('Kesha')));
+    ok('...and the trailing-$ pair',   $am->(srcn('$uicideboy$'), srcn('Suicideboys')));
+
+    # A DECORATIVE mark is punctuation, not a letter, and those already worked here — the
+    # word-boundary test is what keeps them working rather than keying 'whami'.
+    is('a trailing ! is still decoration',   srcn('Wham!'),               'wham');
+    is('...and a mid-name one',              srcn('Panic! At The Disco'), 'panic at the disco');
+    ok('Layo & Bushwacka! still matches its plain spelling',
+       $am->(srcn('Layo & Bushwacka!'), srcn('Layo and Bushwacka')));
+
+    # THE `else` BRANCH. A name made ENTIRELY of marks must fold to letters, not fall through.
+    # Deleting the branch in a repo without LL's all-marks fallback sends it to '', and LL's
+    # gates read empty as ABSENT — the 0.1.143 bug in a new costume. Pinned directly.
+    is('an all-marks name folds to letters',  srcn('!!!'), 'iii');
+    ok('...so two different all-marks acts still do not match',
+       !$am->(srcn('!!!'), srcn(u("\x{2020}\x{2020}\x{2020}"))));
+    is('...and one with no mapping keeps its marks rather than erasing',
+       srcn(u("\x{2020}\x{2020}\x{2020}")), u("\x{2020}\x{2020}\x{2020}"));
+
+    # AMPERSAND. It changes the token SET, which is why it needs both halves: the fold is
+    # asserted, AND that the subset test absorbs it so no existing match is lost.
+    is('& becomes a word',   srcn('Simon & Garfunkel'),      'simon and garfunkel');
+    is('...and + does too',  srcn('Florence + The Machine'), 'florence and the machine');
+    ok('an & credit still matches the bare juxtaposition',
+       $am->(srcn('Simon & Garfunkel'), srcn('Simon Garfunkel')));
+    ok('...and the spelled-out form',
+       $am->(srcn('Simon & Garfunkel'), srcn('Simon and Garfunkel')));
+
+    # THE REGRESSION HALF. 0.1.144 fixed an order bug in this very sub that no fixture caught,
+    # because none had an underscore ADJACENT to other punctuation — the ripped-file shape.
+    # The new block goes ABOVE both substitutions, so it must not disturb that order.
+    is('an underscore beside punctuation still collapses to ONE space',
+       srcn('01_-_Intro'), '01 intro');
+    is('...on the shape that actually broke',
+       srcn('Boards_of_Canada_-_Roygbiv'), 'boards of canada roygbiv');
+    is('...and a plain underscore is unchanged', srcn('under_score'), 'under score');
+
+    # 0.1.143 MUST NOT BE UNDONE — the fixtures outside the range that motivated this rule.
+    is('a CJK name still survives',      srcn(u("\x{7c73}\x{6d25}\x{7384}\x{5e2b}")), u("\x{7c73}\x{6d25}\x{7384}\x{5e2b}"));
+    is('a Cyrillic name still survives', srcn(u("\x{41a}\x{438}\x{43d}\x{43e}")),     u("\x{43a}\x{438}\x{43d}\x{43e}"));
+    ok('and two different CJK artists still do not match',
+       !$am->(srcn(u("\x{7c73}\x{6d25}\x{7384}\x{5e2b}")), srcn(u("\x{4e2d}\x{5cf6}\x{307f}\x{3086}\x{304d}"))));
+
+    # THE GATE AND THE RANKER SHARE _punctPass, which 0.1.112 requires: the gate normalises a
+    # candidate and _bestMatches re-reads the SAME one, so a divergence lets a title clear the
+    # gate and then fail its own exact-title tier.
+    is('the ranker folds stylised letters identically', strn('P!nk'), srcn('P!nk'));
+    is('...and the ampersand identically',              strn('Simon & Garfunkel'),
+                                                        srcn('Simon & Garfunkel'));
+    is('...while still keeping its OWN distinguisher',  strn('American Football (LP4)'),
+       'american football lp4');
+}
+
+section('3e. A TITLE THAT NORMALISES TO NOTHING — the escape hatch LL never took');
+# `length $albumNorm < 2` rejected Sigur Rós's "( )" and any one-character CJK title outright,
+# so they could never match from any source. DSC/PFR/LBF have had `_punctNorm` since
+# 2026-07-10; ported at 0.1.145. LL taking FROM the fleet, the reverse of the usual direction.
+#
+# ANTI-TEST: remove the branch and the first two go red while the leniency control stays GREEN.
+{
+    my $al = \&Plugins::ListenLater::Sources::_albumMatches;
+    my $cjk = u("\x{7cf8}");
+
+    ok('an all-paren title can be matched at all now',
+       $al->(srcn('Sigur Ros'), srcn('( )'), 'Sigur Ros', '( )', '( )'));
+    ok('...and a ONE-character CJK title',
+       $al->(srcn(u("\x{4e2d}\x{5cf6}\x{307f}\x{3086}\x{304d}")), srcn($cjk),
+             u("\x{4e2d}\x{5cf6}\x{307f}\x{3086}\x{304d}"), $cjk, $cjk));
+
+    # EXACT equality only on that path — a prefix rule would let "x" swallow "xx".
+    ok('...but it does NOT swallow a longer title',
+       !$al->(srcn('Sigur Ros'), srcn('( )'), 'Sigur Ros', '( ) (live)', '( )'));
+    ok('...nor match a different CJK title of the same length',
+       !$al->(srcn(u("\x{4e2d}\x{5cf6}\x{307f}\x{3086}\x{304d}")), srcn($cjk),
+              u("\x{4e2d}\x{5cf6}\x{307f}\x{3086}\x{304d}"), u("\x{6b4c}"), $cjk));
+
+    # THE ARTIST GATE IS MANDATORY HERE, unlike everywhere else in LL. A match this thin
+    # cannot stand on the title alone.
+    ok('...and rejects a different artist',
+       !$al->(srcn('Sigur Ros'), srcn('( )'), 'Other Band', '( )', '( )'));
+    ok('...and refuses an EMPTY artist, where the normal path would accept',
+       !$al->('', srcn('( )'), 'Anyone', '( )', '( )'));
+    ok('THE CONTROL: the normal path still accepts an empty artist (0.1.66 replay)',
+       $al->('', srcn('Open Soul'), 'Anyone', 'Open Soul', 'Open Soul'));
+
+    # A raw title that is only whitespace has nothing to compare on either.
+    ok('a title with nothing in it at all still matches nothing',
+       !$al->(srcn('Sigur Ros'), srcn('  '), 'Sigur Ros', '  ', '  '));
+}
+
 # ---------------------------------------------------------------------------
 section('4. THE MIGRATION — a stored key is not a cache');
 # Every dedupe_key written before the fold is stale, and a stale key is INVISIBLE: add()

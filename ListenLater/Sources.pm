@@ -1180,7 +1180,7 @@ sub _searchService {
             my @cand;
             for my $a (@{ ($res && $res->{albums} && $res->{albums}{items}) || [] }) {
                 my $candArtist = ref $a->{artist} eq 'HASH' ? $a->{artist}{name} : '';
-                next unless _albumMatches(_norm($artist), _norm($album), $candArtist, $a->{title});
+                next unless _albumMatches(_norm($artist), _norm($album), $candArtist, $a->{title}, $album);
                 my $item = Plugins::Qobuz::Plugin::_albumItem($client, $a);
                 # Raw date field first; fall back to the year the renderer already shows on
                 # the item (e.g. "… (2026)") so we don't depend on the exact Qobuz key name.
@@ -1211,7 +1211,7 @@ sub _searchService {
                 if (defined $wantId && length $wantId && $pt->{album_id} eq $wantId) {
                     push @idHits, $it;
                 }
-                elsif (_albumMatches(_norm($artist), _norm($album), $pt->{artist}, $pt->{title})) {
+                elsif (_albumMatches(_norm($artist), _norm($album), $pt->{artist}, $pt->{title}, $album)) {
                     push @titleHits, $it;
                 }
             }
@@ -1234,7 +1234,7 @@ sub _searchService {
                 next unless ref $a eq 'HASH';
                 my $ar = $a->{artist} || ($a->{artists} && $a->{artists}[0]) || {};
                 my $candArtist = ref $ar eq 'HASH' ? $ar->{name} : '';
-                next unless _albumMatches(_norm($artist), _norm($album), $candArtist, $a->{title});
+                next unless _albumMatches(_norm($artist), _norm($album), $candArtist, $a->{title}, $album);
                 my $item = Plugins::TIDAL::Plugin::_renderAlbum($a);
                 my $cy = _yearOf($a->{releaseDate} // $a->{year})
                       || _yearOf($item->{name}) || _yearOf($item->{line1}) || _yearOf($item->{line2});
@@ -1259,7 +1259,7 @@ sub _searchService {
                 next unless ref $a eq 'HASH';
                 my $ar = $a->{artist} || ($a->{artists} && $a->{artists}[0]) || {};
                 my $candArtist = ref $ar eq 'HASH' ? $ar->{name} : '';
-                next unless _albumMatches(_norm($artist), _norm($album), $candArtist, $a->{title});
+                next unless _albumMatches(_norm($artist), _norm($album), $candArtist, $a->{title}, $album);
                 my $item = Plugins::Deezer::Plugin::_renderAlbum($a);
                 my $cy = _yearOf($a->{release_date} // $a->{year})
                       || _yearOf($item->{name}) || _yearOf($item->{line1}) || _yearOf($item->{line2});
@@ -1308,7 +1308,7 @@ sub _searchService {
             for my $a (@{ (ref $albums eq 'ARRAY') ? $albums : [] }) {
                 next unless ref $a eq 'HASH';
                 my $candArtist = spottyArtistName($a);
-                next unless _albumMatches(_norm($artist), _norm($album), $candArtist, $a->{name});
+                next unless _albumMatches(_norm($artist), _norm($album), $candArtist, $a->{name}, $album);
                 # Guard the foreign renderer: we are inside an async callback, so a die
                 # here is caught by nothing — skip the bad candidate instead (the same
                 # treatment the sibling plugin gives every service's renderer).
@@ -1549,6 +1549,45 @@ sub _fold {
 # documented trade in _fold's header.
 sub _punctPass {
     my $s = shift // '';
+
+    # STYLISED LETTERS — a punctuation mark standing in for a LETTER (0.1.145). Copied
+    # VERBATIM from the fleet (PitchforkReviews::Browse::_norm, PFR 0.7.8, 2026-07-21), which
+    # LL never received: that rule predates LL joining the matcher sync at 0.1.112, and the
+    # 0.1.112 port was scoped to the three Discography-origin rules — it took two and skipped
+    # the compound-word collapse with a stated reason. This fourth rule appears in that entry
+    # neither as taken nor as skipped. It was MISSED, not decided.
+    #
+    # What it costs to be without it: `_artistMatch` is an exact-token SUBSET test and the
+    # tokens don't survive, so 'P!nk' keyed 'p nk' against 'pink' and matched NOTHING. In LL
+    # that means the row silently never moves to Played — the plugin's core feature — which is
+    # the same failure the apostrophe rule fixed in 0.1.112.
+    #
+    # ONLY '!' gets the word-boundary test, because only '!' has a genuine decorative use
+    # (Wham!, Panic!, Godspeed You!, Layo & Bushwacka!) — those already worked here, since a
+    # trailing mark falls through to the separator pass either way. '$'/'@' are unconditional:
+    # a trailing '$' is an 's' ($uicideboy$).
+    #
+    # THE `else` BRANCH IS THE NON-OBVIOUS HALF AND MUST NOT BE SIMPLIFIED AWAY. A name made
+    # ENTIRELY of marks ('!!!', a real band) would otherwise reach the fallback below, and
+    # while that fallback now keeps it non-empty, folding to 'iii' is what agrees with the
+    # fleet. Deleting the branch in a repo WITHOUT that fallback sends the name to '', and
+    # LL's gates read empty as ABSENT — i.e. the 0.1.143 bug in a new costume.
+    #
+    # '&'/'+' -> ' and ' cannot cost a match here even though it changes the token set:
+    # `_artistMatch` is a SUBSET test, so 'simon garfunkel' still matches 'simon and
+    # garfunkel'. Measured on five &/+ pairs, all matching before and after. It DOES change
+    # the Bandcamp outbound query text (_searchService builds it from _norm) — that string is
+    # still ASCII by construction here, so it acquires no encoding hazard, but the query is
+    # re-verified live rather than assumed. See the 0.1.144 entry.
+    $s =~ s/\$/s/g;
+    $s =~ s/\@/a/g;
+    if ($s =~ /[\p{Alnum}]/) { $s =~ s/(?<=\w)!(?=\w)/i/g }
+    else                     { $s =~ s/!/i/g }
+    $s =~ s/\x{20ac}/e/g;   # €
+    $s =~ s/\x{a3}/l/g;     # £
+    $s =~ s/\x{a5}/y/g;     # ¥
+    $s =~ s/[&+]/ and /g;
+
     # The underscore substitution runs FIRST, and the order is the whole point — see the
     # block comment in DB::_norm, which carries the measurement. Briefly: '_' is a \w
     # character, so running the non-word pass first leaves it out of the separator run
@@ -1600,9 +1639,43 @@ sub _norm {
 }
 
 # Candidate title must BE or START WITH our album, and artists must match.
+# Lowercase and strip whitespace, KEEPING every mark. Copied verbatim from the fleet
+# (0.1.145) as the escape hatch for the branch below. It is not a third normaliser competing
+# with _norm/_normStrict — it is only ever reached when those two have answered (near)
+# nothing, and it deliberately does no folding at all, because the marks ARE the name there.
+sub _punctNorm {
+    my $s = shift // '';
+    if (!utf8::is_utf8($s) && $s =~ /[^\x00-\x7f]/) {
+        my $d = $s;
+        $s = $d if utf8::decode($d);
+    }
+    $s = lc($s);
+    $s =~ s/\s+//g;
+    return $s;
+}
+
 sub _albumMatches {
-    my ($artistNorm, $albumNorm, $candArtist, $candTitle) = @_;
-    return 0 if length $albumNorm < 2;
+    my ($artistNorm, $albumNorm, $candArtist, $candTitle, $albumRaw) = @_;
+
+    # A TITLE THAT NORMALISES TO (NEAR) NOTHING — Sigur Rós's "( )", a one-character CJK
+    # title. `length $albumNorm < 2` rejected these outright, so they could never match from
+    # any source. The fleet has had this escape hatch since DSC 2026-07-10 and LL never took
+    # it; ported at 0.1.145 with the same shape, LL taking FROM the fleet for once.
+    #
+    # Compare a punctuation-PRESERVING form instead: "( )" == "()" but != "( ) (live)".
+    # EXACT equality only — the prefix rule below would let "x" swallow "xx".
+    #
+    # THE ARTIST GATE IS MANDATORY HERE, and that is not a contradiction of LL's leniency
+    # elsewhere: the fleet's stated reason is that a match this thin cannot stand on the title
+    # alone. LL's `return 1 unless length $artistNorm` replay path (0.1.66) is untouched and
+    # still applies to every normal title below.
+    if (length($albumNorm) < 2) {
+        my $ap = _punctNorm($albumRaw);
+        return 0 unless length $ap;
+        return 0 unless _punctNorm($candTitle) eq $ap;
+        return 0 if !defined $artistNorm || $artistNorm eq '';
+        return _artistMatch($artistNorm, _norm($candArtist));
+    }
 
     my $ct = _norm($candTitle);
 
