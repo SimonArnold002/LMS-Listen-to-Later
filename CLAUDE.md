@@ -627,13 +627,24 @@ subsystem.
       from it. A second claim from the same round, that LBF's track cache key collides for
       non-Latin tracks, was also measured and is FALSE — the key is non-empty because LBF's
       `_norm` preserves the script. Do not re-raise either. See `docs/fleet-fold-rollout.md`.
-    - **What IS still out of sync, and it is the other direction:** LL's MATCHER never received
-      the fleet's stylised-letter fold, so `P!nk` keys `p nk` against the fleet's `pink`, and
-      `Ke$ha` keys `ke ha` against `kesha`. Pre-existing, not caused by 0.1.143. Plus one
-      divergence 0.1.143 DID introduce: LL's punctuation fallback keeps the raw marks (`!!!` →
-      `!!!`) where the fleet folds them to letters (`iii`). Right for the KEY, wrong for the
-      matcher. Tracked as item 1 in `docs/fleet-fold-rollout.md`; DSC and Search Hub are ON
-      HOLD, so the fleet cannot be levelled in one pass and the gap is deliberate meanwhile.
+    - **The stylised-letter gap this entry used to describe is CLOSED (0.1.145). Do not
+      re-raise it.** LL's matcher had never received the fleet's fold, so `P!nk` keyed `p nk`
+      against `pink`; it now takes the fleet block verbatim in `Sources::_punctPass`, shared by
+      `_norm` and `_normStrict`. P!nk/Pink, Ke$ha/Kesha and $uicideboy$/Suicideboys all match.
+      The `!!!` divergence 0.1.143 introduced went with it — LL folds `!!!` → `iii` like the
+      fleet now, and the all-marks fallback survives only for a name with NO mapping (`†††`),
+      which is a variant BETTER than the fleet's rather than drift.
+    - **THE DEDUPE KEY HAS NONE OF THOSE RULES, AND THAT IS DECLINED — NOT PENDING, NOT
+      DEFERRED (Simon, 2026-09-10).** *"if any service has one variant over another we should
+      not try to merge them they should be two entries. No user will add same album from
+      different service its just not going to happen in real usage. We add what the service
+      gives us."* So `P!nk` and `Pink` are TWO ROWS by design, and so are `Ars Erotica : Volume
+      I` (Bandcamp) and `Ars Erotica, Vol. I` (Deezer) for `-ii-`. **The matcher not linking
+      that pair is accepted too.** Already the behaviour, so nothing was built. Do not report
+      the two rows as a dedupe defect, do not propose a rung for it, and do not "fix" `volume`
+      against `vol` on the strength of that pair. **DO NOT GENERALISE TO THE FLEET** —
+      Discography is the opposite case and folds variants deliberately, because lining one
+      artist's albums up across sources is its whole job.
   - **The whole thing is anti-tested in both halves**, because either alone would pass against
     a fix that does nothing: revert the fold entirely and 27 assertions go red across
     `t_db.pl`, `t_addpath.pl` and `t_refold.pl`; remove ONLY the punctuation fallback and
@@ -1923,6 +1934,55 @@ to it, 15/15 suites green (t_addpath 232, t_material_actions 262, t_podcast_purg
 touched is new, so expect it to attract findings; the four most likely are answered in §A2 above
 under the `|u:` key entry, in §B under the purge guard, and in §A2 under `%ours`/`favorites-*`.**
 Cite one of those entries and what is new about your case, or the round trip is wasted.
+
+**CLOSED at 0.1.143 (2026-09-10) — the `|u:` round and the fold round that followed it.**
+Closed together because the second grew out of the first. 0.1.142 reproduced three findings
+against the `|u:` key and changed NO shipped code: the whole output was five assertions in
+`t_addpath.pl` and a ledger entry, which is the right outcome when a finding is real at one layer
+and closed at another. 0.1.143 then fixed the defect that round exposed — `_norm` erased CJK,
+Cyrillic and every all-mark name to the empty string, so unrelated albums shared one dedupe key.
+LL was the ONLY repo with it; PFR, LBF and DSC were measured and were already correct, and two
+claims made against them that round are retracted in `docs/fleet-fold-rollout.md`. Do not port
+this fix to the other three, and do not re-raise either retracted claim.
+
+**CLOSED at 0.1.145 (2026-09-10) — the review of 0.1.143's own fold release, and the fleet rules
+it turned up.** The round found four defects in the release that had just fixed the fold, every
+one reproduced before it was fixed rather than taken on the reviewer's word, which changed two
+verdicts: the migration finding went from PLAUSIBLE to deterministic data loss, and the fold-order
+finding turned out to have a narrower and nastier trigger than reported. In order of severity:
+the migration ladder ran its cross-source merge BEFORE the refold, so three unrelated non-Latin
+albums sharing the erased key went in and one came out, with no way back; the new fold ran its two
+substitutions in the order that does not commute, breaking both the stored key and the live match
+for any underscore next to other punctuation; a dev database already stamped 8 would have kept the
+wrong keys; and the Bandcamp search query silently acquired a characters/octets camp when the fold
+learned to keep every script.
+
+**0.1.145 then took two fleet matcher rules LL had never received** — the stylised-letter fold
+(missed at the 0.1.112 port, not decided) and the `_punctNorm` short-title hatch, which LL took
+FROM the fleet rather than the usual direction. The KEY half of the first was DECLINED by Simon
+in the same pass; it is recorded in §A2 above and must not come back as a finding.
+
+**Two things from this round are worth a reviewer's attention before opening a new one.**
+(1) **The fold's two-substitution shape is LL-only BY CONSTRUCTION and the ORDER is load-bearing.**
+`\w` includes the underscore and `\p{Alnum}` does not, so only LL strips it separately — and it
+must, because `_` is a LIKE metacharacter and two finders build patterns straight out of `_norm`
+with no ESCAPE. It is commented at the sub and pinned by three assertions on the ripped-file shape.
+(2) **A fold change is an ENCODING change.** The Bandcamp defect was not in the fold at all: the
+moment a normaliser starts preserving codepoints it used to erase, every consumer downstream
+inherits a character string it has never seen, and the fold's own tests cannot see any of them.
+Measured live on the server rather than reasoned — the same query as CHARACTERS returns
+`400 Bad Request` for an accented name and KILLS THE REQUEST for a Cyrillic one
+(`Wide character in subroutine entry at Slim/Utils/DbCache.pm line 157`, then `Bad dispatch!`),
+inside an async coderef where our callback never runs and we log nothing. As octets it returns the
+album. Do not repeat Search Hub's comment that a `query_enc` mistake "does not error, it silently
+returns nothing" — true for Qobuz, Tidal and Deezer, false for Bandcamp.
+
+**State at close**, so the next review can tell what it is looking at: 0.1.145 in `install.xml`
+and `repo.xml`, zip rebuilt with `<sha>` equal to it, README regenerated to match, 15/15 suites
+green at 1,562 assertions, and the live build on the server verified as the RUNNING module rather
+than the version on disk. Bandcamp was exercised end to end against it — an add, a resolve to a
+full tracklist, and a Buy link to the real album page. Commits sit on `dev` UNPUSHED, which is the
+review gate and not an oversight.
 
 ### D. ADDING TO THIS LEDGER
 
