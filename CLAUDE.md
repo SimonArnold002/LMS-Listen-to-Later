@@ -4943,6 +4943,19 @@ The "Add to Listen Later"/"Add to Wish List" custom actions appear on streaming 
   real sub — `Plugin.pm` now calls `Podcast::RESOLVE_BUDGET()` across packages and the checker
   reported it as undefined, a false positive indistinguishable from a true one.
 
+- **0.1.141 — the six STANDING ACCEPTED ledger entries, closed.** Not a review round: these were
+  the entries accepted as REAL and left alone on probability or cost rather than being disproven.
+  Five changed, one confirmed as Material's limitation rather than ours. **Two carry a behaviour
+  change a user can see**: two artist-less tracks that share a title now store as two rows instead
+  of collapsing into one (`DB::trackUrlKey`, and it owes NO migration rung — the collision is
+  disambiguated lazily, so no stored key is rewritten), and the Material prune now NAMES every
+  empty category it removes, flagging separately the ones claimed by a retired name alone. The
+  rest are a migration warn that named the wrong schema version, a guard on the podcast purge's
+  reach into `Sources` that aborts the rung rather than deleting on a question it cannot answer,
+  and one duplicate ref extraction folded away. **The round entry in the Review Ledger above is
+  the record** — including the remedy this file itself had written down for one of them, which
+  turned out to be impossible, and the four separate ways a green suite proved nothing.
+
 ## Regression tests — RUN THESE BEFORE ANY BUILD (added 2026-07-29)
 
     sh tools/t_all.sh          # one line per suite, non-zero exit on any failure

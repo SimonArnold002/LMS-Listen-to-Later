@@ -3,14 +3,14 @@
     <title lang="EN">Listen Later</title>
   </details>
   <plugins>
-    <plugin name="ListenLater" version="0.1.140" minTarget="9.0.0" maxTarget="*">
+    <plugin name="ListenLater" version="0.1.141" minTarget="9.0.0" maxTarget="*">
       <title lang="EN">Listen Later</title>
       <desc lang="EN">Save albums from your library or any streaming service to a Listen Later list, with automatic Played tracking</desc>
       <url>https://raw.githubusercontent.com/SimonArnold002/LMS-Listen-to-Later/dev/ListenLater.zip</url>
       <link>https://simonarnold002.github.io/LMS-Listen-to-Later/README.html</link>
       <creator>CrystalGipsy</creator>
       <email></email>
-      <sha>492a93590d2a48f905051ddaf6ffecc98bcde8af</sha>
+      <sha>83d20469ad89eb2067e222cc4a29666f26007cc3</sha>
     </plugin>
   </plugins>
 </extensions>
