@@ -273,8 +273,20 @@ subsystem.
 - **Custom actions on Material HOME shelves work only after a streaming browse.**
   Diagnosed to a main-bundle limitation, and **deliberately left unpatched** to
   keep the Material footprint to the single deferred-bundle patch.
-- **Individual-Track saves are SCOPED BUT NOT BUILT** (~1 day). Known risks are
-  recorded. "Tracks aren't supported" is not a finding.
+- ~~**Individual-Track saves are SCOPED BUT NOT BUILT** (~1 day).~~ **WRONG SINCE 0.1.74 —
+  DELETED 2026-09-10. Individual track saves SHIPPED in 0.1.74-0.1.78** and the version history
+  below says so in as many words. The entry survived the feature it described by about seventy
+  versions, and it was quoted back at the user as outstanding work in this session before anyone
+  checked it against the code. `kind='track'` rows, `Plugin::_insertTrackRow`, the `track` /
+  `queue-track` Material categories and the whole track half of `t_addpath.pl` are the
+  disproof. **What IS still true and is the useful half:** a track row is keyed by name unless
+  it is nameless, in which case the play url decides — see the `|u:` entry below — and a saved
+  track never auto-moves to Played by threshold, because a track has no "most of it".
+  **The lesson, since this is the second stale claim this file produced in one day** (the other
+  being the `use` remedy in §B that could not compile): an entry that says something does NOT
+  exist ages worse than any other kind, because nothing in the code contradicts it where a
+  reader will look. When a "not built" entry is older than a few releases, grep for the feature
+  before repeating it.
 - **Playlist support is CURATED/SERVICE playlists only (0.1.107).** A Qobuz
   PERSONAL playlist with no artwork of its own has NO recoverable identity — its
   cover falls back to a constituent track's album art (`…/images/covers/…`), which
