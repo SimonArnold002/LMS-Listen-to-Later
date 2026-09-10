@@ -1508,12 +1508,53 @@ section('the same play url is the same track, whatever the row called it');
     is('...and the row it deduped to is the first one',
         ($n1 ? Plugins::ListenLater::DB::get($n1->{id})->{dedupe_key} : 'nothing'),
         'a band|||t:named song');
-    # An artist-less track with no url has nothing better to key on, so it keeps the old
+    # An artist-less track with NO url has nothing better to key on, so it keeps the old
     # behaviour deliberately — the safer of two guesses, and stated so it is not read as an
-    # oversight.
-    my $f1 = add(kind => 'track', trackname => 'No Url Song', svc => 'qobuz',
-                 favurl => 'qobuz://888333.flac');
-    is('a nameless track with a url stores', ($f1 ? 'stored' : 'collapsed'), 'stored');
+    # oversight. Asked through DB::add DIRECTLY, because _addCtxCommand refuses an add that
+    # carries no play url at all, so this case cannot be expressed through the add command.
+    # Measured 2026-09-10: the fixture that used to stand here passed a favurl, so it never
+    # reached the no-url arm and the `length $mine && length $their` guard had ZERO coverage
+    # — deleting the guard left all 15 suites green. What the guard actually prevents is a
+    # '|u:' key built round an EMPTY url, which is an identity that identifies nothing.
+    my ($f1) = Plugins::ListenLater::DB::add({ source => 'qobuz', kind => 'track',
+        track_title => 'No Url Song', ref_kind => 'url',
+        ref => { url => 'qobuz://888333.flac' } }, 'later');
+    my ($f2, $fDup) = Plugins::ListenLater::DB::add({ source => 'qobuz', kind => 'track',
+        track_title => 'No Url Song', ref_kind => 'url', ref => {} }, 'later');
+    is('a nameless track with NO url still dedupes to the title twin',
+        ($fDup ? 'already saved' : 'stored a second row'), 'already saved');
+    is('...and answers with the twin it deduped to', $f2, $f1);
+    is('...so no |u: key is ever minted around an empty url',
+        scalar @{ Plugins::ListenLater::DB::dbh()->selectall_arrayref(
+            "SELECT id FROM albums WHERE dedupe_key LIKE '%|u:qobuz:'") }, 0);
+
+    # THE CALLER IS WHAT CLOSES THE LAZY DISAMBIGUATION — pin it, because the layer below it
+    # is not self-closing. DB::add rebuilds the plain '|||t:<title>' key on every add (an add
+    # rec carries no dedupe_key), and the '|u:' branch is gated on FINDING the twin. Delete
+    # the twin and the branch cannot fire, so DB::add on its own stores a second row for the
+    # url-keyed track's own play url. Measured 2026-09-10 by calling DB::add directly: two
+    # rows, one play url, no UNIQUE violation because the two keys differ.
+    #
+    # Nothing reaches that, and this is why: kind='track' reaches DB::add from exactly ONE
+    # caller, _insertTrackRow, which checks findTrackByUrl FIRST with no artist gate — and
+    # the case needs the re-add to carry a url, so the guard always fires. That guard is
+    # therefore load-bearing for a defect one layer down, which is precisely the shape the
+    # 0.1.129 _keyForRow entry warns about ('the guard lived entirely in the CALLER'). These
+    # two assertions are what go red if it is ever removed or moved behind an artist test.
+    my $g1 = add(kind => 'track', trackname => 'Ghost Track', svc => 'qobuz',
+                 favurl => 'qobuz://888444.flac');
+    my $g2 = add(kind => 'track', trackname => 'Ghost Track', svc => 'qobuz',
+                 favurl => 'qobuz://888555.flac');
+    is('two nameless same-titled tracks both store', (($g1 && $g2) ? 'two rows' : 'not two'),
+        'two rows');
+    Plugins::ListenLater::DB::remove($g1->{id});
+    my $g3 = add(kind => 'track', trackname => 'Ghost Track', svc => 'qobuz',
+                 favurl => 'qobuz://888555.flac');
+    is('re-adding the url-keyed track once its twin is DELETED is refused by the url guard',
+        (defined $g3 ? 'stored a duplicate' : 'refused'), 'refused');
+    is('...so exactly one row still carries that play url',
+        scalar(grep { ($_->{ref}{url} // '') eq 'qobuz://888555.flac' }
+               @{ Plugins::ListenLater::DB::list('later', 'added') }), 1);
 }
 
 section('0.1.136 — a Podcasts-app row now falls to the generic online-* Add');
