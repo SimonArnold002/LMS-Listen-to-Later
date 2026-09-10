@@ -1,19 +1,51 @@
-# Fleet fold state after LL 0.1.144 — what is actually outstanding
+# Fleet fold state after LL 0.1.145 — what is actually outstanding
 
 **Status 2026-09-10.** LL 0.1.143 fixed a non-Latin fold defect. The obvious next step looked
 like porting it to the other four repos. **That is not the work.** Measured against the shipped
 source of each repo, PFR, LBF and DSC were already correct. LL was the outlier, and the fix
 brought it UP to the fleet, it did not diverge from it.
 
-**0.1.144 then corrected three defects in that fold release, and TWO of them change what this
+**0.1.145 then closed items 1 and 3 below**, taking the fleet's stylised-letter block and the
+`_punctNorm` short-title hatch into LL's matcher. Item 1's KEY half was DECLINED in the same pass,
+so the only fold work still open fleet-wide is item 2. The `†††` residue.
+
+**0.1.144 then corrected four defects in that fold release, and THREE of them change what this
 doc says.** (a) 0.1.143's new pass ran its two substitutions in the order that does not commute,
 so an underscore next to other punctuation produced a doubled separator and `01_-_Intro` keyed
 `01   intro`. Fixed in both LL carriers; **the measured table below is unaffected**, because
 every row in it is non-Latin or has no underscore, which is exactly why the suite missed it.
-(b) **The refold rung now stamps `user_version` 9**, so the stylised-letter fold in item 1 below
-would be rung **10**, not 9. That number was already written into this doc and is corrected in
-place. The third defect (a migration ordering bug that DELETED non-Latin rows) is LL-internal
-and does not touch the fleet. See the 0.1.144 entry in LL's `CLAUDE.md`.
+(b) **The refold rung now stamps `user_version` 9**, so the next stored-key change to land, whatever
+it turns out to be, is rung **10**. This doc used to attach that number to the stylised-letter fold
+in item 1; 0.1.145 declined that rung, so **10 is simply the next free rung and is not spoken for**.
+Check the ladder in `DB::_migrate` before quoting a number — the last draft of this line was stale
+within a day. **The one defect that does NOT change this doc** is the migration ordering bug that
+DELETED non-Latin rows: LL-internal, and the fleet ladder is untouched by it. See the 0.1.144 entry in LL's `CLAUDE.md`.
+
+**(c) A FOLD CHANGE IS AN ENCODING CHANGE, and that belongs in this doc rather than LL's.** The
+last of the four was not in the fold at all: LL's Bandcamp search query is built from `_norm`, and
+until 0.1.143 that pass returned ASCII by construction, so the branch was deliberately
+exempt from the fleet's characters/octets split. 0.1.143 ended the exemption by teaching the fold
+to keep every script — without touching, or even looking at, the code downstream of it. **The
+general form is the part to carry forward: the moment a normaliser starts preserving codepoints
+it used to erase, every consumer of its output inherits a character string it has never seen, and
+the fold's own tests cannot see any of them.** Items 1 and 2 below are both changes of exactly
+that kind.
+
+MEASURED on the live server 2026-09-10, same query in both spellings through Bandcamp's own
+search, because the failure mode is worse than the "silently returns nothing" this doc's
+predecessors assumed:
+
+| query | as CHARACTERS | as OCTETS |
+|---|---|---|
+| `kristin hersh sugar on blackstone` | 4 hits | 4 hits, identical |
+| `sigur rós von` | `Unknown error: 400 Bad Request` | 7 hits |
+| `Кино группа крови` | **request dies**, `Wide character in subroutine entry at Slim/Utils/DbCache.pm line 157`, then `Bad dispatch!` | 18 hits, exact album found |
+
+Bandcamp caches its search on the query string, and `DbCache->set` dies on a wide character. The
+die lands inside an async coderef under `Slim::Plugin::OPMLBased`, so **the caller's callback
+never runs and the caller logs nothing** — it presents as a hang, not an error. **Do not repeat
+the claim in Search Hub's `Adapters.pm` header that a `query_enc` mistake "does not error, it
+silently returns nothing"** — that holds for Qobuz, Tidal and Deezer, not for Bandcamp.
 
 This doc records what was verified, what is genuinely left, and what a review must not flag.
 
@@ -48,19 +80,26 @@ Do not "fix" `_asciiNorm` — being ASCII is its job.
 2. **"LBF's track cache key collides for non-Latin tracks."** No. `Browse.pm:8306` keys on
    `($recMbid || _norm($query))`, and since LBF's `_norm` preserves the script, the query is
    non-empty. Verified: 米津玄師/Lemon, 中島みゆき/歌姫 and Кино/Группа крови all produce distinct
-   keys. The collision needs an all-symbol name AND a missing recording MBID.
+   keys. The collision needs an all-symbol name AND a missing recording MBID. **Re-checked at the
+CONSUMING end 2026-09-10, which the original retraction did not do:** distinct keys are only half
+the question, because a key holding a wide character also has to survive `DbCache->set`. It does —
+`Browse.pm` runs `utf8::encode($key) if utf8::is_utf8($key)` on the line after it builds it, and
+DSC's `_artImgKey` does the same for `dsc:svcartimg:`. Those are the fleet's only two cache keys
+built out of `_norm`.
 
 ---
 
 ## What IS outstanding
 
-### 1. The stylised-letter fold — MATCHER HALF DONE (0.1.145). The KEY half is still open.
+### 1. The stylised-letter fold — MATCHER HALF DONE (0.1.145), KEY half DECLINED. Nothing open.
 
 **0.1.145 took the fleet block verbatim into `Sources::_punctPass`**, which `_norm` and
 `_normStrict` share, so the gate and the ranker fold identically as 0.1.112 requires. P!nk/Pink,
 Ke$ha/Kesha and $uicideboy$/Suicideboys now match. Live check: the Bandcamp query text changes
 (`&` becomes " and ") and recall is unaffected — the same album returned the same hit count in
-both spellings over jsonrpc. Pinned in `t_refold.pl` §3d, anti-tested per rule: the `$`/`@`
+both spellings over jsonrpc. **That result is ASCII-only and says nothing about which spelling to
+send** — the two spellings of an ASCII query are the same bytes. For non-ASCII they are emphatically
+not the same, and one of them kills the request: see (c) in the status block. Pinned in `t_refold.pl` §3d, anti-tested per rule: the `$`/`@`
 lines 5 red, the `!` branch 3, the `&`/`+` line 2, and no cross-coverage between them.
 
 **THE KEY HALF IS DECLINED — Simon, 2026-09-10. This is a scope decision, not a cost one.**
@@ -111,7 +150,12 @@ was scoped to the THREE Discography-origin rules — it took two and skipped the
 collapse with a stated reason. The stylised fold is a fourth rule of different origin and date
 and appears in the 0.1.112 entry neither as taken nor as skipped. Nothing ever weighed it for LL.
 
-**BOTH LL normalisers need it, and the key half owes a RUNG.** `P!nk` and `Pink` currently key
+**SUPERSEDED BY THE DECLINE ABOVE — kept because the reasoning is still correct, only the
+conclusion changed.** What follows is the case for folding the KEY, written before Simon ruled on
+it. It is accurate about the cost; it is simply no longer work. Do not act on it, and do not
+re-derive it as a new finding: two rows for two spellings is now the specified behaviour.
+
+**BOTH LL normalisers would need it, and the key half would owe a RUNG.** `P!nk` and `Pink` key
 `p nk` and `pink`, so the same album from two services is TWO ROWS. Folding them is a stored-key
 change, i.e. **rung 10** (rung 9 is the refold, since 0.1.144 — an earlier draft of this line
 said 9 and was stale within a day, so check the ladder in `DB::_migrate` before quoting a
@@ -124,13 +168,16 @@ deletes rows that share a STORED key, and 0.1.143 ran it BEFORE its own refold �
 database still holding old-fold keys it merged unrelated albums away before the refold could
 split them. A merging fold makes the mirror mistake reachable: rows this rule brings TOGETHER
 must not be settled by a pass that ran against the older spelling. The guard now in
-`_migrateCrossSourceIdentity` — ask the CURRENT fold before deleting — already covers it, and
-must not be removed as redundant when this rung lands.
+`_migrateCrossSourceIdentity` — ask the CURRENT fold before deleting — already covers it.
+**This half OUTLIVES the decline and is the reason to keep reading the paragraph above.** It is a
+precondition on ANY future merging fold in this repo, not on the cancelled rung, so the guard must
+not be removed as redundant just because nothing is queued behind it today.
 
-**Also introduced by 0.1.143 and to be settled with the above:** LL's punctuation fallback keeps
-the raw marks (`!!!` → `!!!`) where the fleet folds them to letters (`!!!` → `iii`). For the DB
-key, keeping the marks is right. For the matcher it is a divergence, and the fleet's rule is the
-one to adopt.
+**The `!!!` divergence this doc used to list here is CLOSED (0.1.145).** LL's matcher now folds
+`!!!` → `iii` like the fleet, because the rule arrived with the rest of the stylised-letter block.
+The all-marks fallback survives underneath it and now fires only for a name with NO mapping at all
+(`†††`), which is item 2 and is a variant BETTER than the fleet's, not drift. The DB key keeps the
+raw marks, which was right then and is right now.
 
 ### 2. An all-symbol name with no fold mapping still erases — ALL FOUR repos
 
@@ -140,6 +187,18 @@ and the strict artist gate then rejects everything, i.e. a miss.
 
 Low severity everywhere. LL 0.1.143 already covers it, via the raw-mark fallback. The fleet fix
 is to extend the all-marks fallback to keep the marks when nothing maps.
+
+**It carries (c)'s precondition, and "low severity, optional" is exactly why someone will land it
+without looking.** Today `_norm('†††')` is `''` in PFR, LBF and DSC. After the fix it is `†††` —
+three codepoints above 255, in a value that currently cannot contain one. That is the same step
+0.1.143 took, so the question to answer before landing it is (c)'s: what consumes this output.
+**Answered 2026-09-10 for all four repos, and nothing is blocking.** The two cache keys built from
+`_norm` both encode already (see retraction 2). Every outbound search picks its spelling per
+adapter from the `query_enc` table — DSC `Sources.pm` 897/1029/1252, LBF `Browse.pm` 7264/8455,
+PFR `Browse.pm` 3470, SH `Search.pm` 144 — so a newly wide `_norm` result is converted at the call
+site whichever camp the service is in. Re-run that check rather than trusting this paragraph if
+any of those sites has moved; it is four greps and it is the difference between an empty result
+and a request that never comes back.
 
 ### 3. The `_punctNorm` escape hatch — CLOSED (0.1.145)
 
@@ -157,8 +216,14 @@ control stays green. **LL took this FROM the fleet**, the reverse of the usual d
 ### PFR — ACTIVE
 - **Non-Latin: nothing to do.** Verified correct.
 - Item 2 only, the `†††` residue in `_norm`'s all-marks fallback. Optional.
-- Its `tools/t_matchersync.pl` is the fleet's drift gate. If item 1 lands in LL, extend that
-  suite's fixtures rather than writing a new one.
+- **Correcting this line, which sent the 0.1.145 port to the wrong place:** `tools/t_matchersync.pl`
+  is PFR's OWN suite and reads only PFR's `Browse.pm`. The CROSS-REPO drift gate is
+  `matcher_sync_check.py`, which lives in the LBF repo and hashes each sub in every copy.
+- Item 1's matcher half landed in LL at 0.1.145 and was pinned there — LL's `t_refold.pl` §3d for
+  the behaviour, `matcher_sync_check.py` for the drift. **That check had a hole worth knowing
+  about:** LL's `_norm` delegates its fold to `_punctPass`, which was never hashed, so the whole
+  pass changed underneath a check still reporting `_norm` "variant OK". `_punctPass` is pinned now.
+  When a sub delegates, pin the delegate.
 - Any change here needs a cache bump. Nothing is in a UNIQUE column, so no migration.
 
 ### LBF — ACTIVE
@@ -188,10 +253,14 @@ Do not report as a finding:
   which is pinned SEPARATELY in `matcher_sync_check.py` since 0.1.145. Before that the check
   reported LL's `_norm` "variant OK" while the whole pass had changed underneath it
 - that LL keeps `†††` where the fleet folds to `''` — LL's all-marks fallback is BETTER here
-- that LL's dedupe KEY has no stylised-letter rules while its matcher does. Deliberate: the
-  matcher owes nothing, the key owes a rung (see below)
+- that LL's dedupe KEY has no stylised-letter rules while its matcher does. Deliberate, and
+  DECLINED rather than pending: LL stores what a service handed it, so two spellings are two
+  entries by design. See item 1
 - that `_asciiNorm` still uses `[^a-z0-9]` in any repo
 - that DSC or Search Hub were left unchanged
+- that LL encodes the Bandcamp query inline in `_searchService` while LBF pins the same function
+  through a `query_enc => 'bytes'` table entry. Both send octets, which is the part that matters;
+  LL has one Bandcamp call site and no adapter table to hang it on
 - that LL's pass is TWO substitutions (`_` then `[^\w]`) where the fleet's is one `\p{Alnum}`
   class. That shape is LL-only by construction: `\w` includes the underscore and `\p{Alnum}`
   does not, so only LL has to strip it separately — and it must, because `_` is a LIKE
