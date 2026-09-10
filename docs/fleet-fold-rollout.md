@@ -1,9 +1,19 @@
-# Fleet fold state after LL 0.1.143 — what is actually outstanding
+# Fleet fold state after LL 0.1.144 — what is actually outstanding
 
 **Status 2026-09-10.** LL 0.1.143 fixed a non-Latin fold defect. The obvious next step looked
 like porting it to the other four repos. **That is not the work.** Measured against the shipped
 source of each repo, PFR, LBF and DSC were already correct. LL was the outlier, and the fix
 brought it UP to the fleet, it did not diverge from it.
+
+**0.1.144 then corrected three defects in that fold release, and TWO of them change what this
+doc says.** (a) 0.1.143's new pass ran its two substitutions in the order that does not commute,
+so an underscore next to other punctuation produced a doubled separator and `01_-_Intro` keyed
+`01   intro`. Fixed in both LL carriers; **the measured table below is unaffected**, because
+every row in it is non-Latin or has no underscore, which is exactly why the suite missed it.
+(b) **The refold rung now stamps `user_version` 9**, so the stylised-letter fold in item 1 below
+would be rung **10**, not 9. That number was already written into this doc and is corrected in
+place. The third defect (a migration ordering bug that DELETED non-Latin rows) is LL-internal
+and does not touch the fleet. See the 0.1.144 entry in LL's `CLAUDE.md`.
 
 This doc records what was verified, what is genuinely left, and what a review must not flag.
 
@@ -72,10 +82,19 @@ and appears in the 0.1.112 entry neither as taken nor as skipped. Nothing ever w
 
 **BOTH LL normalisers need it, and the key half owes a RUNG.** `P!nk` and `Pink` currently key
 `p nk` and `pink`, so the same album from two services is TWO ROWS. Folding them is a stored-key
-change, i.e. rung 9, exactly as the apostrophe rule was rung 5. Unlike 0.1.143's fold this is
-NOT a pure split — it MERGES keys — so `_migrateRefold`'s collision path is live and its
-mixed-status policy applies. That is the real cost, and the reason to plan it rather than drop
-it in.
+change, i.e. **rung 10** (rung 9 is the refold, since 0.1.144 — an earlier draft of this line
+said 9 and was stale within a day, so check the ladder in `DB::_migrate` before quoting a
+number), exactly as the apostrophe rule was rung 5. Unlike 0.1.143's fold this is NOT a pure
+split — it MERGES keys — so `_migrateRefold`'s collision path is live and its mixed-status
+policy applies. That is the real cost, and the reason to plan it rather than drop it in.
+
+**AND IT INHERITS 0.1.144's LADDER LESSON, which is the cheaper half to get right.** Rung 7
+deletes rows that share a STORED key, and 0.1.143 ran it BEFORE its own refold — so on a
+database still holding old-fold keys it merged unrelated albums away before the refold could
+split them. A merging fold makes the mirror mistake reachable: rows this rule brings TOGETHER
+must not be settled by a pass that ran against the older spelling. The guard now in
+`_migrateCrossSourceIdentity` — ask the CURRENT fold before deleting — already covers it, and
+must not be removed as redundant when this rung lands.
 
 **Also introduced by 0.1.143 and to be settled with the above:** LL's punctuation fallback keeps
 the raw marks (`!!!` → `!!!`) where the fleet folds them to letters (`!!!` → `iii`). For the DB
@@ -137,5 +156,10 @@ Do not report as a finding:
 - that LL has no `_punctNorm`
 - that `_asciiNorm` still uses `[^a-z0-9]` in any repo
 - that DSC or Search Hub were left unchanged
+- that LL's pass is TWO substitutions (`_` then `[^\w]`) where the fleet's is one `\p{Alnum}`
+  class. That shape is LL-only by construction: `\w` includes the underscore and `\p{Alnum}`
+  does not, so only LL has to strip it separately — and it must, because `_` is a LIKE
+  metacharacter and two finders build patterns straight out of `_norm` with no ESCAPE. **The
+  ORDER is the load-bearing part** and is what 0.1.144 fixed; it is commented at the sub.
 
-All five are recorded decisions. Re-raise only with a real failing case.
+All six are recorded decisions. Re-raise only with a real failing case.
