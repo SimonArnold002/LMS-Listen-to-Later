@@ -273,15 +273,31 @@ SQL
     #
     # It waits on rung 7 exactly as rung 7 waits on 6 — a rung must never advance the version
     # on behalf of an earlier one that failed, or that rung's retry is lost for good.
+    #
+    # STAMPS 9, NOT 8 (0.1.144), and this is a version-number edit rather than a tenth rung
+    # on purpose. 0.1.143 shipped this same rung stamping 8, with a fold whose two
+    # substitutions ran in the wrong order — see _norm, where the order is now spelled out.
+    # Under it '01_-_Intro' keyed '01   intro' instead of '01 intro', so a dev install that
+    # already stamped 8 holds keys nothing will ever look up again. A rung 9 that called
+    # _migrateRefold a second time would run the identical pass twice on every other
+    # database; moving THIS rung's stamp lets a database at 8 re-enter and a database below
+    # 8 arrive here exactly as before, with one pass either way.
+    #
+    # ONE THING THIS CANNOT REPAIR. A database that was at 5 or 6 when 0.1.143 ran had its
+    # colliding rows DELETED by rung 7 before this rung could split them (measured: three
+    # unrelated non-Latin albums in, one out). The guard in _migrateCrossSourceIdentity
+    # stops that happening again, but the deleted saves are gone and only the user can
+    # re-add them. That is why the guard is a precondition on the DELETE and not merely a
+    # reordering of the ladder.
     my ($foldVer) = $h->selectrow_array('PRAGMA user_version');
     $foldVer = 0 unless defined $foldVer;
     if ($foldVer < 7) {
         $log->warn("Listen Later: an earlier migration is still pending (schema $foldVer) "
             . '— the non-Latin refold waits rather than stamping over it');
     }
-    elsif ($foldVer < 8) {
+    elsif ($foldVer < 9) {
         if (_migrateRefold($h)) {
-            $h->do('PRAGMA user_version = 8');
+            $h->do('PRAGMA user_version = 9');
         }
         else {
             $log->warn('Listen Later: the non-Latin refold did not complete (see the warnings '
@@ -652,6 +668,35 @@ sub _migrateCrossSourceIdentity {
                 next;
             }
 
+            # A SHARED STORED KEY IS NOT PROOF OF A SHARED IDENTITY, and this rung deletes
+            # rows, so it has to check. Every row here holds the same key under WHATEVER
+            # fold was current when it was written; if the fold has moved on since, that
+            # key can be a collision the current fold does not make. The 0.1.143 refold is
+            # exactly that case: until it, _norm ERASED a non-Latin name, so 中島みゆき/歌姫,
+            # サカナクション/新宝島 and Кино/Группа крови all stored '||' on three different
+            # services — different albums, one key. Merging them deletes two real saves,
+            # which is the loss 0.1.143 exists to prevent, and the refold rung cannot undo it
+            # because the rows are gone (MEASURED on a database at user_version 6).
+            #
+            # Ask the CURRENT fold instead. If it splits the unit, these were never one
+            # album: leave every row alone and let the refold rung give each its own key.
+            # This is not the "recompute keys here" the header forbids — nothing is
+            # written, the rung still only ever stores a key a row already holds. It is a
+            # precondition on the DELETE, and it belongs here rather than in the ladder
+            # because it holds however the rungs are ordered and on every later retry.
+            my %split = map { ( _keyForRow($_) => 1 ) } @$u;
+            if (keys %split > 1) {
+                $skipped += @$u;
+                $log->warn('Listen Later: cross-source identity repair will not merge rows '
+                    . 'the current fold tells apart ('
+                    . join(', ', map { "id $_->{id} [" . ($_->{artist} // '?') . ' / '
+                        . ($_->{album_title} // '?') . ']' } @$u)
+                    . ") — they share the stored key '" . ($u->[0]{dedupe_key} // '')
+                    . "' only because an older fold erased their names; the refold rung "
+                    . 'gives each its own');
+                next;
+            }
+
             my $settled = _mergeKeyRows($h, $u, $u->[0]{dedupe_key});
             unless ($settled->{ok}) {
                 $failed++;
@@ -938,7 +983,7 @@ sub foldLatin {
 # `_migrateRefold`'s collision-resolution path — the expensive half, and where this file's
 # worst bugs live — is therefore unreachable for this change. Every Latin key is byte-identical
 # ('sigur ros', 'janes addiction', 'album deluxe', '834 194', '100 free', 'under score'), so a
-# Latin-only library is rekeyed ZERO rows by rung 8. That is the property that made this
+# Latin-only library is rekeyed ZERO rows by the refold rung. That is the property that made this
 # migration affordable; do not lose it by "tidying" the fallback below into something lossy.
 sub _norm {
     my $s = foldLatin($_[0]);
@@ -947,9 +992,25 @@ sub _norm {
     # punctuation still separates words exactly as it did. Underscore is stripped BECAUSE
     # \w includes it and it is a LIKE metacharacter — findSavedTrack and
     # findTrackByArtistTitle build LIKE patterns straight out of this sub and pass no ESCAPE.
+    #
+    # ORDER IS LOAD-BEARING, and it is not obvious from either line on its own. The
+    # underscore MUST go first. Run the other way round (0.1.143) the '_' is still a \w
+    # character while the non-word pass runs, so it does not join the separator run round
+    # it — each one then becomes its OWN space and a mixed run leaves several:
+    #   '01_-_Intro'  ->  s/[^\w]+/ /  '01_ _Intro'  ->  s/_+/ /  '01   intro'
+    # against '01 intro' from the pre-0.1.143 fold. The bug hides from the obvious test
+    # case: an underscore BETWEEN word characters ('under_score', 'M_A_N_D_Y') is its own
+    # whole run and folds identically either way, so only an underscore ADJACENT to other
+    # punctuation or a space can show it. Measured consequences, both real:
+    #   * it breaks the "pure split" property this fold is sold on — 'Artist_-_Album' and
+    #     '01_-_Intro' are ordinary ripped-file shapes, so a LATIN-ONLY library is rekeyed
+    #     after all and the migration stops being free.
+    #   * Sources::_punctPass carries the same two lines, so a saved
+    #     'Boards_of_Canada_-_Roygbiv' stopped matching the service's
+    #     'Boards of Canada - Roygbiv' — _albumMatches/_bestMatches compare with `eq`.
     my $w = $s;
-    $w =~ s/[^\w]+/ /g;
     $w =~ s/_+/ /g;
+    $w =~ s/[^\w]+/ /g;
     $w =~ s/^\s+|\s+$//g;
     return $w if length $w;
 

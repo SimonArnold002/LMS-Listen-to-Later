@@ -231,7 +231,7 @@ my $ins = sub {
     });
     my $r = $h->selectall_arrayref('SELECT dedupe_key FROM albums', { Slice => {} });
     is('a stale key is rewritten',  $r->[0]{dedupe_key}, 'janes addiction|ritual de lo habitual|1990');
-    is('...and the ladder is stamped', ($h->selectrow_array('PRAGMA user_version'))[0], 8);
+    is('...and the ladder is stamped', ($h->selectrow_array('PRAGMA user_version'))[0], 9);
 }
 
 section('4b. …and it COLLAPSES the duplicates the new fold merges');
@@ -344,7 +344,7 @@ section('4c2. CROSS-SOURCE IDENTITY MATCHES add(), WITHOUT CROSSING REPLAY WIRES
     is('...on the same key as its cross-source twin',   $r->[1]{dedupe_key},
        'janes addiction|nothing|2011');
     is('...with the un-merged row keeping its own list', $r->[0]{status}, 'later');
-    is('...and the ladder still stamps',                ($h->selectrow_array('PRAGMA user_version'))[0], 8);
+    is('...and the ladder still stamps',                ($h->selectrow_array('PRAGMA user_version'))[0], 9);
 }
 
 {
@@ -451,7 +451,7 @@ section('4c3. RUNG 7 REPAIRS DATABASES THAT ALREADY STAMPED THE OLD REFOLD');
        JSON::XS->new->decode($r->[0]{ref_json})->{album_id}, 'q7');
     is('...without borrowing another service\'s count', $r->[0]{track_count}, undef);
     is('...and stamps the repair rung',
-       ($h->selectrow_array('PRAGMA user_version'))[0], 8);
+       ($h->selectrow_array('PRAGMA user_version'))[0], 9);
 
     # A different list choice remains a policy conflict even when the stored keys are already
     # identical. The repair completes (otherwise it would warn on every boot) but guesses none.
@@ -465,7 +465,7 @@ section('4c3. RUNG 7 REPAIRS DATABASES THAT ALREADY STAMPED THE OLD REFOLD');
     is('rung 7 leaves mixed-status twins visible',
        scalar(@{ $h->selectall_arrayref('SELECT id FROM albums') }), 2);
     is('...but still stamps the deliberate skip',
-       ($h->selectrow_array('PRAGMA user_version'))[0], 8);
+       ($h->selectrow_array('PRAGMA user_version'))[0], 9);
 
     # 0.1.139 — THE POLICY IS PER LIST, NOT PER GROUP. The pair above is the whole group, so
     # there is nothing to collapse and leaving both is right. Add a THIRD row and the two
@@ -494,7 +494,7 @@ section('4c3. RUNG 7 REPAIRS DATABASES THAT ALREADY STAMPED THE OLD REFOLD');
     is('...and the conflicting list is left exactly as it was',
        join(':', $mix->[1]{status}, $mix->[1]{source}), 'played:spotify');
     is('...with the rung stamped',
-       ($h->selectrow_array('PRAGMA user_version'))[0], 8);
+       ($h->selectrow_array('PRAGMA user_version'))[0], 9);
 
     # THE CONTROL for the count above: a rung-7 merge is not a merge that drops every column.
     # When the keeper carries NO replay bundle it adopts the loser's whole source/ref, and the
@@ -532,7 +532,7 @@ section('4c3. RUNG 7 REPAIRS DATABASES THAT ALREADY STAMPED THE OLD REFOLD');
        ($h->selectrow_array('PRAGMA user_version'))[0], 6);
     Plugins::ListenLater::DB::_migrate($h);
     is('the next start retries rung 7 and the ladder completes',
-       ($h->selectrow_array('PRAGMA user_version'))[0], 8);
+       ($h->selectrow_array('PRAGMA user_version'))[0], 9);
 }
 
 section('4d. TRACK and PLAYLIST keys keep their identity segments');
@@ -613,7 +613,7 @@ section('4h. A MERGE THAT CANNOT LAND TAKES NOTHING WITH IT');
     is('...under the folded key',              $r2->[0]{dedupe_key}, 'janes addiction|ritual|1990');
     is('...keeping the higher play count',     $r2->[0]{play_count}, 3);
     is('...and the loser\'s ref',              $r2->[0]{ref_kind}, 'album_id');
-    is('...and now the ladder is stamped',     ($h->selectrow_array('PRAGMA user_version'))[0], 8);
+    is('...and now the ladder is stamped',     ($h->selectrow_array('PRAGMA user_version'))[0], 9);
 }
 
 section('4i. A ROLLBACK THAT FAILS MUST NOT POISON THE HANDLE');
@@ -714,7 +714,7 @@ section('4g. A FAILED PASS DOES NOT STAMP THE LADDER');
        ($h->selectrow_array('SELECT dedupe_key FROM albums'))[0],
        'janes addiction|ritual|1990');
     is('...and stamps the ladder',
-       ($h->selectrow_array('PRAGMA user_version'))[0], 8);
+       ($h->selectrow_array('PRAGMA user_version'))[0], 9);
 }
 
 # ---------------------------------------------------------------------------
@@ -743,7 +743,71 @@ ok('the fold is not merely lowercasing the bytes',
    dbo("BJ\x{d6}RK") eq 'bjork');
 
 # ---------------------------------------------------------------------------
-section('4j. RUNG 8 — the refold under a fold that no longer DELETES a non-Latin name');
+section('4c4. RUNG 7 MUST NOT MERGE ROWS THE CURRENT FOLD TELLS APART');
+# THE WORST BUG THIS FILE HAS CARRIED, and it was shipped by the release written to prevent
+# it. Rung 7 groups by the STORED key and deletes every row in a group but one. That key was
+# written under whatever fold was current at the time, so after a fold change it can be a
+# collision the current fold does not make. 0.1.143 was exactly that change: before it _norm
+# ERASED a non-Latin name, so three unrelated albums on three services all stored '||'.
+#
+# The ladder ran rung 7 BEFORE the new refold, so on a database sitting at 5 or 6 the merge
+# deleted two real saves and the refold then had one row to split. MEASURED: three albums in,
+# one out. Rung 8 cannot undo it — the rows are gone.
+#
+# The fix is a precondition on the DELETE rather than a reordering, because a reordering only
+# holds for one ladder shape and this has to hold on every later retry too. Sections 4c2/4c3
+# are the CONTROL for it: a genuine cross-source duplicate must still merge, or the guard has
+# simply disabled rung 7. Both halves are asserted here as well, at versions 5 and 6, because
+# those are the two the shipped ladder destroyed rows at.
+for my $startVer (5, 6) {
+    my $f = "$dir/rung7guard-$startVer-" . int(rand(1e9)) . '.db';
+    my $h = DBI->connect("dbi:SQLite:dbname=$f", '', '',
+                         { RaiseError => 1, AutoCommit => 1, sqlite_unicode => 1 });
+    Plugins::ListenLater::DB::_migrate($h);
+    $h->do('DELETE FROM albums');
+    $h->do("PRAGMA user_version = $startVer");
+
+    # Three unrelated albums, three services, one stored key — as 0.1.142 left them.
+    my @seed = (
+        ['qobuz',  "\x{4e2d}\x{5cf6}\x{307f}\x{3086}\x{304d}", "\x{6b4c}\x{59eb}"],
+        ['tidal',  "\x{30b5}\x{30ab}\x{30ca}\x{30af}\x{30b7}\x{30e7}\x{30f3}",
+                   "\x{65b0}\x{5b9d}\x{5cf6}"],
+        ['deezer', "\x{041a}\x{0438}\x{043d}\x{043e}",
+                   "\x{0413}\x{0440}\x{0443}\x{043f}\x{043f}\x{0430} \x{043a}\x{0440}\x{043e}\x{0432}\x{0438}"],
+    );
+    my $n = 0;
+    $ins->($h, source => $_->[0], artist => $_->[1], album => $_->[2],
+           key => '||', added => 100 + $n++) for @seed;
+
+    Plugins::ListenLater::DB::_migrate($h);
+    my $got = $h->selectall_arrayref('SELECT artist, dedupe_key FROM albums', { Slice => {} });
+    is("from version $startVer: no non-Latin album is merged away", scalar(@$got), scalar(@seed));
+    is("...and each ends on its own key",
+       scalar(keys %{{ map { ($_->{dedupe_key} => 1) } @$got }}), scalar(@seed));
+    is("...and none is left on the erased key", (grep { $_->{dedupe_key} eq '||' } @$got) ? 'still ||' : 'rekeyed',
+       'rekeyed');
+}
+# THE CONTROL. A guard that refused every merge would pass all six assertions above, so this
+# asserts the other direction: rows the current fold agrees about are still collapsed, even
+# when their stored key is an erased one the fold no longer produces.
+{
+    my $f = "$dir/rung7guardctl-" . int(rand(1e9)) . '.db';
+    my $h = DBI->connect("dbi:SQLite:dbname=$f", '', '',
+                         { RaiseError => 1, AutoCommit => 1, sqlite_unicode => 1 });
+    Plugins::ListenLater::DB::_migrate($h);
+    $h->do('DELETE FROM albums');
+    $h->do('PRAGMA user_version = 6');
+    $ins->($h, source => 'qobuz', artist => 'Sigur Ros', album => 'Takk', year => 2005,
+           key => 'sigur ros|takk|2005', added => 100);
+    $ins->($h, source => 'tidal', artist => 'Sigur Ros', album => 'Takk', year => 2005,
+           key => 'sigur ros|takk|2005', added => 101);
+    Plugins::ListenLater::DB::_migrate($h);
+    my $got = $h->selectall_arrayref('SELECT artist FROM albums', { Slice => {} });
+    is('a genuine cross-source duplicate is STILL merged', scalar(@$got), 1);
+}
+
+# ---------------------------------------------------------------------------
+section('4j. THE REFOLD RUNG (stamps 9 since 0.1.144) — the refold under a fold that no longer DELETES a non-Latin name');
 # 0.1.143. Until then the key pass was `s/[^a-z0-9]+/ /g`, which does not fold 米津玄師 or
 # Кино, it ERASES them — so their rows carry a key built from nothing and unrelated releases
 # share it in a UNIQUE column. A stamped database never revisits rung 5, so the new fold needs
@@ -783,8 +847,8 @@ section('4j. RUNG 8 — the refold under a fold that no longer DELETES a non-Lat
     Plugins::ListenLater::DB::_migrate($h);
 
     my $rows = $h->selectall_arrayref('SELECT * FROM albums ORDER BY added_at', { Slice => {} });
-    is('rung 8 loses no row', scalar(@$rows), 4);
-    is('...and stamps the ladder', ($h->selectrow_array('PRAGMA user_version'))[0], 8);
+    is('the refold rung loses no row', scalar(@$rows), 4);
+    is('...and stamps the ladder', ($h->selectrow_array('PRAGMA user_version'))[0], 9);
     is('a CJK artist is now IN the key',
        $rows->[0]{dedupe_key}, u("\x{7c73}\x{6d25}\x{7384}\x{5e2b}") . '|stray sheep|2020');
     is('an all-CJK row no longer keys as nothing',
@@ -824,6 +888,15 @@ section('4j2. …and a LATIN-ONLY library is rekeyed ZERO rows');
         ['Chanel Beads',     'Album (Deluxe)',  2024, 'chanel beads|album deluxe|2024'],
         ['Fontaines DC',     '834.194',         2019, 'fontaines dc|834 194|2019'],
         ['The Band',         '100% Free',       2019, 'the band|100 free|2019'],
+        # THE SHAPE THAT BROKE THIS CONTROL IN 0.1.143, and the reason the seeds above
+        # could not catch it: every one of them separates words with a character that is
+        # already non-\w, so the two substitutions in _norm commute and the order cannot
+        # show. An underscore ADJACENT to other punctuation does not commute — with the
+        # non-word pass first it stays \w, misses the run beside it and becomes an extra
+        # space, keying '01_-_Intro' as '01   intro'. Ripped files are full of this.
+        ['Boards_of_Canada', 'Music_-_Has_The_Right', 1998,
+                                        'boards of canada|music has the right|1998'],
+        ['Autechre',         '01_-_Intro',      1994, 'autechre|01 intro|1994'],
     );
     $ins->($h, artist => $_->[0], album => $_->[1], year => $_->[2], key => $_->[3],
            added => 100 + $_->[2]) for @seed;
@@ -833,7 +906,7 @@ section('4j2. …and a LATIN-ONLY library is rekeyed ZERO rows');
     my %want = map { ($_->[1] => $_->[3]) } @seed;
     my $moved = join(', ', map { "$_->{album_title} -> $_->{dedupe_key}" }
                            grep { ($want{ $_->{album_title} } // '') ne $_->{dedupe_key} } @$got);
-    is('rung 8 moves no Latin key at all', ($moved || 'none moved'), 'none moved');
+    is('the refold rung moves no Latin key at all', ($moved || 'none moved'), 'none moved');
     is('...and every row is still there', scalar(@$got), scalar(@seed));
 }
 

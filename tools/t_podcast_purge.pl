@@ -146,7 +146,7 @@ is('...so the row is still there to retry',
 # ...and the mirror: a clean run DOES stamp, or the purge would run on every single start.
 $DB->can('_migrate')->($h);
 my ($ver2) = $h->selectrow_array('PRAGMA user_version');
-is('a successful pass completes the ladder through version 8', $ver2, 8);
+is('a successful pass completes the ladder through version 9', $ver2, 9);
 is('...and the doomed row is gone this time',
    scalar @{ $h->selectall_arrayref("SELECT id FROM albums WHERE track_title='Doomed'") }, 0);
 
@@ -178,8 +178,8 @@ is('the failed pass report contains episode A', (($partialReport =~ /Episode A/)
 is('...and episode B',                         (($partialReport =~ /Episode B/) ? 'y' : 'n'), 'y');
 
 $DB->can('_migrate')->($h);
-is('the retry commits and completes the ladder through version 8',
-   ($h->selectrow_array('PRAGMA user_version'))[0], 8);
+is('the retry commits and completes the ladder through version 9',
+   ($h->selectrow_array('PRAGMA user_version'))[0], 9);
 is('the retry removes both rows',
    scalar @{ $h->selectall_arrayref("SELECT id FROM albums WHERE album_title='Retry Show'") }, 0);
 my $retryReport = do { open my $fh, '<:encoding(UTF-8)', $report or die $!; local $/; <$fh> };
@@ -198,7 +198,7 @@ unlink $report;
 seed(source=>'qobuz', kind=>'album', artist=>'B', album=>'Only Music', key=>'b|only music|2024', ref=>'{}');
 $DB->can('_migrate')->($h);
 is('an empty purge still completes the ladder, so it runs once',
-   ($h->selectrow_array('PRAGMA user_version'))[0], 8);
+   ($h->selectrow_array('PRAGMA user_version'))[0], 9);
 is('...writes NO report file',            (-e $report ? 'written' : 'absent'), 'absent');
 is('...and leaves the library alone',
    scalar @{ $h->selectall_arrayref('SELECT id FROM albums') }, 1);
@@ -263,7 +263,7 @@ ok('the reason is logged rather than swallowed',
 $DB->can('_migrate')->($h);
 is('with Sources reachable again both rows are removed',
    scalar @{ $h->selectall_arrayref('SELECT id FROM albums') }, 0);
-is('...and the ladder completes', ($h->selectrow_array('PRAGMA user_version'))[0], 8);
+is('...and the ladder completes', ($h->selectrow_array('PRAGMA user_version'))[0], 9);
 
 section('a failing rung REPORTS the version the ladder reached, not the one it entered at');
 # The warn is the only trace a withheld stamp leaves, and both failing rungs named $schemaVer

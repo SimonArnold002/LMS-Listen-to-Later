@@ -14,12 +14,21 @@
 # wrong/incomplete results, never "no results" — describing it as empty is what stopped it
 # being recognised for two months.
 #
-# BANDCAMP IS IN NEITHER CAMP and is tested for exactly that, because "not covered" and
-# "covered by an invariant" look identical from outside. Its branch sends the combined
-# _norm("$artist $album"), which is ASCII-only by construction, so the two encodings are
-# byte-identical there and no conversion applies. The assertions below pin the INVARIANT
-# rather than a camp, so a change that starts sending a raw artist or title down that
-# branch goes red and has to pick a camp.
+# BANDCAMP IS IN THE OCTETS CAMP (0.1.144), and the story of how it got there is the reason
+# this file distrusts an invariant. It was exempt from both camps for exactly one reason: its
+# branch sends the combined _norm("$artist $album"), and _norm's old `s/[^a-z0-9]+/ /g` left
+# ASCII and nothing else, so the two spellings were the same string. The assertions here used
+# to pin that INVARIANT rather than a camp, precisely so a change that started sending a raw
+# name down the branch would go red.
+#
+# THE INVARIANT DIED AND THESE ASSERTIONS DID NOT NOTICE, because every fixture was accented
+# LATIN. 0.1.143 taught _norm to keep letters of every script, so a non-Latin artist now
+# produces a real wide string — but 'Sigur Rós' still folds to 'sigur ros', so all three
+# ASCII-only checks stayed green while the exemption underneath them was gone. A guard is
+# only as good as the widest input it is fed; an invariant about CHARACTER RANGE has to be
+# tested with a character outside the range that motivated it.
+#
+# So the fixtures below add a CJK and a Cyrillic artist, and the camp is asserted directly.
 #
 # The sibling ListenBrainz plugin carries the same split as a per-adapter `query_enc`
 # (LBF 0.9.82, after the Sigur Rós failure found in Discography 2026-07-10). LL had one
@@ -185,22 +194,38 @@ is('latin-1 in: qobuz passes it through unmangled', ask('qobuz', $LATIN1), lc $L
 
 
 # ---------------------------------------------------------------------------
-section('bandcamp is exempt from both camps, and the invariant is what makes it exempt');
-# The gap this section closes is not a bug — it is a SILENCE. Bandcamp was listed under
-# OCTETS in the encoding comment while its branch applied no conversion at all, and the
-# suite had no fixture, so "exempt because the query is ASCII by construction" and "nobody
-# checked" were indistinguishable. Assert the reason, not the camp.
-for my $in ( [ 'characters', $ACCENT ], [ 'octets', $OCTETS ], [ 'latin-1', $LATIN1 ] ) {
-    my ($what, $v) = @$in;
-    my $q = ask('bandcamp', $v);
-    is("bandcamp: $what in gives an ASCII-only query",
-       (defined $q && $q =~ /^[a-z0-9 ]*$/ ? 'ascii' : "NOT ascii ($q)"), 'ascii');
+section('bandcamp is handed OCTETS, like deezer');
+# The sibling ListenBrainz plugin calls this very function (Plugins::Bandcamp::Search::search)
+# and pins it as `query_enc => 'bytes'` on its own adapter, encoding at its call site. Two
+# plugins handing one function opposite spellings is the bug this section exists to stop.
+my $CJK  = "\x{7c73}\x{6d25}\x{7384}\x{5e2b}";   # 米津玄師
+my $CYR  = "\x{041a}\x{0438}\x{043d}\x{043e}";   # Кино
+
+is('bandcamp: a CJK artist is handed OCTETS, not characters',
+   (utf8::is_utf8(ask('bandcamp', $CJK)) ? 'chars' : 'octets'), 'octets');
+is('bandcamp: a Cyrillic artist too',
+   (utf8::is_utf8(ask('bandcamp', $CYR)) ? 'chars' : 'octets'), 'octets');
+
+# THE CONSEQUENCE, not just the flag — the flag alone is satisfied by a query that dropped
+# the name entirely, which is exactly what the pre-0.1.143 fold did. These decode back to
+# the real name, so the octets are the name's UTF-8 encoding and nothing else.
+for my $c ( [ 'CJK', $CJK ], [ 'Cyrillic', $CYR ] ) {
+    my ($what, $name) = @$c;
+    my $q = ask('bandcamp', $name);
+    my $back = $q; utf8::decode($back);
+    is("bandcamp: the $what name survives the round trip",
+       ($back =~ /\Q@{[ lc $name ]}\E/ ? 'present' : "LOST ($q)"), 'present');
 }
-# ...which is what makes the two encodings the SAME STRING here — the whole reason no
-# conversion is applied. If this ever fails, that branch has acquired a camp.
-is('bandcamp: characters and octets produce a byte-identical query',
+
+# The three shapes that reach _searchService, all of which must leave as the same octets —
+# a raw-CLI add arrives already encoded and must not be double-encoded on the way out.
+is('bandcamp: characters and octets in produce a byte-identical query',
    (ask('bandcamp', $ACCENT) eq ask('bandcamp', $OCTETS) ? 'identical' : 'DIFFER'),
    'identical');
+is('bandcamp: an ASCII artist is untouched', ask('bandcamp', 'Radiohead'),
+   'radiohead takk');
+is('bandcamp: latin-1 in is not mangled either',
+   (utf8::is_utf8(ask('bandcamp', $LATIN1)) ? 'chars' : 'octets'), 'octets');
 # It is also the only branch sent the artist AND the album (Bandcamp's recall needs the
 # title), so a refactor that "unified" it onto $artistChars/$artistBytes would silently
 # drop the album half. Pinned so that unification has to be deliberate.

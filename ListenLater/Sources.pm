@@ -1146,15 +1146,18 @@ sub _searchService {
     #     Never describe this as "returns nothing" — that is what stopped it being
     #     recognised for two months.
     #   * OCTETS for Deezer (complex_to_query).
-    #   * BANDCAMP IS IN NEITHER CAMP, and this is the exemption to state rather than
-    #     leave as a silence: its branch sends $query, not $artist — _norm("$artist
-    #     $album"), whose `s/[^a-z0-9]+/ /g` leaves ASCII and nothing else. Characters and
-    #     octets are byte-identical there, so neither conversion applies and applying one
-    #     would be theatre. If that branch is ever changed to send a RAW artist or title,
-    #     it acquires a camp and must pick one — Bandcamp's own layer wants octets.
-    #     (Recorded because the earlier wording listed Bandcamp under OCTETS while the
-    #     code applied none, which reads as a decision the code does not make — the same
-    #     class of untrue comment as the "right for the other three" line 0.1.120 removed.)
+    #   * OCTETS FOR BANDCAMP TOO (0.1.144). It was exempt from both camps for exactly one
+    #     reason — its branch sends $query, not $artist, and _norm's old
+    #     `s/[^a-z0-9]+/ /g` left ASCII and nothing else, so the two spellings were the
+    #     same string and neither conversion could matter. 0.1.143 ENDED THAT INVARIANT
+    #     without noticing: the fold now keeps letters of every script, so
+    #     _norm('米津玄師 Lemon') is '米津玄師 lemon' as CHARACTERS where 0.1.142 produced
+    #     the bare ASCII 'lemon'. The old comment had already written down what to do when
+    #     that day came ("it acquires a camp and must pick one — Bandcamp's own layer wants
+    #     octets"), so this is that instruction being carried out rather than a new call.
+    #     The sibling ListenBrainz plugin reached the same answer independently and pins it
+    #     as `query_enc => 'bytes'` on the adapter that calls this very function
+    #     (Plugins::Bandcamp::Search::search, LBF Browse.pm), encoding at its own call site.
     # Both conversions fail safe: decode leaves a non-UTF-8 byte string untouched, and
     # encode is a no-op on a string that is already octets. Only the outgoing QUERY is
     # affected — every branch matches candidates with _norm($artist) on the raw value, so
@@ -1163,6 +1166,10 @@ sub _searchService {
     utf8::decode($artistChars) unless utf8::is_utf8($artistChars);
     my $artistBytes = $artist;
     utf8::encode($artistBytes) if utf8::is_utf8($artistBytes);
+    # Bandcamp's spelling of the COMBINED query, built the same fail-safe way: encode is a
+    # no-op on a string that is already octets, so a raw-CLI add is not corrupted either.
+    my $queryBytes = $query;
+    utf8::encode($queryBytes) if utf8::is_utf8($queryBytes);
 
     if ($source eq 'qobuz' && Plugins::Qobuz::Plugin->can('getAPIHandler')
                           && Plugins::Qobuz::Plugin->can('_albumItem')) {
@@ -1210,7 +1217,7 @@ sub _searchService {
             }
             my @out = @idHits ? @idHits : @titleHits;
             $cb->(@out ? \@out : _noMatch($client));
-        }, { search => $query });
+        }, { search => $queryBytes });
         return;
     }
 
@@ -1542,9 +1549,15 @@ sub _fold {
 # documented trade in _fold's header.
 sub _punctPass {
     my $s = shift // '';
+    # The underscore substitution runs FIRST, and the order is the whole point — see the
+    # block comment in DB::_norm, which carries the measurement. Briefly: '_' is a \w
+    # character, so running the non-word pass first leaves it out of the separator run
+    # round it and a mixed run like '_-_' collapses to three spaces instead of one.
+    # HERE that is a live MATCH failure, not just a key change: a saved
+    # 'Boards_of_Canada_-_Roygbiv' stops matching the service's spelling with spaces.
     my $w = $s;
-    $w =~ s/[^\w]+/ /g;
     $w =~ s/_+/ /g;
+    $w =~ s/[^\w]+/ /g;
     $w =~ s/^\s+|\s+$//g;
     return $w if length $w;
     # An all-punctuation name ('!!!', '†††', '+/-') would otherwise read as ABSENT and hand

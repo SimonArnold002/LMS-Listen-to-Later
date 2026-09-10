@@ -558,9 +558,19 @@ subsystem.
     nothing that folded apart can come together. `_migrateRefold`'s collision-resolution path —
     the expensive half of `DB.pm` — is unreachable for this change. Every Latin key is
     byte-identical (`sigur ros`, `janes addiction`, `album deluxe`, `834 194`, `100 free`,
-    `under score`), so **rung 8 rekeys ZERO rows in a Latin-only library**. Pinned by §4j2 in
-    `t_refold.pl`, which is not decoration: without it every other assertion still passes
-    against a fold that quietly moved every stored key.
+    `under score`), so **the refold rung rekeys ZERO rows in a Latin-only library**. Pinned by
+    §4j2 in `t_refold.pl`, which is not decoration: without it every other assertion still
+    passes against a fold that quietly moved every stored key.
+    - **AS SHIPPED IN 0.1.143 THAT CLAIM WAS FALSE, and §4j2 did not catch it — corrected in
+      0.1.144.** The new pass is two substitutions, and they ran in the order that does not
+      commute: `[^\w]+` first leaves the `_` (a \w character) out of the separator run beside
+      it, so `01_-_Intro` keyed `01   intro` against `01 intro`. Five of twenty-three ordinary
+      Latin inputs moved, all of them the ripped-file `Artist_-_Album` shape, and the same two
+      lines in `Sources::_punctPass` broke the LIVE match as well. §4j2's Latin seeds all
+      separate words with a character that is ALREADY non-\w, so the order could not show; the
+      underscore seeds now in it are what make the control able to fail. **The lesson is the
+      one this entry already states about `_norm`'s own controls being Latin: a control chosen
+      from the half of the input space the change cannot touch is not a control.**
   - **A name that is ALL PUNCTUATION keeps its punctuation** rather than answering `''`. `!!!`,
     `†††` and `+/-` are real acts and a self-titled album by one of them collided with the next.
     Three characters are dropped there and each for its own reason: `|` is the key's SEGMENT
@@ -569,14 +579,24 @@ subsystem.
     `findTrackByArtistTitle` build patterns straight out of `_norm` with no ESCAPE. A name made
     only of those still folds to `''`, exactly as before. Confirmed against real SQLite that
     `'!!!|%|t:even when'` matches its own row and nothing else.
-  - **Rung 8 is a NEW rung, not an edit to rung 5**, for the reason rung 7 already records: a
-    dev install has stamped 5 and never revisits it, and a released install still needs rung 5
+  - **The refold is a NEW rung, not an edit to rung 5**, for the reason rung 7 already records:
+    a dev install has stamped 5 and never revisits it, and a released install still needs rung 5
     doing its own job on the way past. `_migrateRefold` needed NO edit — it recomputes through
     `_keyForRow`, skips unchanged rows, preserves the `|p:`/`|e:`/`|u:` tails, and withholds
     its answer on failure so the stamp is retried.
-  - **`|u:` rows left by 0.1.141 are NOT reconciled by rung 8** — after the refold the duplicate
-    pair holds two different keys, and rung 7 groups by identical key. No released build can
-    contain one, so the only affected database is a local dev install.
+    - **IT STAMPS 9 SINCE 0.1.144, not 8**, so a dev database that already stamped 8 under the
+      wrong-order fold above re-enters and is corrected. Moving this rung's stamp rather than
+      adding a tenth rung is deliberate: a rung 9 calling `_migrateRefold` a second time would
+      run the identical pass twice on every other database.
+  - **`|u:` rows left by 0.1.141 are NOT reconciled by the refold rung** — afterwards the
+    duplicate pair holds two different keys, and rung 7 groups by identical key. No released
+    build can contain one, so the only affected database is a local dev install.
+  - **AND RUNG 7 COULD DESTROY THE VERY ROWS THIS RELEASE EXISTS TO SAVE — fixed 0.1.144, see
+    the round entry below.** The ladder ran the cross-source merge BEFORE the refold, and that
+    merge deletes rows sharing a stored key. On a database at 5 or 6 the erased non-Latin names
+    all sit on `||`, so three unrelated albums were merged to one before the refold could split
+    them. Reproduced, not argued. The guard is a precondition on the DELETE rather than a
+    reordering, because a reordering only holds for one ladder shape.
   - **THE MATCHER WAS FIXED TOO, in the same release, because there it produced WRONG
     ANSWERS rather than missing ones.** `Sources::_norm` and `_normStrict` now share
     `_punctPass` with the same shape as `DB::_norm`. The gates there are lenient BY DESIGN —
@@ -5176,6 +5196,74 @@ The "Add to Listen Later"/"Add to Wish List" custom actions appear on streaming 
   green. What it prevents is a `|u:` key built around an EMPTY url. Five new assertions in
   `t_addpath.pl` (1,452 → 1,457), each shown red against the code with its guard removed.
 
+- **0.1.144 — three defects in 0.1.143's own fold release, all REPRODUCED before being fixed.
+  The release written to stop non-Latin albums being lost could destroy them, and its "pure
+  split" claim was false for ordinary Latin titles.** None of it shipped past `dev`; `main` is
+  0.1.93. The two 0.1.143 ledger claims this falsifies are corrected in place above rather than
+  left standing, because a wrong claim beside a verdict is what this file keeps being bitten by.
+
+  **(1) THE MIGRATION LADDER DELETED ROWS THE REFOLD WAS ABOUT TO SPLIT.** Rung 7
+  (`_migrateCrossSourceIdentity`) merges rows that share a STORED key, and it ran BEFORE the new
+  refold. A database at `user_version` 5 or 6 still holds keys written under the fold that ERASED
+  a non-Latin name, so 中島みゆき/歌姫, サカナクション/新宝島 and Кино/Группа крови all sit on
+  `||` — three albums, three services, one key. **Measured on a real ladder run: three rows in,
+  ONE out.** Rung 8 then rekeyed the survivor, and the other two saves were gone. Versions 4 and
+  7 are safe (at 4 the refold runs first as rung 5; at 7 the merge has already happened), so the
+  window is a dev install that ran 0.1.112–0.1.136 and then jumped here — narrow, and the exact
+  loss the release exists to prevent.
+  **Fixed as a precondition on the DELETE, not by reordering the ladder.** Before merging a unit
+  rung 7 now asks the CURRENT fold whether those rows are one album; if the fold tells them
+  apart, the whole unit is left for the refold rung. That holds however the rungs are ordered and
+  on every later retry, where a reordering holds for one ladder shape only. It does not violate
+  the rung's "do NOT recompute keys here" rule: nothing is written, and the rung still only ever
+  stores a key a row already holds. **The control is the half that matters** — a genuine
+  cross-source duplicate must still merge, or the guard has simply disabled rung 7.
+
+  **(2) THE FOLD'S TWO SUBSTITUTIONS RAN IN THE ORDER THAT DOES NOT COMMUTE.** `[^\w]+` ran
+  before `_+`, and `_` is a \w character, so it stayed out of the separator run beside it and
+  each one became its own space: `01_-_Intro` → `01   intro` where 0.1.142 gave `01 intro`. Five
+  of twenty-three ordinary Latin inputs moved — every one the ripped-file `Artist_-_Album` shape
+  — so the "rekeys ZERO rows in a Latin-only library" property the whole migration was sold on
+  was false. `Sources::_punctPass` carries the same two lines, so it broke the LIVE match too: a
+  saved `Boards_of_Canada_-_Roygbiv` stopped matching the service's `Boards of Canada - Roygbiv`,
+  which `_albumMatches`/`_bestMatches` compare with `eq`. One-line fix in each carrier, and those
+  two are the ONLY carriers in the fleet — the other repos still run the old `[^a-z0-9]` pass.
+  **Why every test missed it:** an underscore BETWEEN word characters is its own whole run and
+  folds identically either way, so `under_score` and `M_A_N_D_Y` pass against the bug. Only an
+  underscore ADJACENT to other punctuation can show it, and neither `t_db.pl`'s Latin controls
+  nor `t_refold.pl` §4j2 seeded one.
+
+  **(3) A DEV DATABASE ALREADY STAMPED 8 WOULD HAVE KEPT THE WRONG KEYS.** Fixing (2) changes
+  what `_norm` answers, so a database that ran 0.1.143 holds keys nothing will look up again.
+  The refold rung now stamps **9** instead of 8, so such a database re-enters and is corrected;
+  a database below 8 arrives exactly as before. Moving the stamp beats adding a tenth rung, which
+  would run the identical pass twice everywhere else.
+  **What it cannot repair:** rows rung 7 already deleted under (1). They are gone and only the
+  user can re-add them, which is why (1)'s fix is a guard on the delete rather than a reordering.
+
+  **(4) BANDCAMP'S SEARCH QUERY ACQUIRED A CAMP AND NOBODY NOTICED.** Its branch was exempt from
+  the characters/octets split for one stated reason — it sends `_norm("$artist $album")`, which
+  the old fold made ASCII by construction. 0.1.143 ended that invariant without touching the
+  branch: `_norm('米津玄師 Lemon')` is now a real wide string. The comment beside it had already
+  written down what to do when that day came ("it acquires a camp and must pick one — Bandcamp's
+  own layer wants octets"), so the fix is that instruction being carried out. **Corroborated
+  rather than reasoned:** the sibling ListenBrainz plugin calls the very same function and pins
+  it as `query_enc => 'bytes'`, encoding at its own call site — two plugins were handing one
+  function opposite spellings. Latin and accented artists are unaffected, which is why the suite
+  stayed green.
+  **`t_query_enc.pl`'s Bandcamp section was the guard for exactly this and it did not fire**,
+  because every fixture was accented LATIN and `Sigur Rós` still folds to `sigur ros`. All three
+  ASCII-only assertions passed while the exemption underneath them was gone. **An invariant about
+  character RANGE has to be tested with a character outside the range that motivated it.**
+
+  Tests 1,513 → **1,527 across 15 suites**, and the three suites that pinned the false claims now
+  pin the true ones. Anti-tested per fix, each against a copy of the tree with only that fix
+  reverted: the ladder guard 4 red at versions 5 and 6 while the genuine-duplicate control stays
+  GREEN (which is the asymmetry, not a detail — a guard that refused every merge would pass the
+  other four); the fold order 3 red in `t_db.pl` plus §4j2 naming both offending rows; the
+  Bandcamp encoding 2 red with the ASCII and latin-1 controls still passing. The ladder-version
+  assertions across three suites moved 8 → 9 with the stamp.
+
 ## Regression tests — RUN THESE BEFORE ANY BUILD (added 2026-07-29)
 
     sh tools/t_all.sh          # one line per suite, non-zero exit on any failure
@@ -5195,7 +5283,7 @@ session scratchpads and are gone — so nothing carried forward. Anything worth 
 
 | suite | protects |
 |---|---|
-| `t_db.pl` | dedupe keys and migrations against real SQLite: 0.1.43 (same title, different year), 0.1.33 (cross-source), 0.1.74+ (track vs album keys), 0.1.81 (same track from two surfaces), 0.1.88 (`track_count`, forced `rel_type`), an old schema file upgrading with its rows intact, and the live `updateArtist`/`updateYear` carriers reconciling a newly-equal key across services without separating source from ref or guessing across statuses. Also pins the inverse async race (year merge deletes the artist callback's id), exact vs canonical lookup, logical Move/Remove following, same-source result propagation, and cross-source rejection for counts/types/URLs |
+| `t_db.pl` | dedupe keys and migrations against real SQLite: 0.1.43 (same title, different year), 0.1.33 (cross-source), 0.1.74+ (track vs album keys), 0.1.81 (same track from two surfaces), 0.1.88 (`track_count`, forced `rel_type`), an old schema file upgrading with its rows intact, and the live `updateArtist`/`updateYear` carriers reconciling a newly-equal key across services without separating source from ref or guessing across statuses. Also pins the inverse async race (year merge deletes the artist callback's id), exact vs canonical lookup, logical Move/Remove following, same-source result propagation, and cross-source rejection for counts/types/URLs. **Its Latin fold controls gained the underscore-ORDER cases in 0.1.144**, and the gap they close is worth stating because the old row looked complete: `under_score` was the only underscore seeded, an underscore BETWEEN word characters is its own whole separator run, and it therefore folds identically whichever of `_norm`'s two substitutions runs first — so it passes against the bug. Only an underscore ADJACENT to other punctuation or a space can show the order, which is why `01_-_Intro` and `foo_ _bar` are now seeded alongside it, with the plain `01 - Intro` as the control that must NOT move |
 | `t_played.pl` | the thresholds that keep regressing in both directions: 0.1.82 (a single/short EP CAN reach Played), 0.1.83 (a one-track release does NOT mark when it starts), 0.1.88 (a real total beats the 4-track floor), plus the live-library-count rule |
 | `t_reltype.pl` | 0.1.88's classification: `singleIsWrong`, the full `relTypeFor` table, `classifyRelType` end to end, that the Qobuz album-object path fetches **no** tracklist, and that a CATALOGUE count comes back flagged provisional while a resolved one doesn't (the flag is the only thing stopping an inflated Played total) |
 | `t_verify_retry.pl` | 0.1.90's retry: that it retries, retries EXACTLY once (an unbounded retry would be worse than the bug), never gives up silently, and re-reads the row first — plus the three distinct answers `_verifyRelease` must keep apart (real count → store; provisional → neither store nor retry; no count → retry), canonical-id propagation after a year rekey, service-independent year propagation to a cross-service survivor, and the rule that an in-flight result from one service never writes its count/type onto another service's survivor |
@@ -5210,8 +5298,8 @@ session scratchpads and are gone — so nothing carried forward. Anything worth 
 | `t_favurl.pl` (Spotify sections) | `normaliseFavurl` itself, and then the four readers that consume it — including that none of them reaches `favurlIsTrack`'s fail-open branch, which the file's no-warnings check enforces. Plus `sourceFromSvc`: `spotty` → `spotify`, while a home-shelf id still answers `''` so the cover sniff keeps its turn. Plus 0.1.115's `spottyArtistName`, the ONE reader of a Spotty album object's artist: both legitimate shapes (the cache's plain `artist` string and the raw API's `artists` array), the string winning when both are present, and seven miss cases — including a hash in `artist`, which is the TIDAL/DEEZER shape and must NOT be read here, so a fold of the two extractions fails rather than quietly losing a Tidal row's artist. Calls are `eval`'d because a shape the sub fails to guard DIES rather than returning, and a dying assertion aborts the run instead of reporting it. Plus source checks that both modules ask through the sub and neither open-codes the `artists[0]{name}` read outside its body (`LL_SOURCES_SRC=`/`LL_PLUGIN_SRC=` point those at mutated copies) |
 | `t_reltype.pl` (Spotify section) | That a Spotify EP — `album_type: 'single'` with `total_tracks: 5` — is NOT stored as a single, that it resolved a real tracklist to prove it, and that a 9-track "single" demotes to `album` rather than `ep`. Also that the album is requested by full URI, and that no album object at all falls through to the tracklist instead of dying or inventing |
 | `t_podcast_purge.pl` | The 0.1.136 purge (schema rung 6), which is the one rung that DESTROYS user data, so the suite is about blast radius. Rows are seeded BELOW the rung by hand, not through `DB::add`, because the shapes under test are what OLDER builds wrote. It pins that every `source='podcast'` row goes; that a MIS-KEYED pre-0.1.126 streaming episode goes (a `|t:` key, and for Spotify the bare `spotify:episode:` spelling — only the url identifies those, which is why the test is `spotifyEpisodeUri` and not one SQL predicate); and that a CORRECTLY-keyed Spotify **or Deezer** episode SURVIVES, both being supported paths. Controls: an ordinary Spotify track, an album and a playlist are untouched. Also pins the report file — written BEFORE the delete, naming what went and nothing that stayed — the empty-library no-op (stamp, no report, the path most upgrades take), the LADDER rule that failures withhold the stamp, and a partial second-DELETE failure rolling the whole purge back so the retry report still contains every episode. Anti-tested 4/4/2/2/3 red. Since 2026-09-10 it also pins the two LADDER-MESSAGE rules that have no other home: that a failing rung names the version the ladder STAMPED rather than the one it was entered at (driven from version 2, the only shape where those differ), and that with `Sources::spotifyEpisodeUri` unreachable the rung removes NOTHING — the built-in row is the assertion that matters there, since it is already doomed when the guard trips, so a per-row abort would delete it (4 red) |
-| `t_refold.pl` | 0.1.112's fleet fold and the migration it owes: apostrophe elision (and the `'n'` guard) plus `%FOLD` in ALL THREE normalisers, that the three punctuation passes still differ where they must (the key keeps "(Deluxe)", the gate strips it, the ranker keeps "(LP4)"), that the lenient empty-artist gates are untouched, and `_migrateRefold` end to end against real SQLite — a stale key rewritten, same-status duplicates collapsed into the earliest save, MIXED-status rows left alone, and track/playlist/episode identity tails preserved. Its cross-source cases pin `add()` parity, atomic source/ref adoption, source-scoped track counts, mixed-status restraint, service-qualified `|p:`/`|e:` independence, and schema rung 7 repairing a database that already stamped the old source-scoped refold while retaining a retry on operational failure. Plus, at source level, that the fold lives in `DB.pm` and that `DB::_norm` calls it DIRECTLY while `Sources` goes through `->can` — the failure that guards is a permanent wrong key in a UNIQUE column, which no passing call can show. Plus §4i (0.1.119): a rollback that ITSELF fails must not poison the handle — `AutoCommit` restored, a later transaction still openable, the failed pass still withholding the ladder stamp, and the assertion that actually matters, that an ordinary write made AFTER the failure is durable rather than discarded at shutdown. DBD::SQLite will not fail a rollback on demand, so only the rollback is injected (a `RootClass` subclass); the failing GROUP is 4h's planted collision. Its squatter pair differs by an apostrophe rather than reusing 4h's accented one — that is fixture history, not a hazard in accents. Since 2026-09-10 it also covers the THIRD identity tail, `|u:` (a nameless track keyed on its play url): two services' rows stay independent through the fold, the tail survives verbatim while the TITLE segment around it is refolded, and — at `_keyForRow` rather than through a caller, since `updateArtist`'s callers only make album rows today — a stored `|u:` tail wins over a rebuild, so a later artist backfill cannot re-key such a row into its twin |
-| `t_query_enc.pl` | 0.1.120's per-branch query encoding in `_searchService`: that Qobuz, Tidal and Spotty (0.1.121) are handed CHARACTERS and Deezer OCTETS, and the CONSEQUENCE rather than just the flag — the URL `uri_escape_utf8` actually builds (called for real) and the name Unidecode actually transliterates to (modelled, since Text::Unidecode is not a dependency here). Plus the fail-safe cases in both directions, since a raw-CLI add arrives as octets and must not be corrupted on the way out. **Its fixture is the fragile part and is asserted rather than assumed:** a `"\x{f3}"` literal is stored latin-1 with `utf8::is_utf8` FALSE, so the encode never fires and every branch looks correct — `utf8::upgrade` models what `sqlite_unicode`/JSON::XS really hand back, and the first assertion fails loudly if it is ever dropped. The ASCII positive control is what stops the suite being satisfied by a change that mangles every query equally. **Bandcamp (0.1.122) is in NEITHER camp and is tested for exactly that**, because "exempt by an invariant" and "nobody checked" look identical from outside: its branch sends the combined `_norm("$artist $album")`, which `s/[^a-z0-9]+/ /g` makes ASCII-only, so the two encodings are byte-identical there and no conversion applies. The assertions pin that INVARIANT — ASCII out for character, octet and latin-1 in, the two encodings identical, and the album half still in the query — so a refactor that sends a raw artist or title down that branch goes red and has to pick a camp (5 red without them) |
+| `t_refold.pl` | 0.1.112's fleet fold and the migration it owes: apostrophe elision (and the `'n'` guard) plus `%FOLD` in ALL THREE normalisers, that the three punctuation passes still differ where they must (the key keeps "(Deluxe)", the gate strips it, the ranker keeps "(LP4)"), that the lenient empty-artist gates are untouched, and `_migrateRefold` end to end against real SQLite — a stale key rewritten, same-status duplicates collapsed into the earliest save, MIXED-status rows left alone, and track/playlist/episode identity tails preserved. Its cross-source cases pin `add()` parity, atomic source/ref adoption, source-scoped track counts, mixed-status restraint, service-qualified `|p:`/`|e:` independence, and schema rung 7 repairing a database that already stamped the old source-scoped refold while retaining a retry on operational failure. Plus, at source level, that the fold lives in `DB.pm` and that `DB::_norm` calls it DIRECTLY while `Sources` goes through `->can` — the failure that guards is a permanent wrong key in a UNIQUE column, which no passing call can show. Plus §4i (0.1.119): a rollback that ITSELF fails must not poison the handle — `AutoCommit` restored, a later transaction still openable, the failed pass still withholding the ladder stamp, and the assertion that actually matters, that an ordinary write made AFTER the failure is durable rather than discarded at shutdown. DBD::SQLite will not fail a rollback on demand, so only the rollback is injected (a `RootClass` subclass); the failing GROUP is 4h's planted collision. Its squatter pair differs by an apostrophe rather than reusing 4h's accented one — that is fixture history, not a hazard in accents. Since 2026-09-10 it also covers the THIRD identity tail, `|u:` (a nameless track keyed on its play url): two services' rows stay independent through the fold, the tail survives verbatim while the TITLE segment around it is refolded, and — at `_keyForRow` rather than through a caller, since `updateArtist`'s callers only make album rows today — a stored `|u:` tail wins over a rebuild, so a later artist backfill cannot re-key such a row into its twin. **Since 0.1.144 it also pins the rung-7 guard (§4c4), which is the worst bug this file has carried:** three unrelated non-Latin albums that share the erased `||` key survive the ladder from BOTH exposed start versions (5 and 6) and end on three distinct keys — before the guard, three rows in gave ONE out, and the refold could not undo it because the rows were gone. Its CONTROL is the half that matters, because a guard that refused every merge would pass all six: a genuine cross-source duplicate must still collapse to one row. §4j2's Latin seeds also gained the two underscore shapes (`Boards_of_Canada`, `01_-_Intro`) that 0.1.143 quietly rekeyed — every seed before them separates words with a character that is ALREADY non-`\w`, so the substitution order could not show, and the "rekeys ZERO rows" control passed against a fold that moved five of twenty-three ordinary Latin inputs |
+| `t_query_enc.pl` | 0.1.120's per-branch query encoding in `_searchService`: that Qobuz, Tidal and Spotty (0.1.121) are handed CHARACTERS and Deezer OCTETS, and the CONSEQUENCE rather than just the flag — the URL `uri_escape_utf8` actually builds (called for real) and the name Unidecode actually transliterates to (modelled, since Text::Unidecode is not a dependency here). Plus the fail-safe cases in both directions, since a raw-CLI add arrives as octets and must not be corrupted on the way out. **Its fixture is the fragile part and is asserted rather than assumed:** a `"\x{f3}"` literal is stored latin-1 with `utf8::is_utf8` FALSE, so the encode never fires and every branch looks correct — `utf8::upgrade` models what `sqlite_unicode`/JSON::XS really hand back, and the first assertion fails loudly if it is ever dropped. The ASCII positive control is what stops the suite being satisfied by a change that mangles every query equally. **Bandcamp is in the OCTETS camp since 0.1.144, and the story of how it got there is why this suite distrusts an invariant.** From 0.1.122 it was exempt from both camps, tested for exactly that — its branch sends the combined `_norm("$artist $album")`, which the old `s/[^a-z0-9]+/ /g` made ASCII-only, so the two encodings were byte-identical and no conversion applied. The assertions pinned that INVARIANT rather than a camp, precisely so a change that started sending a raw name down the branch would go red. **The invariant died in 0.1.143 and those assertions did not notice**, because every fixture was accented LATIN: the fold learned to keep letters of every script, but `Sigur Rós` still folds to `sigur ros`, so all three ASCII-only checks stayed green while the exemption underneath them was gone. Now pinned as a camp, with CJK and Cyrillic fixtures, and the CONSEQUENCE as well as the flag — the octets decode back to the real name, which a query that dropped the name entirely (the pre-0.1.143 behaviour) would also satisfy on the flag alone. The ASCII and latin-1 rows are the controls that stop it being satisfied by encoding everything blindly (2 red without the fix, and those two stay green). **An invariant about character RANGE has to be tested with a character outside the range that motivated it** |
 | `t_load.pl` | every shipped module compiles AND loads, plus a called-vs-defined sweep — `perl -c` passes on a call to a sub that doesn't exist, which nearly shipped a runtime crash in 0.1.83 |
 
 Two rules that follow from how this suite is built:

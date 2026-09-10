@@ -235,7 +235,7 @@ is('kind column added',        ($col{kind}        ? 'yes':'no'), 'yes');
 is('track_title column added', ($col{track_title} ? 'yes':'no'), 'yes');
 is('rel_type column added',    ($col{rel_type}    ? 'yes':'no'), 'yes');
 is('track_count column added', ($col{track_count} ? 'yes':'no'), 'yes');
-is('user_version stamped',     ($h->selectrow_array('PRAGMA user_version'))[0], 8);
+is('user_version stamped',     ($h->selectrow_array('PRAGMA user_version'))[0], 9);
 is('the legacy year-append carrier is reconciled cross-source',
    scalar @{ $h->selectall_arrayref('SELECT id FROM albums') }, 1);
 
@@ -266,7 +266,7 @@ is('the legacy year-append carrier is reconciled cross-source',
     is('...and bandcamp too',                    $rows->{bandcamp}{track_count}, undef);
     is('...but a library count is untouched',    $rows->{library}{track_count}, 9);
     is('the label is NOT touched (display only)',$rows->{qobuz}{rel_type}, 'ep');
-    is('...and stamped so it runs once',         ($g->selectrow_array('PRAGMA user_version'))[0], 8);
+    is('...and stamped so it runs once',         ($g->selectrow_array('PRAGMA user_version'))[0], 9);
 }
 
 # _migrateArtistPrefix is the fifth key writer, but it runs before the columns required by
@@ -633,7 +633,7 @@ section('0.1.143 — the fold KEEPS a non-Latin name instead of deleting it');
     is('Greek survives, lowercased', $norm->("\xce\xa9"), $chr->("\xcf\x89"));
 
     # THE LATIN CONTROLS. A pure split means every existing key is byte-identical, which is
-    # what makes rung 8 rekey ZERO rows in a Latin-only library. If any of these move, the
+    # what makes the refold rung rekey ZERO rows in a Latin-only library. If any of these move, the
     # migration stops being free and the claim in _norm's header is false.
     is('Latin folding is unchanged',        $norm->('Sigur R'."\xc3\xb3".'s'),   'sigur ros');
     is('apostrophe elision is unchanged',   $norm->("Jane\xe2\x80\x99s Addiction"), 'janes addiction');
@@ -644,6 +644,22 @@ section('0.1.143 — the fold KEEPS a non-Latin name instead of deleting it');
     # \w includes '_', so it is stripped explicitly — it is a LIKE metacharacter and the two
     # finders below build patterns straight out of this sub with no ESCAPE.
     is('an underscore still separates words', $norm->('under_score'),  'under score');
+    # AND THE ORDER OF THE TWO SUBSTITUTIONS, which the line above cannot test. An
+    # underscore BETWEEN word characters is its own separator run and folds identically
+    # whichever pass goes first, so 'under_score' passes against the bug. Only an
+    # underscore ADJACENT to other punctuation or a space shows it: with the non-word pass
+    # first the '_' is still \w, so it does not join the run beside it and each becomes its
+    # own space. 0.1.143 shipped that way and keyed '01_-_Intro' as '01   intro'. These are
+    # ordinary ripped-file shapes, so the bug quietly falsified the "zero rows rekeyed"
+    # claim above AND broke Sources::_punctPass's live match (see §_punct below).
+    is('an underscore beside a dash collapses to ONE space',
+       $norm->('01_-_Intro'),          '01 intro');
+    is('...and so does a whole run of them',
+       $norm->('Track_01_-_Intro'),    'track 01 intro');
+    is('...and an underscore beside a space',
+       $norm->('foo_ _bar'),           'foo bar');
+    is('...while a plain space-dash-space is unchanged',
+       $norm->('01 - Intro'),          '01 intro');
 
     # A NAME THAT IS ALL PUNCTUATION keeps its punctuation rather than answering ''. Real
     # bands ('!!!', '+/-') and a self-titled album by one of them collided with every other
