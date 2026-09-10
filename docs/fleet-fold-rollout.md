@@ -1,4 +1,14 @@
-# Fleet fold state after LL 0.1.145 — what is actually outstanding
+# Fleet fold rollout — CLOSED. A record, not a work order.
+
+> **STATUS: CLOSED 2026-09-10. Nothing in this document is outstanding in any repo.**
+> Items 1 and 3 shipped in LL 0.1.145. Item 1's key half was DECLINED, and item 2 — the last
+> fleet-wide item, the `†††` residue — was DECLINED unbuilt in the same pass: the matcher port
+> that motivated this whole document is no longer needed, because LL came into line and the
+> other repos were never out of it. **Do not open work from this file.** It is kept for the
+> measurements, the two retracted claims, and the reviewer list at the end, all of which stay
+> live. Each repo's own ledger carries the closure under §A.
+
+## How it stood while it was open
 
 **Status 2026-09-10.** LL 0.1.143 fixed a non-Latin fold defect. The obvious next step looked
 like porting it to the other four repos. **That is not the work.** Measured against the shipped
@@ -89,7 +99,7 @@ built out of `_norm`.
 
 ---
 
-## What IS outstanding
+## The three items, and how each one ended
 
 ### 1. The stylised-letter fold — MATCHER HALF DONE (0.1.145), KEY half DECLINED. Nothing open.
 
@@ -179,7 +189,15 @@ The all-marks fallback survives underneath it and now fires only for a name with
 (`†††`), which is item 2 and is a variant BETTER than the fleet's, not drift. The DB key keeps the
 raw marks, which was right then and is right now.
 
-### 2. An all-symbol name with no fold mapping still erases — ALL FOUR repos
+### 2. An all-symbol name with no fold mapping still erases — DECLINED unbuilt (2026-09-10)
+
+**This was the last open item in the fleet and it is now closed without being built** (Simon).
+The analysis below stands; the decision on top of it is that the port is not needed. **The reason
+it is safe to close: it is a MISS, not a wrong answer.** Nothing is mis-filed and nothing is
+merged — a name made entirely of unmapped symbols simply finds nothing. No such artist has failed
+in the field, LL already carries the fallback for the case where one would, and DSC and Search Hub
+are ON HOLD so the fleet could never have been levelled in one pass anyway. Re-raise ONLY by
+naming a real artist that actually failed.
 
 `†††` (Crosses) normalises to `''` in PFR, LBF and DSC. `!!!` and `+/-` survive only because
 their marks have leetspeak mappings. A name of daggers, runes or emoji has none, so it erases
@@ -213,9 +231,9 @@ control stays green. **LL took this FROM the fleet**, the reverse of the usual d
 
 ## Per-repo worksheet
 
-### PFR — ACTIVE
+### PFR — NOTHING OUTSTANDING
 - **Non-Latin: nothing to do.** Verified correct.
-- Item 2 only, the `†††` residue in `_norm`'s all-marks fallback. Optional.
+- Item 2 was its only entry and is DECLINED unbuilt. Nothing is waiting on this repo.
 - **Correcting this line, which sent the 0.1.145 port to the wrong place:** `tools/t_matchersync.pl`
   is PFR's OWN suite and reads only PFR's `Browse.pm`. The CROSS-REPO drift gate is
   `matcher_sync_check.py`, which lives in the LBF repo and hashes each sub in every copy.
@@ -226,19 +244,21 @@ control stays green. **LL took this FROM the fleet**, the reverse of the usual d
   When a sub delegates, pin the delegate.
 - Any change here needs a cache bump. Nothing is in a UNIQUE column, so no migration.
 
-### LBF — ACTIVE
+### LBF — NOTHING OUTSTANDING
 - **Non-Latin: nothing to do.** Verified correct, cache key included.
-- Item 2 only. Optional.
+- Item 2 was its only entry and is DECLINED unbuilt. Nothing is waiting on this repo.
 - If `_norm` is ever touched here, bump EVERY cache layer, not just the inner one:
   `lbf:pl:resolved` wraps `lbf:track`. `DB::KEY_VERSIONS` is the one place to edit.
 
 ### DSC — ON HOLD
-No development until the rest of the fleet's outstanding work is complete. Verified correct for
-non-Latin, so nothing is waiting on it. Item 2 applies whenever it resumes.
+No development. Verified correct for non-Latin, so nothing is waiting on it. Item 2 would have
+been its only entry and is DECLINED unbuilt, so **there is nothing here to pick up when it
+resumes** — the hold is not deferring fold work, because none is left.
 
 ### Search Hub — ON HOLD
-No development. Same standing as DSC. Its `Text.pm` was never checked against items 1 to 3, so
-assume nothing about it until work resumes.
+No development. Same standing as DSC. Its `Text.pm` was never checked against items 1 to 3 and now
+never needs to be, since all three are closed. If work ever resumes here, check it against the
+SHIPPED fold in PFR or LBF rather than against this document.
 
 ---
 

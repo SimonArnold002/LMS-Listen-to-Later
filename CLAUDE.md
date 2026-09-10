@@ -645,6 +645,12 @@ subsystem.
       against `vol` on the strength of that pair. **DO NOT GENERALISE TO THE FLEET** —
       Discography is the opposite case and folds variants deliberately, because lining one
       artist's albums up across sources is its whole job.
+    - **THE FLEET ROLLOUT THAT STARTED ALL OF THIS IS CLOSED — 2026-09-10, nothing outstanding
+      in any repo.** The port to PFR/LBF/DSC was never the work: they were measured correct
+      before it began, and 0.1.145 brought LL up to them. The last fleet-wide item, the `†††`
+      residue in the other three repos' all-marks fallback, was DECLINED unbuilt in the same
+      pass. `docs/fleet-fold-rollout.md` is now a RECORD, not a work order — do not open work
+      from it, and do not propose porting LL's fold anywhere.
   - **The whole thing is anti-tested in both halves**, because either alone would pass against
     a fix that does nothing: revert the fold entirely and 27 assertions go red across
     `t_db.pl`, `t_addpath.pl` and `t_refold.pl`; remove ONLY the punctuation fallback and
