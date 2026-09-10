@@ -648,9 +648,19 @@ subsystem.
     - **THE FLEET ROLLOUT THAT STARTED ALL OF THIS IS CLOSED — 2026-09-10, nothing outstanding
       in any repo.** The port to PFR/LBF/DSC was never the work: they were measured correct
       before it began, and 0.1.145 brought LL up to them. The last fleet-wide item, the `†††`
-      residue in the other three repos' all-marks fallback, was DECLINED unbuilt in the same
-      pass. `docs/fleet-fold-rollout.md` is now a RECORD, not a work order — do not open work
-      from it, and do not propose porting LL's fold anywhere.
+      residue, ended in TWO verdicts and an earlier draft of this line recorded only one.
+      **The `_norm` port is DECLINED, and MEASURED rather than waved off:** carrying LL's
+      all-marks fallback into the fleet's `_norm` flips four cases through their
+      `_albumMatches` and only one flip is wanted, because it moves an all-marks artist out of
+      their lenient empty-artist branch and into their strict artist gate. **LL having the
+      fallback is NOT evidence they should** — LL's `_artistMatch` returns 1 on an empty side
+      so the fallback can only tighten a total free pass, theirs returns 0 so it converts
+      working matches into rejections, and LL replays a saved item to the SAME source where
+      they match a foreign credit against a catalogue. Same code, opposite effect.
+      **LBF separately BUILT the TRACK half**, which was never a mere miss there: single-copy
+      subs, no fleet obligation, nothing for LL to take. `docs/fleet-fold-rollout.md` is now a
+      RECORD, not a work order — do not open work from it, and do not propose porting LL's fold
+      anywhere.
   - **The whole thing is anti-tested in both halves**, because either alone would pass against
     a fix that does nothing: revert the fold entirely and 27 assertions go red across
     `t_db.pl`, `t_addpath.pl` and `t_refold.pl`; remove ONLY the punctuation fallback and
