@@ -1093,6 +1093,76 @@ is('...and _isOurAction agrees, on its own',
 is('nothing of OURS is in the file', ours_in_file($after), 0);
 
 # ---------------------------------------------------------------------------
+section('tier 2 — a RETIRED NAME is swept, and the log names the one class that may not be ours');
+# favorites-album/-track sit on the retired-name list because 0.1.85 shipped them. An empty one
+# is indistinguishable from another plugin's deliberate suppressor — there is nothing in an
+# empty array to say who wrote it — and it is swept anyway, on the reasoning in the Review
+# Ledger: leaving a husk of OURS in place hides "Add" on that command for good (the 0.1.51
+# class), and no released build has run this sweep yet (`main` is 0.1.93). The accepted cost is
+# that an identically-named empty of THEIRS goes with it. What is pinned here is that the cost
+# is now VISIBLE, which until 0.1.141 it was not: the prune reported how many sections it KEPT
+# and never which it removed. Behaviour is unchanged by this section — the deletions were
+# already happening, silently.
+#
+# ANTI-TESTS, measured: drop favorites-* from %legacyName in Plugin.pm and 4 go red (the sweep
+# stops, and both log assertions go with it); silence the retired-name warn alone and 2 go red,
+# which is what separates "we still delete it" from "we now say that we did".
+reset_all();
+install_api();
+set_material_version('6.4.9');
+File::Path::make_path("$tmp/material-skin");
+{
+    my $mixed = {
+        # A retired spelling of ours. Also exactly what a third party would write to hide
+        # their own Add on Favourites rows.
+        'favorites-album'   => [],
+        # A name no Listen Later build has ever asserted: the control, and the thing that
+        # stops this passing against a prune that simply deletes every empty category.
+        'otherplugin-album' => [],
+        # Ours, POPULATED — so the strip pass empties it and it is deleted with provenance,
+        # not by name. The other control: it must be reported as removed, and must NOT be
+        # named as a retired-name claim.
+        'online-album'      => [ { title => 'Add to Listen Later',
+                                   lmscommand => [ 'listenlater', 'addctx', 'kind:album' ] } ],
+        # Someone else's populated category, so the file survives to be read back.
+        'album'             => [ { title => 'Their Thing', command => [ 'their', 'cmd' ] } ],
+    };
+    open my $mfh, '>:raw', actions_file() or die $!;
+    print $mfh $JSON->encode($mixed); close $mfh;
+
+    Slim::Utils::Log::clear();
+    Plugins::ListenLater::Plugin::_registerMaterialActions();
+    Plugins::ListenLater::Plugin::_writeMaterialActions();
+    my $left = read_file();
+    my @log  = Slim::Utils::Log::lines();
+    my ($removedLine) = grep { /removed \d+ empty categor/ } @log;
+    my ($retiredLine) = grep { /RETIRED NAME alone/ } @log;
+
+    is('a retired name of ours is swept even though it arrived empty',
+       (exists $left->{'favorites-album'} ? 'kept' : 'removed'), 'removed');
+    is('...while a name no build of ours ever wrote is left alone',
+       (exists $left->{'otherplugin-album'} ? 'kept' : 'removed'), 'kept');
+    is('the removal is NAMED in the log, not just counted',
+       ((($removedLine // '') =~ /favorites-album/) ? 'named' : 'unnamed'), 'named');
+    is('...and the retired-name claim is called out separately',
+       ((($retiredLine // '') =~ /favorites-album/) ? 'flagged' : 'not flagged'), 'flagged');
+    is('...telling the user another plugin\'s suppression may have gone with it',
+       ((($retiredLine // '') =~ /another plugin/) ? 'explained' : 'bare'), 'explained');
+    # The two halves of the distinction, which is the whole point of the second line.
+    is('a category WE emptied is reported as removed',
+       ((($removedLine // '') =~ /online-album/) ? 'named' : 'unnamed'), 'named');
+    is('...but is NOT claimed as a retired name — we have provenance for that one',
+       ((($retiredLine // '') =~ /online-album/) ? 'wrongly flagged' : 'not flagged'),
+       'not flagged');
+    is('...and the control name is in neither line',
+       ((join('', $removedLine // '', $retiredLine // '') =~ /otherplugin/) ? 'named' : 'absent'),
+       'absent');
+    is('their populated category is still untouched',
+       $JSON->encode($left->{'album'}), $JSON->encode([ { title => 'Their Thing',
+                                                          command => [ 'their', 'cmd' ] } ]));
+}
+
+# ---------------------------------------------------------------------------
 section('tier 2 — a refused registration still reaches the user, via the file');
 
 reset_all();

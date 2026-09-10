@@ -1393,18 +1393,55 @@ sub _pruneMaterialActions {
     # only knew about the folded set could not remove what an older build wrote.
     my ($legacyPositive, $legacyFileOnly) = _materialActionSet(0);
     my %owned = %{ _ownedCats() };
-    my %ours = map { $_ => 1 }
-        keys %$legacyPositive, keys %$legacyFileOnly, @suppressors, keys %owned,
+    #
+    # The retired spellings are a NAMED set rather than more words in the map, because the
+    # delete pass below has to tell them apart from the rest. A category claimed only because
+    # its NAME is on this list is the one case where we cannot prove the entry is ours: it is
+    # empty, it arrived empty, the ledger does not record it and no current pass wrote it.
+    # That is the accepted residual (see the `favorites-*` entry in CLAUDE.md's ledger), and
+    # until 0.1.141 it was also INVISIBLE — the prune said how many sections it kept and never
+    # which ones it removed. It is still deleted, deliberately: the alternative is leaving a
+    # husk of ours in place, which hides "Add" on that command for good (the 0.1.51 class), and
+    # nothing in an empty array can separate the two. What changed is that it now says so.
+    my %legacyName = map { $_ => 1 }
         qw(podcasts-album podcasts-track favorites-album favorites-track
            listentolater-album listentolater-track listentolater-artist
            LtLHome-album LtLHome-track LtLHome-artist);
+    my %suppressorCat = map { $_ => 1 } @suppressors;
+    my %ours = map { $_ => 1 }
+        keys %$legacyPositive, keys %$legacyFileOnly, @suppressors, keys %owned,
+        keys %legacyName;
 
     # Delete what is ours and now empty. Only-empty, so a category we vacated that someone else
     # also writes into keeps their entries; and never a suppressor Material did not take.
+    my (@pruned, @byNameOnly);
     for my $cat (keys %$data) {
         next unless ref $data->{$cat} eq 'ARRAY' && !@{ $data->{$cat} };
         next if $emptyFallback{$cat} || $fallback{$cat};
-        delete $data->{$cat} if $ours{$cat} || $emptied{$cat};
+        next unless $ours{$cat} || $emptied{$cat};
+        delete $data->{$cat};
+        push @pruned, $cat;
+        # Claimed by a retired NAME and by nothing else — no provenance from this pass, none
+        # from the ledger, and not a category any current tier asserts.
+        push @byNameOnly, $cat
+            if $legacyName{$cat} && !$emptied{$cat} && !$owned{$cat}
+               && !$legacyPositive->{$cat} && !$legacyFileOnly->{$cat}
+               && !$suppressorCat{$cat};
+    }
+    if (@pruned) {
+        $log->warn('LL: removed ' . scalar(@pruned) . ' empty categor'
+            . (@pruned == 1 ? 'y' : 'ies') . ' from ' . $file . ': ' . join(', ', sort @pruned));
+        # Named separately because this is the one class another plugin could have written.
+        # A user reporting "Add stopped being hidden on X after installing Listen Later" has
+        # nothing else to go on: the file is rewritten, and an empty array leaves no trace of
+        # who put it there.
+        $log->warn('LL: of those, ' . join(', ', sort @byNameOnly) . ' '
+            . (@byNameOnly == 1 ? 'was' : 'were') . ' claimed by a RETIRED NAME alone, with no '
+            . 'record of this plugin having written ' . (@byNameOnly == 1 ? 'it' : 'them')
+            . '. An older Listen Later build wrote that spelling, so it is swept — but if '
+            . 'another plugin had deliberately left it empty to hide its own "Add" there, '
+            . 'this removed that suppression. Re-run that plugin\'s setup to restore it.')
+            if @byNameOnly;
     }
 
     # Put back exactly what could not be delivered by registration. `||=` on the empties, for
@@ -2580,9 +2617,11 @@ sub _contextMenuQuery {
     my $id     = $request->getParam('id');
     my $client = $request->client;
     my $rec    = eval { Plugins::ListenLater::DB::getCanonical($id) };
-    # The row's stored ref, at THIS scope because the Wish List rule below needs the play
-    # url out of it (a Spotify episode is told from a Spotify track by nothing else). The
-    # Bandcamp block further down keeps its own narrower copy.
+    # The row's stored ref, read ONCE for the whole sub. Two rules need it: the Wish List
+    # test below (a Spotify episode is told from a Spotify track by the play url and nothing
+    # else) and the Bandcamp entry. That second one used to re-extract it, defended as its
+    # own narrower copy when it was character-for-character the same test; the only
+    # difference was a `$rec &&` the enclosing `if` had already made true.
     my $recRef = ($rec && ref $rec->{ref} eq 'HASH') ? $rec->{ref} : {};
 
     my $status = ($rec && $rec->{status}) ? $rec->{status} : 'later';
@@ -2605,8 +2644,7 @@ sub _contextMenuQuery {
     #   - URL not known (older saves): fall back to a `go` drill into the `buy` query,
     #     which resolves the page once, caches it, and shows the weblink (see _buyCommand).
     if ($rec && ($rec->{source} || '') eq 'bandcamp') {
-        my $ref   = (ref $rec->{ref} eq 'HASH') ? $rec->{ref} : {};
-        my $known = $ref->{buy_url} || $ref->{album_url};
+        my $known = $recRef->{buy_url} || $recRef->{album_url};
         if ($known && $known =~ m{^https?://}i) {
             push @entries, {
                 text    => cstring($client, 'PLUGIN_LL_BUY_BANDCAMP'),

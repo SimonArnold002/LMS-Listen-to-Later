@@ -336,6 +336,43 @@ section('4c2. CROSS-SOURCE IDENTITY MATCHES add(), WITHOUT CROSSING REPLAY WIRES
     is('playlist/episode source tails keep all four rows', scalar(@$r), 4);
 }
 
+{
+    # '|u:' is the THIRD identity tail (2026-09-10) and it must behave like the other two: a
+    # fold may change how the TITLE segment normalises, never the segment that says WHICH
+    # recording this is. The row is a nameless track disambiguated by its play url; the
+    # apostrophe in the title is what makes the fold act, so a rebuild instead of a
+    # tail-preserve would be visible as a lost or altered tail rather than a no-op.
+    my $h = $mig->(sub {
+        $ins->($_[0], source => 'qobuz', kind => 'track', track => "Don't Look",
+               key => "|don t look||u:qobuz:qobuz://999333.flac");
+        $ins->($_[0], source => 'tidal', kind => 'track', track => "Don't Look",
+               key => '|don t look||u:tidal:tidal://track:5');
+    });
+    my $rows = $h->selectall_arrayref('SELECT source, dedupe_key FROM albums ORDER BY source',
+                                      { Slice => {} });
+    is('a url tail keeps both services\' rows independent', scalar(@$rows), 2);
+    is('...the qobuz tail survives the refold verbatim',
+       $rows->[0]{dedupe_key}, '|dont look||u:qobuz:qobuz://999333.flac');
+    is('...and the title segment IS refolded around it',
+       (($rows->[0]{dedupe_key} =~ /^\|dont look\|/) ? 'refolded' : 'untouched'), 'refolded');
+}
+
+{
+    # The same rule at the live carrier rather than the migration: a later artist backfill on
+    # a url-keyed row must not rebuild it into a name key. Unreachable today (updateArtist's
+    # callers sit behind _finishAlbumAdd, which only makes album rows), which is exactly why
+    # it is asserted at _keyForRow instead of through a caller — the guard has to hold for the
+    # first caller that ISN'T, which is how the 0.1.129 five-writer bug got in.
+    my $keyed = Plugins::ListenLater::DB::_keyForRow({
+        source => 'qobuz', kind => 'track', track_title => 'Untitled',
+        artist => 'A Band Backfilled Later', album_title => 'An Album',
+        dedupe_key => '|untitled||u:qobuz:qobuz://999333.flac',
+        ref => { url => 'qobuz://999333.flac' },
+    });
+    is('a stored url tail wins over a rebuild, exactly as |e: and |p: do',
+       $keyed, '|untitled||u:qobuz:qobuz://999333.flac');
+}
+
 section('4c3. RUNG 7 REPAIRS DATABASES THAT ALREADY STAMPED THE OLD REFOLD');
 {
     # Editing rung 5 fixes released upgrades, but a development database may already have run

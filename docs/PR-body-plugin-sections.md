@@ -1,5 +1,12 @@
 # Let plugins fully define their custom actions without actions.json
 
+> **STATUS: MERGED and RELEASED — historical (marked 2026-09-10).** Submitted as
+> [PR #1257](https://github.com/CDrummond/lms-material/pull/1257), merged verbatim in one commit
+> (`8f3e777be`, merge `f4cfb95`) and released in Material **6.4.8**. It appears in neither the
+> 6.4.8 nor the 6.4.9 ChangeLog, so "did it ship" is answerable only from the tree. This is what
+> unlocked delivery tier 2, where the plugin registers its actions and writes no
+> `actions.json` at all. Companion patch: `material-plugin-action-sections.patch`.
+
 Hi Craig, Thanks for adding `registerCustomAction` in 6.4.6 — it's a much better fit for a plugin than
 writing into the shared `prefs/material-skin/actions.json`, and I have moved most of the actions used in my plugins across to it.
 

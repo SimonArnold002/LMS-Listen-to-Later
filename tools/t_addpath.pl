@@ -1104,6 +1104,66 @@ sub move_to {
     return $rec ? $rec->{status} : '(gone)';
 }
 
+# The BANDCAMP entry, which is the other consumer of the row's stored ref in that sub. It was
+# uncovered until 2026-09-10 — every menu assertion here is about the Wish List rule, so the
+# suite stayed green whatever the Buy entry did. It reads the ref that the Wish List rule
+# reads: one extraction, where there used to be two identical ones, the second defended in a
+# comment as "its own narrower copy". These pin the fold by its OUTPUT, since no return value
+# shows which variable was read. ANTI-TEST: point the Buy entry at an empty hash and the
+# weblink cases fall back to the drill (3 red).
+sub menu_entry {
+    my ($id, $want) = @_;
+    my $req = FakeRequest->new(id => $id);
+    Plugins::ListenLater::Plugin::_contextMenuQuery($req);
+    my %by;                                     # index => { key => value }
+    $by{ $_->[1] }{ $_->[2] } = $_->[3] for @{ $req->{loop} || [] };
+    for my $i (sort { $a <=> $b } keys %by) {
+        next unless ($by{$i}{text} // '') eq $want;
+        return $by{$i};
+    }
+    return {};
+}
+{
+    my ($known) = Plugins::ListenLater::DB::add({
+        source => 'bandcamp', kind => 'album', artist => 'Cola', album_title => 'Deep In View',
+        ref_kind => 'url', ref => { album_url => 'https://cola.bandcamp.com/album/deep-in-view' },
+    }, 'later');
+    my $e = menu_entry($known, 'PLUGIN_LL_BUY_BANDCAMP');
+    is('a Bandcamp row with a stored album url opens it directly',
+        ($e->{weblink} // '(none)'), 'https://cola.bandcamp.com/album/deep-in-view');
+    is('...so it needs no drill into the buy query',
+        (exists $e->{actions} ? 'drills' : 'no drill'), 'no drill');
+
+    # buy_url wins over album_url — the cached resolve is the better page.
+    my ($cached) = Plugins::ListenLater::DB::add({
+        source => 'bandcamp', kind => 'album', artist => 'Cola', album_title => 'Cost Of Living',
+        ref_kind => 'url', ref => { album_url => 'https://cola.bandcamp.com/album/a',
+                                    buy_url   => 'https://cola.bandcamp.com/album/b' },
+    }, 'later');
+    is('a cached buy url is preferred over the one captured at add time',
+        (menu_entry($cached, 'PLUGIN_LL_BUY_BANDCAMP')->{weblink} // '(none)'),
+        'https://cola.bandcamp.com/album/b');
+
+    # The older-save case: no url in the ref at all, so the entry must still appear and drill.
+    my ($bare) = Plugins::ListenLater::DB::add({
+        source => 'bandcamp', kind => 'album', artist => 'Cola', album_title => 'Blank Curtain',
+        ref_kind => 'search', ref => {},
+    }, 'later');
+    my $b = menu_entry($bare, 'PLUGIN_LL_BUY_BANDCAMP');
+    is('a Bandcamp row with no stored url still offers Buy',
+        (%$b ? 'offered' : 'missing'), 'offered');
+    is('...as a drill into the buy query, not a weblink',
+        (($b->{actions} && !$b->{weblink}) ? 'drills' : 'weblink'), 'drills');
+
+    # The control: a non-Bandcamp row must not get the entry at all.
+    my ($qobuz) = Plugins::ListenLater::DB::add({
+        source => 'qobuz', kind => 'album', artist => 'Cola', album_title => 'Not Bandcamp',
+        ref_kind => 'search', ref => { album_url => 'https://cola.bandcamp.com/album/x' },
+    }, 'later');
+    is('a non-Bandcamp row never offers Buy, whatever its ref holds',
+        (%{ menu_entry($qobuz, 'PLUGIN_LL_BUY_BANDCAMP') } ? 'offered' : 'absent'), 'absent');
+}
+
 # The stored ref goes in as well, because for Spotify it is the ONLY thing separating the
 # episode from the track: both rows below are kind='track', source='spotify'.
 for my $c ( [ 'a Deezer podcast episode',   'deezerpodcast','track',    0, 'deezerpodcast://1' ],
@@ -1375,21 +1435,85 @@ section('the same play url is the same track, whatever the row called it');
     is('a different track still stores separately',
         (($c && $c->{id} != $a->{id}) ? 'two rows' : 'wrongly deduped'), 'two rows');
 
-    # KNOWN RESIDUAL, pinned so it is a recorded limitation rather than a surprise. Two
-    # genuinely DIFFERENT music tracks that are both artist-less AND share a title still
-    # collapse, because the name key is '|||t:<title>' for both and DB::add dedupes on the key
-    # BEFORE _insertTrackRow's url check is ever consulted. This is the same shape as the
-    # podcast-episode collision that DB::episodeKey fixed, and the same fix would work — but a
-    # music track row would have to be re-keyed on its url, and unlike streaming episodes those
-    # rows exist in released builds (track saves ship from 0.1.74; `main` is 0.1.93), so it
-    # owes a migration rather than a key change. Left as-is deliberately: it needs a track with
-    # NO artist at all (Material populates $ARTISTNAME for track rows on every service checked
-    # — a Qobuz browse row carries "Title\nArtist - Album") AND a second one sharing its
-    # title. If artist-less track rows ever turn out to be common, revisit this with a rung.
-    my $d = add(kind => 'track', trackname => 'Untitled', svc => 'qobuz',
-                favurl => 'qobuz://999333.flac');
-    is('two artist-less tracks sharing a title still collapse (known, needs a migration)',
-        (defined $d ? 'stored' : 'collapsed'), 'collapsed');
+    # THE RESIDUAL THIS BLOCK USED TO PIN AS A LIMITATION IS FIXED (2026-09-10). Two genuinely
+    # different tracks that are both artist-less AND share a title used to collapse: the name
+    # key is '|||t:<title>' for both, and DB::add dedupes on it BEFORE _insertTrackRow's url
+    # check is ever consulted, so the second add was reported "already saved" and lost. It was
+    # left alone on the grounds that it needs a track with no artist at all and a second one
+    # sharing its title, and that the obvious fix — re-keying every track row on its url —
+    # owed a migration rung on a UNIQUE column.
+    #
+    # It does not, and that is the point of the fix: the collision is disambiguated LAZILY, at
+    # the moment it happens, so no row already in the database is touched and no stored key is
+    # rewritten. The first row keeps '|||t:<title>' for ever; only the SECOND row gets the
+    # '|u:<source>:<url>' tail, and that row did not exist at all before.
+    my $u2 = 'qobuz://999333.flac';
+    my $d  = add(kind => 'track', trackname => 'Untitled', svc => 'qobuz', favurl => $u2);
+    is('a second artist-less track sharing a title is STORED, not swallowed',
+        (($d && $d->{id} != $a->{id}) ? 'two rows' : 'collapsed'), 'two rows');
+    is('...the FIRST row keeps the key it already had — nothing owes a migration',
+        Plugins::ListenLater::DB::get($a->{id})->{dedupe_key}, '|||t:untitled');
+    is('...and only the second carries the url tail',
+        ($d ? $d->{dedupe_key} : 'nothing'), '|untitled||u:qobuz:' . $u2);
+    # Both must still be reachable by the identity they are keyed on, or Played loses one.
+    is('the first still resolves by ITS url',
+        (Plugins::ListenLater::DB::findTrackByUrl('qobuz', $u) || {})->{id}, $a->{id});
+    is('...and the second by its own',
+        (Plugins::ListenLater::DB::findTrackByUrl('qobuz', $u2) || {})->{id}, $d->{id});
+    # The re-add, which is where a lazy fix goes wrong: it computes the NAMELESS key again and
+    # lands on the first row again, so it must find its way to its OWN row. Asked through
+    # DB::add directly, because what has to be right is the ANSWER, not just the row count.
+    # Going through the add command cannot tell the two apart: with the url lookup removed the
+    # INSERT hits UNIQUE(source,dedupe_key) and DIES, the command evals it away, and "nothing
+    # was stored" then looks exactly like a clean dedupe from outside — while the user gets no
+    # confirmation and the log gets a DBI error. Measured: this pair passed WITHOUT the lookup
+    # until it was asked this way.
+    my ($reId, $reDup) = eval {
+        Plugins::ListenLater::DB::add({ source => 'qobuz', kind => 'track',
+            track_title => 'Untitled', ref_kind => 'url', ref => { url => $u2 } }, 'later');
+    };
+    is('re-adding the second track answers "already saved" rather than dying',
+        ($@ ? 'died' : ($reDup ? 'already saved' : 'stored again')), 'already saved');
+    is('...and it names ITS row, not the title twin', ($reId // 'none'), $d->{id});
+    is('...and there are exactly two rows with that title',
+        scalar @{ Plugins::ListenLater::DB::dbh()->selectall_arrayref(
+            "SELECT id FROM albums WHERE kind='track' AND track_title='Untitled'") }, 2);
+
+    # THE CONTROLS. A key that carries a NAME must keep deduping on it, or this fix has
+    # quietly disabled cross-surface and cross-source track dedupe.
+    #
+    # ANTI-TESTS for this whole block, measured: disable the disambiguation and 3 go red;
+    # drop the second findAnyByKey and 2 go red, one of them showing the real consequence (the
+    # INSERT hits the UNIQUE constraint and DIES); widen _keyIsNamelessTrack to every track
+    # key and 2 go red. The last two only discriminate through DB::add directly — the add
+    # command has its own earlier guards, and both assertions passed against a broken build
+    # until they were asked at this level.
+    my $n1 = add(kind => 'track', trackname => 'Named Song', artist => 'A Band',
+                 svc => 'qobuz', favurl => 'qobuz://888111.flac');
+    my $n2 = add(kind => 'track', trackname => 'Named Song', artist => 'A Band',
+                 svc => 'qobuz', favurl => 'qobuz://888222.flac');
+    is('a track WITH an artist still dedupes by name, different url or not',
+        (defined $n2 ? 'stored twice' : 'deduped'), 'deduped');
+    # ...and the same control at the level the narrowing actually lives. Through the add
+    # command an artist-bearing track never reaches DB::add at all — _insertTrackRow's
+    # findTrackByArtistTitle guard catches it first — so the assertion above passes whatever
+    # DB::add does with a named key. Measured: widening _keyIsNamelessTrack to every track key
+    # left the whole suite green until this pair existed.
+    my ($nId, $nDup) = Plugins::ListenLater::DB::add({ source => 'qobuz', kind => 'track',
+        artist => 'A Band', track_title => 'Named Song', ref_kind => 'url',
+        ref => { url => 'qobuz://888999.flac' } }, 'later');
+    is('DB::add itself still dedupes a NAMED track key across different urls',
+        ($nDup ? 'already saved' : 'stored a second row'), 'already saved');
+    is('...answering with the row that already held the name', $nId, $n1->{id});
+    is('...and the row it deduped to is the first one',
+        ($n1 ? Plugins::ListenLater::DB::get($n1->{id})->{dedupe_key} : 'nothing'),
+        'a band|||t:named song');
+    # An artist-less track with no url has nothing better to key on, so it keeps the old
+    # behaviour deliberately — the safer of two guesses, and stated so it is not read as an
+    # oversight.
+    my $f1 = add(kind => 'track', trackname => 'No Url Song', svc => 'qobuz',
+                 favurl => 'qobuz://888333.flac');
+    is('a nameless track with a url stores', ($f1 ? 'stored' : 'collapsed'), 'stored');
 }
 
 section('0.1.136 — a Podcasts-app row now falls to the generic online-* Add');

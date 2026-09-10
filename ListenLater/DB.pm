@@ -95,7 +95,7 @@ CREATE TABLE IF NOT EXISTS albums (
     artwork     TEXT,
     ref_kind    TEXT,                                -- 'album_id' | 'url' | 'passthrough'
     ref_json    TEXT,                                -- JSON: { album_id, url, passthrough, _svc }
-    dedupe_key  TEXT    NOT NULL,                     -- normalised artist|album|year (+ '|t:<track>' for a track, '|p:<svc>:<id>' for a playlist, '|e:<svc>:<url>' for a streaming podcast episode)
+    dedupe_key  TEXT    NOT NULL,                     -- normalised artist|album|year (+ '|t:<track>' for a track, '|p:<svc>:<id>' for a playlist, '|e:<svc>:<url>' for a streaming podcast episode, '|u:<svc>:<url>' for a NAMELESS track that collided with another — see trackUrlKey)
     added_at    INTEGER,
     played_at   INTEGER,
     play_count  INTEGER NOT NULL DEFAULT 0,
@@ -193,8 +193,15 @@ SQL
             $h->do('PRAGMA user_version = 5');
         }
         else {
+            # Report the version the ladder actually STAMPED, not the one it was ENTERED at.
+            # Rungs 1-4 stamp user_version without reassigning $schemaVer, so a 2 -> 5 upgrade
+            # failing here used to say "left at version 2" with the database at 4. One extra
+            # read, on the failure path only. Rung 6 ($ladderVer) and rung 7 ($identityVer)
+            # already had a live read to hand; this rung is the one that did not.
+            my ($atVer) = $h->selectrow_array('PRAGMA user_version');
+            $atVer = 0 unless defined $atVer;
             $log->warn('Listen Later: dedupe-key refold did not complete (see the warnings '
-                . "above) — schema left at version $schemaVer so it is retried at the next "
+                . "above) — schema left at version $atVer so it is retried at the next "
                 . 'start');
         }
     }
@@ -222,7 +229,7 @@ SQL
         }
         else {
             $log->warn('Listen Later: podcast purge did not complete — schema left at '
-                . "version $schemaVer so it is retried at the next start");
+                . "version $ladderVer so it is retried at the next start");
         }
     }
 
@@ -303,7 +310,26 @@ sub _purgeRemovedPodcasts {
             next;
         }
         my $ref = eval { $JSON->decode($r->{ref_json} // '{}') } || {};
-        next unless Plugins::ListenLater::Sources::spotifyEpisodeUri($ref->{url});
+        # Sources is a SIBLING LEAF and DB.pm does not `use` it — it cannot. The package
+        # name matches the INSTALLED layout, so a top-level `use` compiles only where a
+        # Plugins/ parent exists: it dies in a checkout, taking every test suite with it
+        # (measured). In the plugin, Plugin.pm compiles both modules before anything can
+        # reach dbh(), so the sub is always there; the guard is for the day that stops
+        # being true. It is NOT the ->can-with-a-fallback the %FOLD header forbids, and the
+        # difference is what the fallback DOES: there is no second way to ask whether a
+        # Spotify row is an episode, so an unanswerable question ABORTS THE WHOLE RUNG
+        # rather than deciding the row. Nothing is deleted, no report is written, the stamp
+        # is withheld and the next start tries again. Skipping the row instead would KEEP a
+        # mis-keyed episode this rung exists to clear; carrying on regardless would delete
+        # music. Both of those are the irreversible half. Waiting is not.
+        my $episodeUri = Plugins::ListenLater::Sources->can('spotifyEpisodeUri');
+        unless ($episodeUri) {
+            $log->error('Listen Later: podcast purge cannot identify Spotify episodes '
+                . '(Sources is not loaded) — nothing has been removed and the purge is '
+                . 'retried at the next start');
+            return 0;
+        }
+        next unless $episodeUri->($ref->{url});
         push @doomed, $r;
     }
     return 1 unless @doomed;
@@ -764,6 +790,10 @@ sub _migrateArtistPrefix {
 # consumer, and DB::_norm calls it DIRECTLY — never through ->can, never with a
 # fallback.
 #
+# THAT RULE IS ABOUT THIS FOLD, not about the direction of the arrow. DB.pm reaches Sources
+# once more, in _purgeRemovedPodcasts, and that one IS a ->can — because its fallback is to
+# abort the rung and delete nothing, not to answer the question worse. See the comment there.
+#
 # (Fleet matcher sync, LL 0.1.112: the ~90-entry table is DSC/PFR/LBF's, verbatim.
 # LL previously had NO folding at all, and its `[^a-z0-9]` pass turned every
 # non-ASCII letter into a SPACE — so "Sigur Rós" keyed as 'sigur r s', shattered
@@ -952,6 +982,31 @@ sub episodeKey {
     return '' . '|' . _norm($title) . '|' . '' . '|e:' . lc($source // '') . ':' . ($url // '');
 }
 
+# The dedupe key for a track whose NAME says nothing about which recording it is: no artist
+# and no album, so the plain key is '|||t:<title>' and the title is doing all the work. Two
+# different songs that happen to share a title then collapse into one row — the second add is
+# reported "already saved" and is silently lost. This keys such a row on the one thing that IS
+# an identity, the play url, exactly as episodeKey does and for the same stated reason.
+#
+#   '' | <normalised title> | '' | 'u:<source>:<url>'
+#
+# WRITTEN ONLY ON A REAL COLLISION (see add()). A row already in the database keeps the key it
+# has, so this shape appears only where the alternative was losing a row — which is why it owes
+# NO migration rung, unlike the re-keying of every track row that this problem seemed to need.
+# It carries >= 2 pipes, so the 0.1.43 year migration (dedupe_key NOT LIKE '%|%|%') skips it,
+# and the source sits inside the tail, so the cross-source findAnyByKey cannot fold two
+# services' rows together on a shared url.
+sub trackUrlKey {
+    my ($source, $url, $title) = @_;
+    return '' . '|' . _norm($title) . '|' . '' . '|u:' . lc($source // '') . ':' . ($url // '');
+}
+
+# Is this key one that carries NO name identity at all? Exactly the '|||t:<title>' shape:
+# empty artist, empty album, empty year. Deliberately strict — a key with any of the three
+# filled in is a real name and its collisions are real duplicates, which is what the
+# cross-source dedupe exists to catch.
+sub _keyIsNamelessTrack { return (($_[0] // '') =~ m{^\|\|\|t:}) ? 1 : 0 }
+
 # THE ONE PLACE A CURRENT-FORMAT ROW'S KEY IS DECIDED. Every current writer goes through here
 # — add(), updateArtist(), updateYear(), _migrateArtistPrefix() and _migrateRefold() — because
 # "what key does this row
@@ -988,7 +1043,11 @@ sub _keyForRow {
     }
 
     if ($kind eq 'track') {
-        return '' . '|' . _norm($rec->{track_title}) . '|' . '' . $1 if $stored =~ /(\|e:.*)$/s;
+        # '|u:' joins '|e:' here: both say this row's identity is its play url, not its
+        # name, so a rebuild must never quietly replace one with a name key. That is the
+        # same rule the header states for '|p:' and '|e:', and it is what lets a later
+        # artist backfill run over such a row without re-keying it into its twin.
+        return '' . '|' . _norm($rec->{track_title}) . '|' . '' . $1 if $stored =~ /(\|[eu]:.*)$/s;
         # No tail yet: the ADD path says whether this is a streaming episode (Plugin::
         # _insertTrackRow sets it — DB has no business knowing what a podcast is, exactly as it
         # does not know what a playlist is).
@@ -1034,6 +1093,34 @@ sub add {
     # never move it between sections (use the explicit "Move to …" for that).
     # Return the existing row's source so the caller can name it in the toast.
     my $existing = findAnyByKey($key);
+
+    # A NAMELESS track key cannot prove a duplicate. '|||t:<title>' says only "some track
+    # called this", so two genuinely different songs sharing a title arrive here looking
+    # identical and the second one is reported "already saved" and lost. The url check in
+    # Plugin::_insertTrackRow cannot help: it runs BEFORE this and answers the opposite
+    # question (same url = same recording), so a DIFFERENT url passes it and lands here.
+    #
+    # Re-ask with the play url as the identity, which is what a track row IS at every other
+    # end — Played matches findTrackByUrl before any name, and episodeKey settled the same
+    # question for episodes. Only on a genuine collision, and only for this key shape:
+    #   * the row already stored is never touched, so no stored key changes and NOTHING owes a
+    #     migration rung. That is the whole reason this is done here rather than in _keyForRow.
+    #   * a key with an artist, album or year in it keeps the plain shape, so cross-source
+    #     dedupe of real names is untouched.
+    #   * both rows must carry a url and they must differ. No url means nothing better to key
+    #     on, and the old behaviour (treat it as a duplicate) is the safer of two guesses.
+    if ($existing && $kind eq 'track' && _keyIsNamelessTrack($key)) {
+        my $mine  = (ref $rec->{ref} eq 'HASH') ? ($rec->{ref}{url} // '') : '';
+        my $their = $existing->{ref}{url} // '';
+        if (length $mine && length $their && $mine ne $their) {
+            $key = trackUrlKey($source, $mine, $rec->{track_title});
+            # The url-keyed row may itself already exist — a re-add of the SECOND track, which
+            # computes the nameless key again and lands here again. Answering "already saved"
+            # from this lookup is what stops that becoming a third row.
+            $existing = findAnyByKey($key);
+        }
+    }
+
     if ($existing) {
         return ($existing->{id}, 1, $existing->{source});
     }

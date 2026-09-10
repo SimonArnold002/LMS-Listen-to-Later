@@ -81,9 +81,13 @@ use warnings;
     sub set  { return if $_[1] =~ /^_/; $_[0]->_s->{ $_[1] } = $_[2] }
     sub init { my ($self,$h) = @_; my $s = $self->_s; $s->{$_} //= $h->{$_} for keys %$h; }
     sub setValidate {}
-    # setChange RECORDS rather than no-ops: the podcast-subscription watcher is installed
-    # by postinitPlugin and is invisible any other way — a suite can only tell it was
-    # installed by seeing the registration. Entries are { ns, pref, cb }, in call order.
+    # setChange RECORDS rather than no-ops. The watcher this was built for — the
+    # podcast-subscription one, installed by postinitPlugin — went with the built-in path in
+    # 0.1.136, so nothing reads @CHANGES today. The recorder stays because the REASON it was
+    # added outlives that watcher: a pref watcher is invisible to every other kind of
+    # assertion (0.1.121's finding 1 hid for six rounds behind a source grep that proved a
+    # call existed but not WHERE it lived), so the next one must be observable the day it is
+    # written. Entries are { ns, pref, cb }, in call order.
     our @CHANGES;
     sub setChange { my ($self,$cb,@prefs) = @_;
         push @CHANGES, { ns => $self->{ns}, pref => $_, cb => $cb } for @prefs; }

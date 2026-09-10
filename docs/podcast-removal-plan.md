@@ -1,7 +1,15 @@
 # Podcast support — remove the built-in path, keep streaming episodes
 
-> **STATUS: BUILT on `dev` at 0.1.136 (2026-09-05), uncommitted, not yet installed.**
-> Phases 1, 3 and 4 are done and green: 15 suites, 1,300 assertions.
+> **STATUS: DONE — shipped on `dev` at 0.1.136 (commit `2d55662`), and every follow-up
+> through 0.1.140 is committed and pushed. Nothing here is outstanding.** The two phases this
+> plan left open were closed by later builds, not by this one: the carrier and comment sweep in
+> 0.1.137–0.1.140, and the cross-source identity rung (schema 7) that the purge rung sits above.
+> Phases 1, 3 and 4 were done and green when it was written: 15 suites, 1,300 assertions.
+> The suite has grown since (t_podcast_purge 33 → 45), so do not read those counts as current.
+>
+> **Read this as a RECORD, not a work order.** A review round has already thrown out finished
+> work by citing this plan for the state it described mid-build. The banner at the top of
+> CLAUDE.md's Review Ledger is the authority on what the removal means today.
 > What the build found that this plan did not predict is recorded in
 > "Deviations from the plan" at the end.
 >

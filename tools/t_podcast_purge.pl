@@ -222,5 +222,87 @@ is('the version is left at 4 for rung 5 to retry',
 is('...and the purge has NOT run ahead of it',
    scalar @{ $h->selectall_arrayref("SELECT id FROM albums WHERE track_title='Survivor'") }, 1);
 
+section('with Sources unreachable the purge removes NOTHING — it cannot answer the question');
+# DB.pm cannot `use` Sources: the package name matches the INSTALLED layout, so a top-level
+# use compiles only where a Plugins/ parent exists and dies in a checkout (measured — it takes
+# every suite with it). The sub is reached through ->can instead, and the fallback is the part
+# under test. Only the url separates a Spotify EPISODE from a Spotify music track, so with the
+# carrier gone the question is unanswerable and the whole rung must stand down: skipping just
+# that row would KEEP a mis-keyed episode this rung exists to clear, and carrying on would
+# delete music. The built-in row is the assertion that matters — it is already in @doomed when
+# the guard trips, so if the abort were per-row rather than whole-rung it would be deleted.
+# ANTI-TEST: make the guard `next` instead of `return 0` and 4 go red — the built-in row is
+# deleted, the ladder stamps through to 7, a report claims the removal, and the mirror pass
+# then finds the Spotify row still there with the rung already retired.
+$h->do('DELETE FROM albums');
+$h->do('PRAGMA user_version = 5');
+unlink $report;
+seed(source=>'podcast', album=>'Gone Show', track=>'Built-in Ep',
+     key=>'|gone show||t:built-in ep', ref=>'{"url":"podcast://z"}');
+seed(source=>'spotify', album=>'Show', track=>'Mis-keyed Spotify Ep',
+     key=>'|show||t:mis-keyed spotify ep', ref=>'{"url":"spotify://episode:zz"}');
+Slim::Utils::Log::clear();
+{
+    no warnings 'redefine';
+    local *Plugins::ListenLater::Sources::spotifyEpisodeUri;   # the glob, not the value
+    ok('...the carrier really is unreachable inside this block',
+       (Plugins::ListenLater::Sources->can('spotifyEpisodeUri') ? 0 : 1));
+    $DB->can('_migrate')->($h);
+}
+is('the built-in row is NOT deleted, though it was already doomed',
+   scalar @{ $h->selectall_arrayref("SELECT id FROM albums WHERE track_title='Built-in Ep'") }, 1);
+is('...nor is the mis-keyed Spotify episode',
+   scalar @{ $h->selectall_arrayref("SELECT id FROM albums WHERE track_title LIKE 'Mis-keyed Spotify%'") }, 1);
+is('the version is left for the retry', ($h->selectrow_array('PRAGMA user_version'))[0], 5);
+is('...and no report claims anything was removed', (-e $report ? 'written' : 'absent'), 'absent');
+ok('the reason is logged rather than swallowed',
+   ((grep { /cannot identify Spotify episodes/ } Slim::Utils::Log::lines()) ? 1 : 0));
+
+# The mirror, so the guard cannot be satisfied by a purge that never runs: with the carrier
+# back, the same two rows go on the very next pass.
+$DB->can('_migrate')->($h);
+is('with Sources reachable again both rows are removed',
+   scalar @{ $h->selectall_arrayref('SELECT id FROM albums') }, 0);
+is('...and the ladder completes', ($h->selectrow_array('PRAGMA user_version'))[0], 7);
+
+section('a failing rung REPORTS the version the ladder reached, not the one it entered at');
+# The warn is the only trace a withheld stamp leaves, and both failing rungs named $schemaVer
+# — read ONCE at the top of _migrate and never reassigned — so an upgrade that ADVANCED through
+# earlier rungs before failing named a version the database had already left. Entering at 2 is
+# what tells the two apart: rungs 3 and 4 stamp before the refold is reached, so the entry
+# value (2) and the live one (4, then 5) differ. ANTI-TEST: put $schemaVer back in either warn
+# and that rung's assertion reads 'version 2' (2 red). Rung 7 always had this right and is the
+# shape the other two now follow.
+sub last_warn {
+    my ($re) = @_;
+    my @hit = grep { $_ =~ $re } Slim::Utils::Log::lines();
+    return @hit ? $hit[-1] : '';
+}
+
+$h->do('DELETE FROM albums');
+$h->do('PRAGMA user_version = 2');
+Slim::Utils::Log::clear();
+{
+    no warnings 'redefine';
+    local *Plugins::ListenLater::DB::_migrateRefold = sub { 0 };   # rung 5 fails at 4
+    $DB->can('_migrate')->($h);
+}
+ok('the refold warn names the version the ladder stamped, not the entry value',
+   (last_warn(qr/dedupe-key refold did not complete/) =~ /schema left at version 4 /) ? 1 : 0);
+is('...and that is the version actually left on the database',
+   ($h->selectrow_array('PRAGMA user_version'))[0], 4);
+
+$h->do('PRAGMA user_version = 2');
+Slim::Utils::Log::clear();
+{
+    no warnings 'redefine';
+    local *Plugins::ListenLater::DB::_purgeRemovedPodcasts = sub { 0 };   # rung 6 fails at 5
+    $DB->can('_migrate')->($h);
+}
+ok('the purge warn names the version the ladder stamped, not the entry value',
+   (last_warn(qr/podcast purge did not complete/) =~ /schema left at version 5 /) ? 1 : 0);
+is('...and that is the version actually left on the database',
+   ($h->selectrow_array('PRAGMA user_version'))[0], 5);
+
 printf "\n%d passed, %d failed\n", $pass, $fail;
 exit($fail ? 1 : 0);

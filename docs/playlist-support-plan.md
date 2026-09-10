@@ -1,5 +1,17 @@
 # Save a streaming-service PLAYLIST to Listen Later
 
+> **STATUS: DELIVERED at 0.1.107 — this is a RECORD, not a work order (marked 2026-09-10).**
+> Curated and service playlists save, browse and replay; a playlist row stores `kind='playlist'`
+> with a `|p:<svc>:<id>` key tail, carries NULL `rel_type` and NULL `track_count`, and never
+> auto-moves to Played. Those last three are deliberate and are recorded in the Review Ledger
+> under "NOT FINDINGS", so do not read the Context below as a description of today.
+>
+> **Two things in here were NOT delivered and are decisions, not omissions.** A Qobuz PERSONAL
+> playlist has no recoverable identity, so it keeps its pre-0.1.107 behaviour; the fix is
+> upstream in the Qobuz plugin. And a TIDAL `mix:` is refused, because TIDAL routes mixes
+> through a different endpoint than playlists, so replaying one needs a `getMix` adapter.
+> Both are in the ledger with their reasoning.
+
 ## Context
 
 Listen Later can save an album, an individual track and a podcast episode. It cannot
