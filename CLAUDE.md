@@ -282,6 +282,16 @@ subsystem.
   disproof. **What IS still true and is the useful half:** a track row is keyed by name unless
   it is nameless, in which case the play url decides — see the `|u:` entry below — and a saved
   track never auto-moves to Played by threshold, because a track has no "most of it".
+  **And the one piece of the original scope that was never built is now DECLINED, not deferred
+  — the user closed it as unwanted, 2026-09-10.** That piece was the cross-plugin DOUBLE entry
+  on streaming track rows: an "Add album" beside an "Add track" on a ListenBrainz Fresh Releases
+  playlist row, while a generic streaming track row keeps the single context-based entry.
+  **Do not propose it, and do not report its absence as a gap.** Material can only tell those two
+  row kinds apart by browse command, so it needs a dedicated `<lbf-command>-track` category —
+  more of the per-command surface behind the 0.1.46-0.1.60 churn — plus a favurl-packing
+  handshake on the sibling plugin's side to populate the track name. That is a lot of fragile
+  cross-plugin machinery for a second button, and the context-based rule already covers the case:
+  a track row adds the track, an album row adds the album.
   **The lesson, since this is the second stale claim this file produced in one day** (the other
   being the `use` remedy in §B that could not compile): an entry that says something does NOT
   exist ages worse than any other kind, because nothing in the code contradicts it where a
