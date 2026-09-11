@@ -8,7 +8,7 @@
 
 <module>Plugins::ListenLater::Plugin</module>
 
-<version>0.1.151</version>
+<version>1.0.0</version>
 
 <description>PLUGIN_LL_DESC</description>
 

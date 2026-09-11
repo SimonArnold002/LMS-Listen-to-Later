@@ -1,5 +1,25 @@
 # Changelog
 
+## 1.0.0 — 2026-09-11
+
+### Added
+- **Spotify is now a fully supported service, via the Spotty plugin.** Albums and tracks browsed, played or queued through Spotify can be saved, replayed, matched to *Played*, and added to the Wish List, with the same level of support as Qobuz, Tidal, Bandcamp and Deezer.
+- **Podcast episodes from Deezer and Spotify can be saved to Listen Later.** They're recognised as podcasts wherever they appear — correct icon, correct "Podcast" label — and, like any podcast, they're never offered a Wish List entry and never auto-move to *Played* on a percentage-heard basis.
+- **A curated or personal playlist from Qobuz, Tidal or Deezer can now be saved as its own row**, distinct from an album, and replayed through the service's own playlist call rather than being mis-stored as a bogus album search. A playlist never auto-moves to *Played* and has no Wish List entry, since neither concept applies to something that can change under you.
+- **The "Add"/"Add to Wish List" entries now register directly with Material Skin (6.4.6 and later)** instead of relying solely on a shared, hand-editable configuration file. On Material 6.4.8+ this is automatic and complete; on older Material versions the previous file-based mechanism is kept so nothing regresses.
+
+### Changed
+- **The built-in Podcasts app is no longer supported.** Saving an episode from LMS's own Podcasts app never fit this plugin's model well — an episode isn't an album, the Wish List never applied to it, and it duplicated tracking the Podcasts app already does. Deezer and Spotify podcast episodes (above) remain fully supported and are the recommended way to keep an episode in your list.
+- **Artist and album names in other scripts — Japanese, Korean, Cyrillic, and similar — now match and dedupe correctly.** Previously, names in these scripts could be reduced to nothing during matching, which meant two completely different albums could be silently treated as the same saved row, or a saved album could fail to move to *Played* when you played it through. Latin names are unaffected.
+- **Stylised names using `!`, `$` or similar in place of letters (P!nk, Ke$ha, and the like) now match their plain-text spelling.**
+- **An artist credit joined with "&" now also matches the same credit spelled out with "and"** (e.g. "Carole King & Gerry Goffin" against "Goffin and King"), closing a small gap in how those names used to compare.
+
+### Fixed
+- **Uninstalling or disabling the plugin now actually removes its entries from Material's shared configuration.** Previously the cleanup step silently never ran, so old "Add" entries — and the placeholders that hide "Add" on the plugin's own list — could be left behind indefinitely.
+- **Unticking "Add to Material context menus" in Settings now takes effect immediately**, rather than only after certain internal conditions happened to line up.
+- **Podcast episode titles and artist fields from Spotify no longer show a truncated description or a date-prefixed title** where the episode's own name should be.
+- **Two different, artist-less tracks that happen to share a title no longer collapse into a single saved row.** Each is now kept and matched to *Played* independently.
+
 ## 0.1.94 — Your settings stop reverting every time the server restarts
 
 ### Fixed
