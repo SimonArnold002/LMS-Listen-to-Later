@@ -244,6 +244,16 @@ section('3d. STYLISED LETTERS — the fourth fleet rule LL never received (0.1.1
     ok('...and the spelled-out form',
        $am->(srcn('Simon & Garfunkel'), srcn('Simon and Garfunkel')));
 
+    # BOTH DIRECTIONS, because the comment above this rule claimed for four versions that the
+    # losing one did not exist, and only the winning half was ever asserted here. Real pairs,
+    # measured 2026-09-11 across an 8,958-artist library: exactly one win, exactly one loss.
+    # The LOSS is the load-bearing assertion — it is what stops the comment reverting to
+    # "cannot cost a match". The WIN is why the rule is kept rather than reverted to a strip.
+    ok('an & credit does NOT match a different connector for the same act',
+       !$am->(srcn('Davie Allan & the Arrows'), srcn('The Arrows feat. Davie Allan')));
+    ok('...while the rule still WINS the spelled-out shorter side',
+       $am->(srcn('Carole King & Gerry Goffin'), srcn('Goffin And King')));
+
     # THE REGRESSION HALF. 0.1.144 fixed an order bug in this very sub that no fixture caught,
     # because none had an underscore ADJACENT to other punctuation — the ripped-file shape.
     # The new block goes ABOVE both substitutions, so it must not disturb that order.

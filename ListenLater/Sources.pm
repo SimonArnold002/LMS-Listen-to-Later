@@ -1573,12 +1573,30 @@ sub _punctPass {
     # fleet. Deleting the branch in a repo WITHOUT that fallback sends the name to '', and
     # LL's gates read empty as ABSENT — i.e. the 0.1.143 bug in a new costume.
     #
-    # '&'/'+' -> ' and ' cannot cost a match here even though it changes the token set:
-    # `_artistMatch` is a SUBSET test, so 'simon garfunkel' still matches 'simon and
-    # garfunkel'. Measured on five &/+ pairs, all matching before and after. It DOES change
-    # the Bandcamp outbound query text (_searchService builds it from _norm) — that string is
-    # still ASCII by construction here, so it acquires no encoding hazard, but the query is
-    # re-verified live rather than assumed. See the 0.1.144 entry.
+    # '&'/'+' -> ' and ' CHANGES THE TOKEN SET, and unlike every other rule in this pass it
+    # can COST a match as well as win one. `_artistMatch` is a MANDATORY-subset test, so an
+    # injected token is a new REQUIREMENT on whichever side is shorter — it does not merely
+    # add an alternative spelling. The "measured on five &/+ pairs, all matching before and
+    # after" claim that stood here was hand-built and tested only the winning direction.
+    #
+    # MEASURED 2026-09-11 — every &/+ credit against every other name in a real 8,958-artist
+    # library, old pass vs new:
+    #   WINS  1 — 'Carole King & Gerry Goffin' vs 'Goffin And King'. The other side spells
+    #             'and' as a WORD and is the SHORTER string, so plain stripping failed it.
+    #   COSTS 1 — 'Davie Allan & the Arrows' vs 'The Arrows feat. Davie Allan'. The other
+    #             side carries a DIFFERENT connector, so the injected 'and' matches nothing.
+    # Net zero, which is why the rule STAYS. A loss needs the &-side to be the shorter string
+    # AND the other connector to run 4+ characters ('with'/'feat'/'featuring'); a shorter one
+    # ('vs') fails before and after, so it is not a regression. Both pinned in t_refold.pl §3d.
+    #
+    # IN THE SHAPE THAT ACTUALLY DRIVES PLAYED THERE IS NO EFFECT AT ALL. Played's fallback
+    # compares a playing TRACK's artist to the stored ALBUM artist, and across 43,684 tracks
+    # no within-album credit pair flips either way. A hand-built &-pair proves the BRANCH,
+    # never the POPULATION (see CLAUDE.md's standing rule) — do not re-report one as live.
+    #
+    # It DOES change the Bandcamp outbound query text (_searchService builds it from _norm) —
+    # that string is still ASCII by construction here, so it acquires no encoding hazard, but
+    # the query is re-verified live rather than assumed. See the 0.1.144 entry.
     $s =~ s/\$/s/g;
     $s =~ s/\@/a/g;
     if ($s =~ /[\p{Alnum}]/) { $s =~ s/(?<=\w)!(?=\w)/i/g }

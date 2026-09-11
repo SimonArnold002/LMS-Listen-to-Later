@@ -65,6 +65,8 @@ numbers rot on the next edit; these do not.
 | asserted release type inserting immediately | decided | `ASSERTED release type inserts` |
 | `lc`-ordering fix (0.1.116) | owes NO schema-6 rung | `owes NO schema-6 rung` |
 | matcher divergence from the fleet | deliberate, hash-pinned variant | `LENIENT, hash-pinned variant` |
+| `&`/`+` -> ` and `, ampersand credits, `_punctPass` token injection | **SETTLED 0.1.150** — net zero on real data (1 win, 1 loss), ZERO effect on Played; both pinned | `THE AMPERSAND RULE COSTS` |
+| a `+`/`&` ALBUM TITLE, `length($albumNorm) < 2`, the short-title hatch | **NOT A FINDING** — reachable, never reached; measured across 3 corpora | `A MARKS-ONLY ALBUM TITLE` |
 | migration reachability vs `main` | judge against what main ships TODAY, never a quoted number | `JUDGE MIGRATION REACHABILITY` |
 
 **Two standing rules that kill most repeat findings:**
@@ -427,6 +429,76 @@ subsystem.
   nothing to enforce against, because nothing artist-less arrives to be rejected. Do not
   propose the gate change, and do not cite this entry's own rule as the reason to.
 
+
+- **THE AMPERSAND RULE COSTS A MATCH AS OFTEN AS IT WINS ONE, AND IT STAYS — SETTLED
+  2026-09-11 (0.1.150). The COMMENT was the defect; the code is fine.** 0.1.145's
+  `s/[&+]/ and /g` in `_punctPass` carried a comment claiming it "cannot cost a match here",
+  measured on five hand-built pairs. **That claim is FALSE** — `_artistMatch` is a MANDATORY-subset
+  test, so an injected token is a new REQUIREMENT on whichever side is shorter, not an extra
+  spelling. A review round reported six flipped pairs against it. **All six were hand-built, and
+  the round named no writer** — the standing rule at the top of this file, missed again.
+
+  **MEASURED against real corpora rather than argued, 2026-09-11:**
+
+  | corpus | result |
+  |---|---|
+  | every &/+ credit vs every other name, 8,958-artist library | **1 loss, 1 win** |
+  | track artist vs album artist WITHIN an album, 43,684 tracks | **0 flips either way** |
+
+  - **The one loss:** `Davie Allan & the Arrows` vs `The Arrows feat. Davie Allan`.
+  - **The one win:** `Carole King & Gerry Goffin` vs `Goffin And King` — the other side spells
+    `and` as a WORD and is the SHORTER string, so the pre-0.1.145 strip failed it. **This is why
+    reverting to a plain strip is NOT the fix** and must not be proposed as one.
+  - **A loss needs the &-side to be the SHORTER string AND the other connector to run 4+
+    characters** (`with`/`feat`/`featuring`). A shorter connector (`vs`) fails before and after,
+    so it is a pre-existing miss, not a regression.
+  - **THE SHAPE THAT DRIVES PLAYED IS UNAFFECTED.** `Played::_albumFallback` compares a playing
+    TRACK's artist to the stored ALBUM artist, both from the same service. Zero within-album
+    pairs flip. The review's claim that this "breaks three live consumers" was branch-tracing,
+    not population.
+  - **Both directions are now pinned in `t_refold.pl` §3d** — the LOSS assertion is the
+    load-bearing one, because it is what stops the comment reverting to "cannot cost a match".
+    Anti-tested: remove the rule and 4 go red, the two new ones in OPPOSITE directions.
+  - **FLEET:** the same rule is in PFR (`Browse.pm`) and DSC (`Sources.pm`). LL's `_artistMatch`
+    picks short/long by STRING LENGTH, the fleet's by TOKEN COUNT — a pre-existing divergence,
+    not introduced here. The fleet shape fails the same pair, so this is a fleet-wide matcher
+    property rather than a bad port. **No fleet change was made and none is owed.**
+
+- **A MARKS-ONLY ALBUM TITLE (`+`, `&`) BYPASSES THE SHORT-TITLE HATCH — REACHABLE, NEVER
+  REACHED. NOT A FINDING (2026-09-11).** `_norm('+')` is `'and'` (length 3), so it clears
+  `length($albumNorm) < 2` in `_albumMatches` and falls into the PREFIX rule instead of the
+  0.1.145 `_punctNorm` escape hatch. A saved `+` can therefore prefix-match a same-artist
+  `And Then There Were Three`. The branch is real and was reproduced. **It does not bite, and a
+  code change was DECLINED by Simon on that basis** — *"I am not changing whole base code for
+  something if it doesn't bite."* Three independent measurements, so a re-raise needs new data:
+
+  | check | result |
+  |---|---|
+  | Pitchfork review titles harvested (8 pages) that are `+` or `&` | **0 of 779** |
+  | MusicBrainz artists with a `+`/`&` album who ALSO have an "And…" album | **0 of 56** |
+  | Library artists with both | **0** |
+
+  - **The collision needs ONE artist to hold both a marks-only album and an "And…" album.** All
+    56 MB artists holding a `+` or `&` release group were checked, retrying the 22 that first
+    rate-limited. Ed Sheeran, Pinegrove, Eric Church and Kristin Hersh are all clean.
+  - **LL has a SECOND layer the other repos lack.** `_bestMatches` ranks an exact `_normStrict`
+    title above everything, so whenever the real album is in the result set the decoy is filtered
+    — simulated. The decoy can only win if the service has LOST the album, and the save path
+    means the service carried it at add time. The one unranked branch is Bandcamp, which prefers
+    the stored `album_id` first.
+  - **The one Pitchfork title that DID change branch is `+3`, and it moved the RIGHT way:** it
+    now matches a `+3 (Deluxe)` spelling that the exact-only hatch rejected. The `?` title in
+    that corpus still reaches the hatch, since nothing expands it.
+  - **DSC is the most exposed of the three, not the least** — no `_bestMatches`, no `_normStrict`,
+    `_titleHit` returns on the first match, and its titles come from MusicBrainz where `+` and `&`
+    albums genuinely exist. Still zero on the data. If this ever bites, that is where.
+  - **The fix that was designed and NOT applied**, recorded so it is not re-derived: replace the
+    length test with "after qualifiers come off, is there a letter or digit left?"
+    (`_punctNorm($albumRaw)` with parens stripped, tested for `\p{Alnum}`). Verified surgical —
+    it moves `+`, `&`, `+ (Deluxe)`, `+/-`, `!!!` and `†††` into the hatch and **zero of 2,894
+    real album titles**. A plain `length(_punctNorm($albumRaw)) < 2` guard was tried first and
+    REJECTED: it misses `+ (Deluxe)`. Per this file's own rule, a recorded remedy is a
+    HYPOTHESIS — this one was measured, but never run in anger.
 
 - **JUDGE MIGRATION REACHABILITY AGAINST WHATEVER `main` SHIPS TODAY — read it, never quote
   a number from this file.** House rule across all repos (2026-09-10). A rung that only `dev`
