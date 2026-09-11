@@ -1617,8 +1617,17 @@ sub _punctPass {
     $w =~ s/[^\w]+/ /g;
     $w =~ s/^\s+|\s+$//g;
     return $w if length $w;
-    # An all-punctuation name ('!!!', '†††', '+/-') would otherwise read as ABSENT and hand
-    # the lenient gates a free pass, exactly as an erased non-Latin one did.
+    # An all-punctuation name ('†††', '---', '...', '?') would otherwise read as ABSENT and
+    # hand the lenient gates a free pass, exactly as an erased non-Latin one did.
+    #
+    # THE EXAMPLES ARE NOT DB::_norm's, AND ITS LIST MUST NOT BE COPIED BACK OVER THIS ONE.
+    # It was, and stood wrong from 0.1.143 to 0.1.151. DB::_norm has no stylised-letter rule
+    # and no '&'/'+' rule, so there '!!!' and '+/-' genuinely do reach the fallback. HERE two
+    # of the rules above intercept them first and neither can arrive:
+    #   '!!!'  ->  the else branch folds it to 'iii'  (deliberate — see its own comment above)
+    #   '+/-'  ->  '&'/'+' -> ' and '  folds it to 'and'
+    # What still arrives is a name whose marks NO rule above claims: '†††', '---', '...', '?'.
+    # Executed, not reasoned, 2026-09-11; pinned in t_refold.pl §3f.
     my $p = $s;
     $p =~ s/\s+//g;
     return $p;

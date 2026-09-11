@@ -676,6 +676,31 @@ section('0.1.143 — the fold KEEPS a non-Latin name instead of deleting it');
     is('a LIKE metacharacter name folds away', $norm->('%'),  '');
     is('...and so does the other one',       $norm->('_'),    '');
 
+    # THE SAME THREE, BUT LANDING IN A KEY THAT IS NOT EMPTY. The four above all normalise
+    # to '', so they fire on a deleted strip but every one of them describes a name that has
+    # no identity left either way. These carry marks the fallback KEEPS, so the leak lands in
+    # a live key a real row could hold — '!%!' has no word character, the main pass empties
+    # it, and the fallback is the only thing between that '%' and findByArtistAlbum's LIKE
+    # pattern. (Checked, 2026-09-11: weakening the strip to `\s+` turns the four above red
+    # too. They are not redundant with these; they are the empty half of the same rule.)
+    is("a metachar among marks is stripped by the FALLBACK", $norm->('!%!'), '!!');
+    is('...and an underscore among marks',                   $norm->('+_-'), '+-');
+    is('...and a pipe among marks',
+       $norm->("\xe2\x80\xa0|\xe2\x80\xa0"), $chr->("\xe2\x80\xa0\xe2\x80\xa0"));
+    is('...while the marks themselves survive',              $norm->('?|?'), '??');
+
+    # AND THE GUARANTEE ITSELF, stated the way the three finders' comments now state it:
+    # not "the output is [a-z0-9 ]" (0.1.143 ended that, and the comments claimed it until
+    # 0.1.151), but "the output carries none of these three". Asserted over both paths at
+    # once, so a future rule added to either one has to keep it.
+    {
+        my @names = ('100%_Free', 'a%b_c|d', 'under_score', '!%!', '+_-', '?|?', '01_-_Intro',
+                     'M|A|R|R|S', "\xe2\x80\xa0|\xe2\x80\xa0", '%', '_', '|', '!!!');
+        my @leak = grep { $norm->($_) =~ /[%_|]/ } @names;
+        is('NO name leaks a LIKE metacharacter or a segment delimiter into a key',
+           (@leak ? join(',', @leak) : 'none'), 'none');
+    }
+
     # OCTETS AND CHARACTERS MUST AGREE, or the same album keys two ways depending on which
     # surface added it — the invisible-row state _migrateRefold exists to prevent. The raw-CLI
     # add path hands this sub octets; everything else hands it characters.

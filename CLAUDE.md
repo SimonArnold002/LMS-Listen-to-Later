@@ -67,6 +67,8 @@ numbers rot on the next edit; these do not.
 | matcher divergence from the fleet | deliberate, hash-pinned variant | `LENIENT, hash-pinned variant` |
 | `&`/`+` -> ` and `, ampersand credits, `_punctPass` token injection | **SETTLED 0.1.150** — net zero on real data (1 win, 1 loss), ZERO effect on Played; both pinned | `THE AMPERSAND RULE COSTS` |
 | a `+`/`&` ALBUM TITLE, `length($albumNorm) < 2`, the short-title hatch | **NOT A FINDING** — reachable, never reached; measured across 3 corpora | `A MARKS-ONLY ALBUM TITLE` |
+| `_punctPass` fallback examples, `'!!!'`/`'+/-'` reaching the fallback | **COMMENT FIXED 0.1.151** — the code was always right; DB's example list had been copied onto a sub with two rules ahead of it | `WHICH MARKS-ONLY NAMES REACH` |
+| `ESCAPE`, LIKE metacharacters, `[a-z0-9 ]`, `findByArtistAlbum`/`findTrackByArtistTitle`/`findByAlbum` | **COMMENT FIXED 0.1.151** — no ESCAPE is still correct, but by `_norm`'s strip rules, not the dead range claim | `THE ESCAPE JUSTIFICATION` |
 | migration reachability vs `main` | judge against what main ships TODAY, never a quoted number | `JUDGE MIGRATION REACHABILITY` |
 
 **Two standing rules that kill most repeat findings:**
@@ -1256,6 +1258,60 @@ subsystem.
 
   **Before re-raising, check the `->can` gate first.** It returns tier 0 and never consults
   the version — reading the two gates as independent is what produced this finding.
+
+- **WHICH MARKS-ONLY NAMES REACH `Sources::_punctPass`'s FALLBACK — the comment was wrong,
+  the code was not. FIXED 0.1.151 (prose only), found by review 2026-09-11.**
+
+  The fallback's example list read `('!!!', '†††', '+/-')`. That is `DB::_norm`'s list, and it
+  is correct THERE. `Sources::_punctPass` has two rules `DB::_norm` does not, both ahead of the
+  fallback, and each intercepts one of the examples:
+
+  ```
+  srcn('!!!') = 'iii'   the else branch, deliberate — its own comment 40 lines up says so
+  srcn('+/-') = 'and'   the '&'/'+' -> ' and ' rule
+  srcn('†††') = '†††'   the only one of the three that actually arrives
+  ```
+
+  **No behaviour changed and none should.** Both interceptions are wanted: `'iii'` is what
+  agrees with the fleet, and the `&`/`+` rule is SETTLED 0.1.150 on measured data. The defect
+  was that one comment block contradicted another inside the same sub — the else-branch note
+  states the `'!!!'` interception as a deliberate design point, while the fallback note eleven
+  lines below lists `'!!!'` as something that reaches it.
+
+  Verified by EXECUTING the sub, not by reading it. Pinned in `t_refold.pl` §3f (11 assertions),
+  which also asserts that `DB::_norm` and the match gate DISAGREE about both names — if those
+  two ever answer the same, a pass has grown a rule it should not have. ANTI-TEST: drop the
+  else branch and the `&`/`+` rule and 6 of the 11 go red, both divergence controls included.
+
+  **Why this is logged rather than left as a tidy-up.** The two lists look like they should be
+  kept in sync, and syncing them is exactly the wrong move. The next reviewer to notice the
+  divergence should find this entry, not re-copy DB's list back.
+
+- **THE ESCAPE JUSTIFICATION IN THE THREE LIKE FINDERS — the conclusion survived 0.1.143, its
+  stated reason did not. FIXED 0.1.151 (prose only), found by review 2026-09-11.**
+
+  `findByArtistAlbum`, `findTrackByArtistTitle` and `findByAlbum` each build a LIKE pattern
+  from `DB::_norm` and pass no ESCAPE, justified as "the normalised parts contain only
+  `[a-z0-9 ]`". **0.1.143 ended that range** — `_norm` now keeps every script, so a CJK,
+  Cyrillic or marks-only part reaches those patterns intact. The comments went on asserting
+  the dead invariant for seven versions.
+
+  **Passing no ESCAPE is still correct**, on a narrower guarantee that lives in `_norm` itself
+  and that none of the three sites mentioned: the main pass drops `'_'` BEFORE the non-word
+  run and `'%'`/`'|'` are non-word, and the all-punctuation fallback strips `[\s%_|]`
+  explicitly. `'|'` matters as much as the two metacharacters, because it is the key's segment
+  delimiter and these patterns anchor on it.
+
+  This is the same invariant-death 0.1.150 chased down for the Bandcamp query and
+  `t_query_enc.pl`; these three sites were missed in that sweep. Pinned in `t_db.pl` by five
+  new assertions covering the shape the existing four did not: a metacharacter among MARKS
+  (`'!%!'` -> `'!!'`), where the leak would land in a live non-empty key, plus a sweep over
+  13 names asserting no `_norm` output ever carries `%`, `_` or `|`. Checked while writing
+  them: weakening the fallback strip to `\s+` turns the four older assertions red too, so
+  they are the empty half of the same rule rather than redundant with the new ones.
+
+  **`Sources::_norm` is deliberately NOT held to this** and needs no such strip — nothing in
+  the repo builds a LIKE pattern from it (checked 2026-09-11; every LIKE lives in `DB.pm`).
 
 ### B. KNOWN-OPEN AND ACCEPTED — do not re-report as new
 

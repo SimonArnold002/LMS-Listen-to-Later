@@ -1531,10 +1531,18 @@ sub setRefValue {
 # Find a saved album by artist+album REGARDLESS of year — the Played detector's lookup.
 # The dedupe key now carries the year, but a playing streaming track can't be trusted to
 # report the same year (or any), so Played matches on the artist|album prefix of the key
-# instead. The normalised parts contain only [a-z0-9 ], so they carry no LIKE
-# metacharacters (no ESCAPE needed). If two same-title different-year albums are both
-# saved, the lower id wins — Played can't tell them apart from streaming track metadata
-# alone (an accepted edge case; adding both is the point of the year in the key).
+# instead. The normalised parts carry no LIKE metacharacter, so no ESCAPE is needed — but
+# NOT for the reason this comment gave until 0.1.151. "[a-z0-9 ] only" was true of the pass
+# 0.1.143 replaced; _norm now KEEPS every script, so a CJK, Cyrillic or marks-only part
+# reaches this pattern intact. The guarantee that actually holds is narrower and belongs to
+# _norm, which names these call sites in its header: on the main pass '_' is dropped BEFORE
+# the non-word run and '%' and '|' are non-word, and the all-punctuation fallback strips
+# [\s%_|] explicitly. '|' matters as much as the two metacharacters here — it is the key's
+# segment delimiter, and a part carrying one would forge the anchor below.
+#
+# If two same-title different-year albums are both saved, the lower id wins — Played can't
+# tell them apart from streaming track metadata alone (an accepted edge case; adding both
+# is the point of the year in the key).
 sub findByArtistAlbum {
     my ($source, $artist, $album) = @_;
     my $prefix = _norm($artist) . '|' . _norm($album) . '|';
@@ -1565,7 +1573,8 @@ sub findSavedTrack {
 # the cross-kind reconciler for singles (a single release and its lone track are the same
 # recording). Anchored to the '|t:<title>' suffix so it matches only a track row with this
 # exact (normalised) title; the album segment between the artist and the suffix is wild. The
-# normalised parts are [a-z0-9 ] so they carry no LIKE metacharacters (no ESCAPE needed).
+# normalised parts carry no LIKE metacharacter and no '|', so no ESCAPE is needed — by
+# _norm's strip rules, NOT by the [a-z0-9 ] range 0.1.143 ended. See findByArtistAlbum.
 sub findTrackByArtistTitle {
     my ($source, $artist, $title) = @_;
     return undef unless defined $source && length $source
@@ -1620,8 +1629,10 @@ sub updateRelType {
 # the stored album artist ("feat." track credits / album-artist vs track-artist / an
 # artist-less row a backfill never filled). The caller disambiguates by a fuzzy artist
 # compare, so a same-titled album by a genuinely different artist isn't returned by mistake.
-# The album part is normalised [a-z0-9 ] so it carries no LIKE metacharacters (no ESCAPE);
-# the '|<album>|' anchors it to the middle key segment so it can't match an artist/year.
+# The normalised album part carries no LIKE metacharacter and no '|', so no ESCAPE is needed
+# — by _norm's strip rules, NOT by the [a-z0-9 ] range 0.1.143 ended (see findByArtistAlbum).
+# The absent '|' is load-bearing twice over here, because the '|<album>|' anchor is what ties
+# the pattern to the middle key segment so it can't match an artist/year.
 sub findByAlbum {
     my ($source, $album) = @_;
     my $alb = _norm($album);

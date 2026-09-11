@@ -334,6 +334,46 @@ section('3e. A TITLE THAT NORMALISES TO NOTHING — the escape hatch LL never to
        !$al->(srcn('Sigur Ros'), srcn('  '), 'Sigur Ros', '  ', '  '));
 }
 
+section("3f. WHICH MARKS-ONLY NAMES ACTUALLY REACH _punctPass's FALLBACK");
+# A COMMENT DEFECT, NOT A CODE ONE (found 2026-09-11, fixed 0.1.151). The fallback's example
+# list read ('!!!', '†††', '+/-') — DB::_norm's list, copied to a sub with two extra rules
+# ahead of the fallback. Two of those three cannot arrive here, and the same comment block
+# said so 40 lines higher up, which is how it survived: the else-branch note states '!!!'
+# folds to 'iii' ON PURPOSE. Nothing about the CODE changed; these assertions exist so the
+# next person to re-sync the two lists from DB.pm goes red instead of re-introducing it.
+#
+# ANTI-TEST: paste DB::_norm's fallback comment back over this one and nothing goes red —
+# a comment cannot. Paste its BEHAVIOUR (drop the else branch and the '&'/'+' rule) and 6 of
+# the 11 go red, including both divergence controls — measured, not guessed. That asymmetry
+# is the point: this section pins the SUB the prose describes, since the prose itself can't be.
+{
+    # THE TWO THAT NEVER ARRIVE, each intercepted by a rule the fallback comment ignored.
+    is("'!!!' is taken by the else branch, not the fallback", srcn('!!!'), 'iii');
+    is("'+/-' is taken by the '&'/'+' rule",                  srcn('+/-'), 'and');
+    is("...and so is a bare '&'",                             srcn('&'),   'and');
+    is("...and a bare '+'",                                   srcn('+'),   'and');
+
+    # THE ONES THAT DO — marks no rule above claims. These are the honest examples.
+    is('a dagger name reaches the fallback intact', srcn(u("\x{2020}\x{2020}\x{2020}")),
+                                                    u("\x{2020}\x{2020}\x{2020}"));
+    is('...a dash run',                             srcn('---'), '---');
+    is('...an ellipsis',                            srcn('...'), '...');
+    is('...and a lone question mark',               srcn('?'),   '?');
+
+    # THE POINT OF THE FALLBACK, unchanged by any of the above: none of them answers '',
+    # because an empty name reads as ABSENT and absent means the lenient gates accept
+    # anything. That is the 0.1.143 bug §3c exists for.
+    ok('no marks-only name normalises to nothing',
+       !grep { !length srcn($_) } ('!!!', '+/-', '&', '+', '---', '...', '?',
+                                   u("\x{2020}\x{2020}\x{2020}")));
+
+    # AND THE DIVERGENCE IS DELIBERATE — DB::_norm's list is right for DB::_norm. If these
+    # two ever agree, one of the passes has grown a rule it should not have.
+    ok("DB::_norm and the match gate DISAGREE about '!!!', as they must",
+       dbn('!!!') ne srcn('!!!'));
+    ok("...and about '+/-'", dbn('+/-') ne srcn('+/-'));
+}
+
 # ---------------------------------------------------------------------------
 section('4. THE MIGRATION — a stored key is not a cache');
 # Every dedupe_key written before the fold is stale, and a stale key is INVISIBLE: add()

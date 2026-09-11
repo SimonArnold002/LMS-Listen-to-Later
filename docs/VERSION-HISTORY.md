@@ -3114,3 +3114,22 @@ Per-release user-facing notes live in `CHANGELOG.md`. Append new entries at the 
   Bandcamp encoding 2 red with the ASCII and latin-1 controls still passing. The ladder-version
   assertions across three suites moved 8 → 9 with the stamp.
 
+- **0.1.151** — **Two stale comments corrected; no runtime change.** A review found both, and
+  in each case the CODE was right and the PROSE had gone out of date, so this build ships
+  identical behaviour to 0.1.150 and 16 new assertions that stop the prose drifting again.
+  (1) `Sources::_punctPass`'s all-punctuation fallback listed `('!!!', '†††', '+/-')` as the
+  names that reach it. That is `DB::_norm`'s list, copied onto a sub with two extra rules
+  ahead of the fallback: `'!!!'` is folded to `'iii'` by the else branch (deliberate, and
+  stated as such eleven lines above) and `'+/-'` to `'and'` by the 0.1.150 `&`/`+` rule, so
+  only `'†††'` ever arrives. The examples are now the ones no rule above claims, with the
+  divergence from `DB::_norm` written down as intended rather than as an oversight to sync
+  away. Pinned in `t_refold.pl` §3f. (2) `findByArtistAlbum`, `findTrackByArtistTitle` and
+  `findByAlbum` justified passing no ESCAPE on their LIKE patterns with "the normalised parts
+  contain only `[a-z0-9 ]`" — a range 0.1.143 ended when `_norm` stopped erasing non-Latin
+  names. Omitting ESCAPE remains correct, but on `_norm`'s strip rules (`'_'` dropped before
+  the non-word run, `'%'`/`'|'` non-word, `[\s%_|]` stripped in the fallback), which is what
+  the three comments now say. Same invariant-death 0.1.150 fixed for the Bandcamp query and
+  `t_query_enc.pl`; these three sites were missed then. Pinned in `t_db.pl`, including the
+  mixed shape the existing assertions did not cover — a metacharacter among marks (`'!%!'`),
+  where a leak would land in a live non-empty key rather than an empty one. Both entries are
+  in CLAUDE.md §A2. Suites 1,575 -> 1,591 assertions, all green.
