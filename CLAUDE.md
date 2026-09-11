@@ -850,6 +850,13 @@ subsystem.
       underscore seeds now in it are what make the control able to fail. **The lesson is the
       one this entry already states about `_norm`'s own controls being Latin: a control chosen
       from the half of the input space the change cannot touch is not a control.**
+    - **FUZZED 2026-09-11 (review round): 400,000 inputs, ZERO merges.** Because this claim
+      shipped FALSE once (0.1.143, directly above), it is now measured: 400,000 random strings
+      pushed through the old `s/[^a-z0-9]+/ /g` and through the current pass produced **no case
+      where the new fold makes two names equal that the old fold held apart**. No output
+      contained `e:` or `u:` either, so `_keyForRow`'s leftmost-match tail regex cannot be
+      fooled by a name segment. §4j2 remains the control; this states the property across the
+      input space rather than across its seeds.
   - **A name that is ALL PUNCTUATION keeps its punctuation** rather than answering `''`. `!!!`,
     `†††` and `+/-` are real acts and a self-titled album by one of them collided with the next.
     Three characters are dropped there and each for its own reason: `|` is the key's SEGMENT
@@ -1309,6 +1316,12 @@ subsystem.
   13 names asserting no `_norm` output ever carries `%`, `_` or `|`. Checked while writing
   them: weakening the fallback strip to `\s+` turns the four older assertions red too, so
   they are the empty half of the same rule rather than redundant with the new ones.
+
+  **Fuzzed 2026-09-11 (review round) so the guarantee is measured, not argued.** 300,000
+  random strings over ASCII punctuation, Unicode connector characters, the fullwidth forms
+  `＿` `％` `｜`, combining marks and CJK produced **ZERO `_norm` outputs carrying
+  `%`, `_` or `|`** — main pass and all-punctuation fallback alike. The 13-name sweep in
+  `t_db.pl` is the cheap regression guard; this is the coverage standing behind it.
 
   **`Sources::_norm` is deliberately NOT held to this** and needs no such strip — nothing in
   the repo builds a LIKE pattern from it (checked 2026-09-11; every LIKE lives in `DB.pm`).
