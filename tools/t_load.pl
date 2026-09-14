@@ -13,7 +13,7 @@ use warnings;
 use FindBin;
 require "$FindBin::Bin/t_stubs.pl";
 
-my @MODULES = qw(DB Sources Podcast Browse Played Settings HomeExtras Plugin);
+my @MODULES = qw(DB Sources Browse Played Settings HomeExtras Plugin);
 
 my ($pass, $fail) = (0, 0);
 sub is {
@@ -43,6 +43,11 @@ for my $m (@MODULES) {
     $src =~ s/^\s*#.*$//gm;
     $defined{"Plugins::ListenLater::${m}::$1"} = 1 while $src =~ /^sub\s+(\w+)/gm;
     $defined{$1} = 1                            while $src =~ /^sub\s+(\w+)/gm;
+    # `use constant` defines a real sub, and one is CALLED across packages (Plugin.pm reads
+    # Podcast::RESOLVE_BUDGET so the two timers cannot cross). Without this the checker calls
+    # every such read undefined — a false positive that reads exactly like the true one.
+    $defined{"Plugins::ListenLater::${m}::$1"} = 1 while $src =~ /^use\s+constant\s+(\w+)/gm;
+    $defined{$1} = 1                            while $src =~ /^use\s+constant\s+(\w+)/gm;
     # Fully-qualified calls to our own packages, and bare calls to _private helpers.
     while ($src =~ /(Plugins::ListenLater::\w+::\w+)\s*\(/g) { $called{$1} = $m }
     while ($src =~ /(?<![\w:>&])(_\w+)\s*\(/g)               { $called{"${m}::$1"} = $m }

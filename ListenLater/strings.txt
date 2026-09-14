@@ -25,6 +25,9 @@ PLUGIN_LL_TYPE_TRACK
 PLUGIN_LL_TYPE_PODCAST
 	EN	Podcast
 
+PLUGIN_LL_TYPE_PLAYLIST
+	EN	Playlist
+
 PLUGIN_LL_ADDED
 	EN	Added to Listen Later
 
@@ -152,7 +155,7 @@ PLUGIN_LL_MATERIAL_ACTION
 	EN	Add to Material context menus
 
 PLUGIN_LL_MATERIAL_ACTION_DESC
-	EN	Adds an "Add to Listen Later" entry to Material Skin's album, track and playlist context menus (including streaming services like Qobuz, whose own menus can't otherwise be extended). Writes to Material's actions.json. Takes effect after the next restart.
+	EN	Adds an "Add to Listen Later" entry to Material Skin's album, track and playlist context menus (including streaming services like Qobuz, whose own menus can't otherwise be extended). How the entries get there depends on your Material version: 6.4.8 and newer takes all of them directly, 6.4.6 and 6.4.7 take all but the Now Playing and play queue ones, and older versions take none — whatever Material won't accept is written to its actions.json file instead. Ticking this box takes effect straight away — reload Material once to see the entries. Unticking it removes the actions.json half at once, but Material has no way to withdraw an entry a plugin has registered with it, so anything registered stays until the next server restart.
 
 PLUGIN_LL_DEBUG_LOG
 	EN	Debug logging

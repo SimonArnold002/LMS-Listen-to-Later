@@ -49,23 +49,67 @@ sub handler {
         $ret = 3650 if $ret > 3650;
         $params->{pref_played_retention_days} = $ret + 0;
 
-        # Persist the two Material toggles straight from the form NOW (SUPER::handler saves
-        # them too, but only after it has rendered the page). We need them live so the
-        # regenerate below reflects the just-chosen values, and the fresh snapshot is in the
-        # pref before the template is rendered in this same request.
-        $prefs->set('material_action', $params->{pref_material_action} ? 1 : 0);
-        $prefs->set('debug_log',       $params->{pref_debug_log}       ? 1 : 0);
+        # AN UNTICKED CHECKBOX POSTS NOTHING AT ALL, so `pref_material_action` is ABSENT from
+        # $params rather than 0 — and Slim::Web::Settings::handler does an UNCONDITIONAL
+        # `$prefsClass->set($pref, $paramRef->{'pref_'.$pref})` for every pref in prefs()
+        # (Settings.pm:162). Setting the pref directly here is therefore not enough: SUPER
+        # runs afterwards and writes **undef** straight over our 0. `Prefs::Base::init` then
+        # re-seeds any pref that "exists as an undef value" (Base.pm:200) at the next module
+        # load, so the default 1 came back and the box reappeared TICKED on every restart —
+        # the toggle could not be turned off at all, and with it stuck on, postinitPlugin
+        # never reached the branch that clears actions.json.
+        #
+        # So MATERIALISE the value into $params, exactly as the numeric prefs above do, and
+        # let the base class store it. The direct set stays because the write/clear below has
+        # to see the chosen value live, in this same request.
+        $params->{pref_material_action} = $params->{pref_material_action} ? 1 : 0;
+        $params->{pref_debug_log}       = $params->{pref_debug_log}       ? 1 : 0;
+        # `watch_outside` is the third checkbox on this page and fails the SAME way. It needs
+        # no direct set: nothing in this request reads it — Played.pm does, at play time,
+        # after SUPER has stored the materialised value.
+        $params->{pref_watch_outside}   = $params->{pref_watch_outside}   ? 1 : 0;
+        $prefs->set('material_action', $params->{pref_material_action});
+        $prefs->set('debug_log',       $params->{pref_debug_log});
 
-        # Rewrite Material's actions.json now so the diagnostics snapshot shown on the page
-        # reflects the current state (otherwise the user would enable debug logging, save,
-        # and see nothing until the next restart). _writeMaterialActions writes the snapshot
-        # pref when debug_log is on. Guarded exactly like postinitPlugin — only touch the
-        # shared file when the feature is on and Material is installed.
-        if ( $prefs->get('debug_log')
-          && $prefs->get('material_action')
-          && Slim::Utils::PluginManager->isEnabled('Plugins::MaterialSkin::Plugin') ) {
-            eval { Plugins::ListenLater::Plugin::_writeMaterialActions(); 1 }
-                or $log->error("LL: settings-page diagnostics rewrite failed: $@");
+        # Re-run Material's delivery now, mirroring postinitPlugin's two branches EXACTLY, so
+        # the toggle takes effect on THIS save rather than at the next restart:
+        #   * ON  — register, then write. Both, in that order, as postinit does.
+        #   * OFF — _clearMaterialActions removes our file entries. Anything registered at
+        #           startup can only go at the next restart; it says so.
+        #
+        # **THE SAVE MUST REGISTER, and 0.1.110 shipped without that (reported live).** The
+        # comment here used to claim it "cannot register — registerCustomAction has no de-dupe
+        # and no unregister, so it runs once per server run, in postinit", and that the FILE
+        # write was "precisely why turning it on mid-run works at all". Both halves were wrong
+        # the moment tier 2 removed the file write:
+        #   * `$REGISTERED` IS the de-dupe. It is a per-run latch, so calling
+        #     _registerMaterialActions here is a no-op whenever postinit already registered.
+        #   * It is FALSE in exactly the case this branch exists for. The pref being off at
+        #     startup is what sent postinit down its `elsif`, so nothing registered and there
+        #     is nothing to double.
+        # Without it, on Material >= 6.4.8 ticking the box wrote nothing (the prune writes
+        # only refused entries) and registered nothing, so the toggle did nothing at all until
+        # a server restart. On tier 0/1 the file write still carries it, exactly as before.
+        #
+        # The user still needs a Material reload to SEE it — the client fetches both lists at
+        # app start — but that is the same one-refresh cost the file path always had (0.1.57),
+        # not a restart.
+        #
+        # debug_log deliberately does NOT gate this — it gates only the diagnostics SNAPSHOT
+        # that the write stashes for the textarea below. Gating the write on it (as we did
+        # before 0.1.97) meant the Material toggle silently did nothing on the default config,
+        # where debug logging is off.
+        if ( Slim::Utils::PluginManager->isEnabled('Plugins::MaterialSkin::Plugin') ) {
+            eval {
+                if ( $prefs->get('material_action') ) {
+                    Plugins::ListenLater::Plugin::_registerMaterialActions();
+                    Plugins::ListenLater::Plugin::_writeMaterialActions();
+                }
+                else {
+                    Plugins::ListenLater::Plugin::_clearMaterialActions();
+                }
+                1;
+            } or $log->error("LL: settings-page Material action rewrite failed: $@");
         }
 
         $log->info('Listen Later settings saved');

@@ -1,3 +1,7 @@
+> **STATUS: historical (marked 2026-09-10).** A reply written during the #1235 review, kept for
+> the reasoning about why a plugin cannot decorate another plugin's browse response. Both PRs it
+> discusses are merged and released (6.4.4 and 6.4.8).
+
 Thanks — that's fair, and I agree `actions.json` is really the user's space; a plugin writing into it is intrusive. I'm happy to move plugin-owned actions to a `uiactions` field gated on `features:a`, and to use `$APP` rather than `$SERVICE`.
 
 One thing worth flagging before I rework, because it affects whether `uiactions` can fully *replace* this PR or only complement it: `uiactions` in the response only lets a plugin decorate **its own** views. The motivating case here is "Add to Listen to Later" on a **Qobuz** album while browsing Qobuz — and that view is the Qobuz plugin's response. My plugin can't attach a `uiaction` to it: it doesn't own that response, and Qobuz has no knowledge of my plugin. The reason this PR reaches those rows at all is the global `online-*` categories — which is exactly the part you're (rightly) wary of.

@@ -14,7 +14,14 @@
 use strict;
 use warnings;
 use FindBin;
+use File::Temp qw(tempdir);
 require "$FindBin::Bin/t_stubs.pl";
+
+# A real SQLite db in a temp dir, for the _matchRecord section at the foot of this file.
+# Everything above it is pure arithmetic and never opens the handle, so this costs the
+# existing cases nothing — DB.pm connects lazily on the first dbh().
+my $dir = tempdir(CLEANUP => 1);
+Slim::Utils::Prefs::set_test_pref_ns('server', 'cachedir', $dir);
 
 ll_require('DB', 'Sources', 'Played');
 
@@ -196,7 +203,10 @@ section('_learnTrackCount — measuring a release at the moment it starts playin
         push @asked, $rec->{id};
         $cb->($answer) if defined $answer;      # undef = a service that never answers
     };
-    local *Plugins::ListenLater::DB::updateTrackCount = sub { push @stored, [ @_[0,1] ] };
+    local *Plugins::ListenLater::DB::updateTrackCount = sub {
+        push @stored, [ @_[0,1] ];
+        return $_[0];
+    };
     my $client = bless {}, 'FakeClient';
     sub FakeClient::id         { 'aa:bb:cc:dd:ee:ff' }
     sub FakeClient::playingSong { undef }
@@ -230,6 +240,82 @@ section('_learnTrackCount — measuring a release at the moment it starts playin
     is('an unanswered measure stores nothing', scalar @stored, 0);
     is('...and is not silent',
        ((join ' ', Slim::Utils::Log::lines()) =~ /couldn't measure/ ? 'logged' : 'SILENT'), 'logged');
+}
+
+# ---------------------------------------------------------------------------
+section('0.1.107 — a saved PLAYLIST is invisible to the Played detector');
+# A playlist is not a release: it has no fixed length, a curated one changes under you,
+# and "90% of it heard" means nothing. So a saved playlist must never auto-move to Played.
+#
+# There is deliberately NO playlist branch in Played.pm — the exclusion is a property of
+# the three finders _matchRecord walks, each of which filters kind='album'. That makes it
+# the kind of guarantee a refactor can delete by accident and no test would notice, because
+# the mechanism is an absence. These cases assert the BEHAVIOUR at _matchRecord instead of
+# the filters (t_db.pl already pins those individually), so the promise survives whichever
+# way the lookups are rewritten.
+#
+# The risk is not hypothetical: a playlist is routinely NAMED after a release it draws
+# from, and Played matches streaming plays on artist+title alone with no id anchor.
+{
+    my $match = \&Plugins::ListenLater::Played::_matchRecord;
+
+    # The playing track: a remote Qobuz track whose album is titled exactly like the
+    # playlist saved below. `remote` is decided from the url here — the stub Track has no
+    # ->remote, so _matchRecord takes its documented fallback branch, which is the same
+    # branch a real RemoteTrack exercises.
+    my $playing = Slim::Schema::add_test_track(
+        id => -1, url => 'qobuz://1.flac',
+        artist => 'Chanel Beads', album => 'Your Day Will Come',
+    );
+    my $url = 'qobuz://1.flac';
+
+    # (1) Only the playlist is saved. The title matches the playing track's album exactly,
+    # so every one of the three lookups has something to bite on — and must not.
+    my ($plId) = Plugins::ListenLater::DB::add({
+        kind        => 'playlist',
+        source      => 'qobuz',
+        artist      => 'Chanel Beads',
+        album_title => 'Your Day Will Come',
+        ref_kind    => 'playlist_id',
+        # svc_title is what findBySourceRefTitle keys on — the LAST of the three lookups,
+        # and the only one a playlist row would not otherwise reach. _savePlaylistRecord
+        # never writes it; it is set here so the third finder is genuinely exercised
+        # rather than passing because the field was empty.
+        ref         => { _svc => 'qobuz', playlist_id => '69183531',
+                         svc_title => 'Your Day Will Come' },
+    }, 'later');
+    is('the playlist row was stored', ($plId ? 'yes' : 'no'), 'yes');
+    is('a playing track does NOT match a same-titled playlist',
+       $match->(undef, $playing, $url), undef);
+
+    # (2) The album is saved too. The detector must still find it — the guard has to
+    # exclude playlists WITHOUT blinding Played to the release sitting beside one. This is
+    # the positive control: it fails if the exclusion is implemented too broadly.
+    my ($alId) = Plugins::ListenLater::DB::add({
+        kind        => 'album',
+        source      => 'qobuz',
+        artist      => 'Chanel Beads',
+        album_title => 'Your Day Will Come',
+        rel_type    => 'album',
+        ref_kind    => 'search',
+        ref         => { _svc => 'qobuz' },
+    }, 'later');
+    my $got = $match->(undef, $playing, $url);
+    is('...but it DOES match the album saved alongside it', ($got ? $got->{id} : undef), $alId);
+    is('...and what it matched is an album, never the playlist',
+       ($got ? $got->{kind} : undef), 'album');
+
+    # (3) The artist-mismatch route. When the exact artist|album key misses, _matchRecord
+    # falls back to findByAlbum + a token-subset artist compare — a looser lookup, and so
+    # the one most likely to let a playlist through. Play a track credited differently
+    # ("X feat. Y") so the first lookup cannot hit, against a db holding ONLY the playlist.
+    Plugins::ListenLater::DB::remove($alId);
+    my $feat = Slim::Schema::add_test_track(
+        id => -2, url => 'qobuz://2.flac',
+        artist => 'Chanel Beads feat. Someone', album => 'Your Day Will Come',
+    );
+    is('the loose artist fallback does not reach a playlist either',
+       $match->(undef, $feat, 'qobuz://2.flac'), undef);
 }
 
 printf "\n%d passed, %d failed\n", $pass, $fail;

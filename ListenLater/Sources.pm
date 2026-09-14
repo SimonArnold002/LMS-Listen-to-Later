@@ -22,13 +22,81 @@ use Slim::Utils::Strings qw(cstring);
 
 my $log = logger('plugin.listenlater');
 
+# Is the running Material at least <maj>.<min>.<patch>?
+#
+#   undef  we cannot tell (Material absent, or getPluginVersion answered undef)
+#   1      yes — INCLUDING a non-numeric dev/test build, which is treated as newest
+#   0      no
+#
+# Three gates ask this and each used to parse and compare inline: the tier-2 gate (6.4.8),
+# the diagnostics' "online Add supported" line (6.4.4), and Browse::_headerType (6.4.3).
+# Three copies of one comparison is three places to fix a parsing change — a pre-release
+# suffix ('6.4.8-beta1'), or a different reading of a dev build — and nothing ties them
+# together, so a fix lands in one and the other two keep their own answer.
+#
+# EVERY CALLER TREATS undef AS "NO", and that is deliberate rather than incidental: each of
+# the three already chose its safe answer for the unknown case, and in all three that answer
+# is the same one a plain false gives. So a caller reads `materialAtLeast(...) ? A : B` and
+# the undef case needs no separate branch. If a future caller wants to distinguish "cannot
+# tell" from "too old", test `defined` explicitly — do not change the return shape.
+#
+# Lives HERE because Sources.pm is the one leaf module both Plugin.pm and Browse.pm already
+# use, so no new dependency edge is created. It is not service logic, and it is the only
+# thing in this file that isn't.
+sub materialAtLeast {
+    my ($ver, $maj, $min, $patch) = @_;
+    return undef unless defined $ver;                   # can't tell
+    return 1 unless $ver =~ /^(\d+)\.(\d+)\.(\d+)/;     # dev/test build -> newest
+    return ( $1 <=> $maj || $2 <=> $min || $3 <=> $patch ) >= 0 ? 1 : 0;
+}
+
 # url scheme -> our source tag
 my %SCHEME = (
     qobuz    => 'qobuz',
     bandcamp => 'bandcamp',
     tidal    => 'tidal',
     deezer   => 'deezer',
+    spotify  => 'spotify',
 );
+
+# Spotify speaks URIs, not urls — normalise one to the shape every other service sends.
+#
+# THE PROBLEM. Every other plugin hands Material a scheme url ('tidal://album:123'), and
+# this whole module is anchored on that: sourceFromUrl, favurlIsTrack and playlistFromRow
+# all open with '^(\w+)://', and Plugin::_addCtxCommand reads its $favScheme the same way.
+# Spotty's renderers set favorites_url to a bare Spotify URI instead —
+#   album     spotify:album:<id>        (OPML::_albumItem, verified v4.62.2 OPML.pm:1247)
+#   track     spotify:track:<id>        (trackList, OPML.pm:1183)
+#   playlist  spotify:playlist:<id>     (_playlistItem, OPML.pm:1463)
+# — with no '//' anywhere. So EVERY one of those tests failed on it: an album favurl read
+# as source 'library', a track favurl was not seen as a track, and the album id sitting
+# right there in the favurl was never captured (Plugin.pm's 'album:<id>' match never ran,
+# because the branch guarded by $favScheme was not entered).
+#
+# THE FIX, and why it is one line rather than five branches. Inserting the '//' turns a
+# Spotify URI into exactly the shape the generic code already understands, and every one
+# of those readers then answers correctly with no per-service test. It is also free on the
+# TRACK side: 'spotify://track:<id>' is not an invention, it is byte-for-byte the play url
+# Spotty itself builds ("'spotify://' . $track_uri", OPML.pm:1181), so a saved track row
+# stores a directly playable url with no conversion anywhere else.
+#
+# Applied at the ONE place a favurl enters the plugin (Plugin::_addCtxCommand, right after
+# the private handshake params are stripped) — but defined HERE, next to %SCHEME and the
+# readers it exists to satisfy, because "what does this service's url look like" is this
+# module's question. Anything else is returned untouched, so it is safe on every path.
+sub normaliseFavurl {
+    my ($u) = @_;
+    return $u unless defined $u && length $u;
+    # An explicit type list, not a blanket 'spotify:(\w+):'. Every one of these is a type
+    # favurlIsTrack knows how to judge (album/playlist/artist/show/user are containers,
+    # track/episode are audio), so normalising one can never hand the fail-open branch a
+    # shape it has to guess at. 'user' is in the list for the LEGACY playlist form,
+    # 'spotify:user:<name>:playlist:<id>': rewriting its first segment still leaves the
+    # 'playlist:<id>' tail for playlistFromRow's container match, which is unanchored.
+    # Anchored at the front, so it can only ever fire on a whole Spotify URI.
+    $u =~ s{^spotify:(?=(?:album|track|playlist|artist|episode|show|user):)}{spotify://};
+    return $u;
+}
 
 # ---------------------------------------------------------------------------
 # Source detection
@@ -54,11 +122,26 @@ sub favurlIsTrack {
     # A CONTAINER ref is decisive → not a track. 'album:' is the one the services actually
     # emit; the others cost nothing and stop a playlist/artist/mix row being replayed as a
     # single audio url.
-    return 0 if $u =~ m{(?:[:/])(?:album|playlist|artist|mix):};
+    # 'show'/'user' are here for Spotify: a show is a podcast CONTAINER, and 'user' opens
+    # the legacy 'spotify://user:<name>:playlist:<id>' form (whose 'playlist:' tail this
+    # same expression catches anyway — both spellings are covered, deliberately).
+    return 0 if $u =~ m{(?:[:/])(?:album|playlist|artist|mix|show|user):};
     # Explicit track shapes: a media-file extension (Qobuz .flac, Deezer .flc, Tidal
     # .flac/.m4a, …) or a '/track/' path (Bandcamp/SoundCloud).
     return 1 if $u =~ m{\.(?:flac|flc|mp3|m4a|mp4|aac|ogg|oga|opus|wav|alac|aiff?)(?:[?#].*)?$}i;
     return 1 if $u =~ m{/track/};
+    # Spotify says it in a container ref of its own rather than by extension or path:
+    # 'spotify://track:<id>' / 'spotify://episode:<id>' (Sources::normaliseFavurl inserted
+    # the '//'). Stated explicitly so the fail-open warning below stays a real signal —
+    # without this every Spotify track add would answer correctly but log a suspect.
+    # Placed AFTER the container test above, which must keep winning: an album drilled
+    # from Spotify carries 'album:' and is not a track, whatever else the url holds.
+    return 1 if $u =~ m{(?:[:/])(?:track|episode):};
+    # Deezer names the episode in the SCHEME, not in a container ref: 'deezerpodcast://<id>'
+    # (verified live). Stated explicitly for the same reason the Spotify line above is — the
+    # fail-open branch below has to stay a real signal, and without this every Deezer episode
+    # add would answer correctly and log itself as a suspect.
+    return 1 if $u =~ m{^deezerpodcast://};
     # Otherwise: for every service we support, an ALBUM favurl is either EMPTY or carries
     # 'album:' — so a remaining non-empty scheme url with neither is a track (e.g. an
     # extension-less tidal://<id>). This is a fail-OPEN default and nothing enforces the
@@ -69,6 +152,57 @@ sub favurlIsTrack {
     # breaking the invariant still costs nothing — it's rejected by _isReplayableSource.)
     $log->warn("LL: favurlIsTrack — assuming TRACK for an unrecognised favurl shape: $u");
     return 1;
+}
+
+# Is this favurl a CONTAINER we have no adapter for? Answers the type name so the caller
+# can say what it refused; undef for anything addable.
+#
+# This is a THIRD question, and neither of the two above it answers it. `_serviceCan` asks
+# about the SERVICE — Spotty is installed, so 'spotify' says yes whatever the favurl points
+# at — and `favurlIsTrack` asks album-vs-TRACK, which presumes the row is one or the other.
+# A podcast SERIES is neither, and both gates waved it through: verified stored on the test
+# server (0.1.122), 'spotify://show:…' as an ALBUM row with no album id (replayed by a fuzzy
+# title search against the show's description as the artist), and 'deezer://podcast:…' out of
+# favurlIsTrack's fail-open branch as a kind='track' row pointing type => 'audio' at a
+# container url. The built-in Podcasts app refused the same add — a feed row there resolved
+# no episode and was rejected — so this was the streaming side catching up. That path was
+# REMOVED in 0.1.136 and a feed row is now refused by _isReplayableSource instead ('https' has
+# no _serviceCan arm), which changes nothing here: this gate was never the built-in path's and
+# still has to answer for the two streaming ones. It is NOT a step toward series support: we
+# save podcast EPISODES only,
+# and 'spotify://episode:…' still stores as a track exactly as before.
+#
+# 'mix' is TIDAL's shape ('tidal://mix:<id>'). Spotify's mixes are plain 'spotify:playlist:'
+# URIs — they reach playlistFromRow and store as playlists, and nothing here touches them.
+# A TIDAL mix is refused rather than routed to the playlist path because TIDAL's own plugin
+# keeps the two apart: getPlaylist takes a {uuid} and calls $api->playlist, getMix takes an
+# {id} and calls $api->mix. Handing a mix id to the playlist endpoint would fail, so
+# replaying one needs a getMix adapter — service work, not a gate fix.
+#
+# 'artist' cannot reach this from Material today: it maps a 'spotify:artist:' favurl to
+# STD_ITEM_ONLINE_ARTIST, whose category is 'online-artist', which Plugin.pm deliberately
+# never defines, so no Add renders on an artist row. Closed here anyway — since 0.1.51 the
+# add COMMAND is the gate precisely because it does not depend on Material's button, and
+# favurlIsTrack already names the type one sub above.
+sub unsupportedContainer {
+    my ($u) = @_;
+    return undef unless defined $u && length $u;
+    # Split the scheme off rather than matching the whole url unanchored, for ONE reason:
+    # 'podcast' is both a type name (Deezer) and a scheme of OUR OWN — the built-in Podcasts
+    # path, removed in 0.1.136, stored an episode as 'podcast://<enclosure url>'. Matching
+    # unanchored would refuse every such row, and would additionally be reading type names out
+    # of a third party's feed url. THE SCHEME SPLIT STAYS after that removal: t_favurl.pl pins
+    # it with three real harvested rows, and the split is what makes this sub read a scheme AS
+    # a scheme rather than as text occurring anywhere in the url.
+    return undef unless $u =~ m{^(\w+)://(.*)$}s;
+    my ($scheme, $rest) = (lc $1, $2);
+    return undef if $scheme eq 'podcast';
+    # Unanchored within the remainder, like favurlIsTrack's container test and
+    # playlistFromRow's — the ref sits at the front for Spotify/Deezer/Tidal but the legacy
+    # 'user:<name>:playlist:<id>' form proves it cannot be assumed. 'user' and 'playlist' are
+    # deliberately absent: both ARE addable, via playlistFromRow.
+    return $1 if $rest =~ m{(?:^|[:/])(show|podcast|artist|mix):};
+    return undef;
 }
 
 # Metadata for a currently-playing REMOTE track, from its protocol handler's
@@ -102,6 +236,72 @@ sub sourceFromImage {
     return '';
 }
 
+# Every source tag `sourceFromUrl`/`sourceFromImage` can produce. NOT the list of services we
+# can REPLAY (that's `_serviceCan`) — deezer/spotify belong here precisely so an add naming
+# them still reaches the reject gate under their own name, exactly as before.
+my %KNOWN_SOURCE = map { $_ => 1 } qw(qobuz tidal bandcamp deezer spotify);
+
+# Is this string actually the name of a service we recognise?
+#
+# The caller's problem is that Material's `$SERVICE` is NOT a service tag — it's the browse
+# COMMAND of whatever menu the row came from (`data.params[1][0]`), and on a Material HOME SHELF
+# that command is the home-extra id. The stock Qobuz plugin registers its shelves as
+# `QobuzExtrasqobuz` ("Qobuz"), `QobuzExtrasnew-releases-full`, … — so entering Qobuz from the
+# home screen instead of Apps sends svc='QobuzExtrasqobuz' for the very same rows.
+#
+# So a SHAPE test (`^[a-z0-9]+$`, which only ever meant to reject Material's unpopulated literal
+# "$SERVICE" and hyphenated non-services) is not enough: an all-alphanumeric shelf id passes it,
+# becomes `$source`, and short-circuits the cover-URL sniff that would have got the answer right.
+# That is why the hyphenated shelves worked and `QobuzExtrasqobuz` did not.
+#
+# Deliberately an EXACT match, never a substring: 'QobuzExtrasqobuz' contains 'qobuz', and so
+# would a hypothetical 'tidalqobuz' — matching loosely would just trade this bug for a subtler one.
+sub knownSource {
+    my ($s) = @_;
+    return 0 unless defined $s && length $s;
+    return $KNOWN_SOURCE{ lc $s } ? 1 : 0;
+}
+
+# Browse COMMANDS that name a service we know, but not by the name we call it. Material's
+# $SERVICE is the command a plugin registered its menu under, and one plugin's command is
+# not its service's name: Spotty registers `tag => 'spotty'` (Plugin.pm:130) for a service
+# whose source tag here — and in the url scheme, the cover host and every stored row — is
+# 'spotify'. Left unmapped, an add from the Spotify app menu is judged by knownSource,
+# correctly told "that is not a source name", and falls through to the cover sniff; that
+# happens to answer 'spotify' from scdn.co, so it works by luck rather than by knowing.
+# Say it instead, so a Spotify row with an unproxied or missing cover still lands right.
+my %SVC_ALIAS = ( spotty => 'spotify' );
+
+# The canonical source tag for a Material $SERVICE, or '' when the string does not name a
+# service at all. The one thing both add paths should ask: it folds the alias above and
+# then applies knownSource's exact-match discipline, so 'spotty' answers 'spotify' while a
+# home-shelf id ('SpottyExtrasspotty', 'QobuzExtrasqobuz') still answers '' and leaves the
+# cover sniff to decide — which is the behaviour 0.1.96 deliberately introduced.
+sub sourceFromSvc {
+    my ($s) = @_;
+    return '' unless defined $s && length $s;
+    my $lc = lc $s;
+    $lc = $SVC_ALIAS{$lc} if $SVC_ALIAS{$lc};
+    return knownSource($lc) ? $lc : '';
+}
+
+# Our OWN browse surfaces, by the command Material passes as $SERVICE: the plugin's list
+# view (the dispatch verb, 'listenlater') and its Material home shelf (the home-extra tag,
+# 'LLHome'), plus both pre-rebrand spellings — a stale actions.json outlives the rename.
+#
+# Kept here, next to knownSource, because the two answer the same question about the same
+# untrusted string and the caller must ask BOTH: knownSource says "this doesn't name a
+# service", which since 0.1.96 means "fall through to the cover sniff" — and on one of our
+# own rows that sniff succeeds, because our cards carry the ORIGINAL streaming cover. Only
+# an explicit name can tell those two cases apart.
+my %OWN_SURFACE = map { lc($_) => 1 } qw(listenlater LLHome listentolater LtLHome);
+
+sub ownSurface {
+    my ($s) = @_;
+    return 0 unless defined $s && length $s;
+    return $OWN_SURFACE{ lc $s } ? 1 : 0;
+}
+
 # Recover the Qobuz album id from its cover URL. Qobuz browse rows carry NO
 # favorites_url / album id, but they DO carry a cover whose filename IS the album id:
 #   …/static.qobuz.com/images/covers/<xx>/<yy>/<ALBUMID>_<size>.jpg
@@ -116,6 +316,51 @@ sub qobuzAlbumIdFromImage {
     my $u = URI::Escape::uri_unescape($img);
     return $1 if $u =~ m{static\.qobuz\.com/images/covers/[^/]+/[^/]+/([A-Za-z0-9]+)_\d+\.[a-z0-9]+}i;
     return undef;
+}
+
+# Is this browse row a streaming-service PLAYLIST, and which one? Returns
+# ($source, $playlist_id) or the empty list. The ONE detector — every caller asks here.
+#
+# Two shapes, in order, because only two exist:
+#   1. a container favurl — Tidal and Deezer both emit one from a single shared playlist
+#      renderer, so it covers curated AND personal lists on both services:
+#         tidal://playlist:<uuid>   deezer://playlist:<id>
+#      (the id charset allows '-' for a Tidal uuid; '.' and '_' cost nothing.)
+#   2. Qobuz's cover URL — Qobuz's _playlistItem emits NO favorites_url at all, but an
+#      editorial playlist's cover filename IS the playlist id:
+#         static.qobuz.com/images/playlists/<ID>_<hash>_rectangle.jpg
+#      Verified live: 69183531 = "Hi-Res Masters: 2016 / Qobuz UK". Deliberately mirrors
+#      qobuzAlbumIdFromImage above, whose path (/images/covers/) is DISJOINT from this one
+#      — the two can never both fire, which is what keeps an album row an album row.
+#
+# NOT supported, deliberately: a Qobuz PERSONAL playlist with no artwork of its own, whose
+# cover falls back to a constituent track's album art (…/images/covers/…). It carries no
+# recoverable id and is indistinguishable from an album row, so it keeps today's behaviour
+# rather than being detectable enough to refuse. The real fix is upstream (a one-line
+# qobuz://playlist:<id> favurl in Qobuz::Plugin::_playlistItem).
+sub playlistFromRow {
+    my ($favurl, $image) = @_;
+
+    # Scheme and container ref matched SEPARATELY, deliberately: a single anchored
+    # expression cannot do it. '^(\w+)://' consumes both slashes, leaving nothing for a
+    # following '[:/]' to match against 'playlist:' — which is the shape Tidal and Deezer
+    # actually send ('tidal://playlist:<uuid>'), i.e. the common case would be the one that
+    # failed. The container half is therefore unanchored, exactly like the 'album:' match in
+    # Plugin::_addCtxCommand.
+    if (defined $favurl && $favurl =~ m{^(\w+)://}) {
+        my $scheme = lc $1;
+        return ($SCHEME{$scheme} || $scheme, $1)
+            if $favurl =~ m{(?:^|[:/])playlist:([A-Za-z0-9._-]+)};
+    }
+
+    if (defined $image && length $image) {
+        require URI::Escape;
+        my $u = URI::Escape::uri_unescape($image);
+        return ('qobuz', $1)
+            if $u =~ m{static\.qobuz\.com/images/playlists/(\d+)_}i;
+    }
+
+    return ();
 }
 
 # ---------------------------------------------------------------------------
@@ -226,6 +471,10 @@ sub hasDirectAlbumRef {
     my ($rec) = @_;
     my $source = $rec->{source} || 'library';
     my $ref    = $rec->{ref} || {};
+    # A PLAYLIST has no album ref by construction (never write an album_id onto one — see
+    # DB::add) and no search fallback to be spared, so the answer is a flat no. Stated
+    # rather than inherited from "it has no album_id".
+    return 0 if ($rec->{kind} || '') eq 'playlist';
     return 1 if $source eq 'library';
     return ($ref->{album_url} ? 1 : 0) if $source eq 'bandcamp';
     my $albumId = $ref->{album_id} || ($ref->{passthrough} && $ref->{passthrough}{album_id});
@@ -242,6 +491,17 @@ sub buildPlayableItems {
     # qobuz://…/tidal://…/deezer://…/bandcamp track url).
     if (($rec->{kind} || '') eq 'track') {
         return $cb->(_trackPlayableItems($rec));
+    }
+
+    # A saved PLAYLIST replays through the service's own playlist call, by id. There is
+    # deliberately NO search fallback: a playlist cannot be found by an artist+album search,
+    # and falling through to _searchService is exactly how the junk "album named 'Dance Pop'"
+    # rows arose before playlists were a kind of their own.
+    if (($rec->{kind} || '') eq 'playlist') {
+        my $ref  = $rec->{ref} || {};
+        my $item = _streamingPlaylistNode($client, $source, $ref->{playlist_id}, $rec);
+        return $cb->([$item]) if $item;
+        return $cb->(_noMatch($client));
     }
 
     if ($source eq 'library') {
@@ -294,7 +554,9 @@ sub _cacheBandcampUrl {
     my $url = $pt && ($pt->{album_url} || $pt->{url});
     return unless $url && !ref $url && $url =~ m{^https?://}i;
     eval {
-        Plugins::ListenLater::DB::setRefValue($rec->{id}, 'album_url', $url);
+        Plugins::ListenLater::DB::setRefValue(
+            $rec->{id}, 'album_url', $url, $rec->{source},
+            Plugins::ListenLater::DB::refIdentity($rec));
         $rec->{ref}{album_url} = $url;   # reflect it on the in-hand record too
     };
 }
@@ -571,6 +833,47 @@ sub classifyRelType {
             return if $ok;
         }
     }
+
+    # Spotify, the same deal as Qobuz and for the same reason: one album fetch answers the
+    # type (album_type), the count (total_tracks) and the year (release_date), so there is
+    # nothing to gain from resolving a tracklist as well. Its count is a catalogue count →
+    # provisional, exactly as above.
+    #
+    # THE ONE TRAP, and why no extra guard is written for it: Spotify has NO EP class — an
+    # EP comes back as album_type 'single'. That would matter a great deal if the assertion
+    # were taken at face value, because to this plugin 'single' means "exactly one track"
+    # and Played would mark a 5-track EP heard after its first track. It is already handled:
+    # _settle defers a claimed 'single' to the count whenever singleIsWrong says the count
+    # contradicts it, and the short-circuit below refuses to fire in exactly that case, so
+    # a 5-track "single" goes and proves itself against a real tracklist and settles as an
+    # EP. The generic machinery is stricter here than a hand-written total_tracks guard
+    # would be, so do not add one — it would only duplicate singleIsWrong less carefully.
+    if ($source eq 'spotify' && defined $albumId && length $albumId
+            && Plugins::Spotty::Plugin->can('getAPIHandler')) {
+        # getAPIHandler is a CLASS method on Spotty (Plugin.pm:317), unlike Qobuz's and
+        # TIDAL's function-form calls above — and it returns undef when the client has no
+        # Spotty account, which the guard below treats as "ask the tracklist instead".
+        my $api = eval { Plugins::Spotty::Plugin->getAPIHandler($client) };
+        if ($api && $api->can('album')) {
+            my $ok = eval {
+                $api->album(sub {
+                    my $album = shift;
+                    return _countThen($client, $rec, $claim, $cb) unless ref $album eq 'HASH';
+                    my $rt = $claim || _normRelType($album->{album_type});
+                    my $n  = albumTrackCount($album);          # total_tracks
+                    my $yr = serviceYear($album);              # release_date
+                    return $cb->(_settle($rt, $n), $n, 1, $yr) if $n && !singleIsWrong($rt, $n);
+                    _countThen($client, $rec, $rt, sub {
+                        my ($t, $c, $p) = @_;
+                        $cb->($t, $c, $p, $yr);
+                    });
+                }, { uri => "spotify:album:$albumId" });
+                1;
+            };
+            return if $ok;
+        }
+    }
+
     return _countThen($client, $rec, $claim, $cb);
 }
 
@@ -596,10 +899,21 @@ sub classifyRelType {
 # _searchService's Tidal/Deezer branches carry the counts, through the plugins' own public
 # search. That path isn't used here only because searching is the expense we're avoiding —
 # so these two names stay both verified and (via search) reachable without going private.
+#
+# SPOTIFY IS THE EXCEPTION to the paragraph above, and it is not a loophole in it: Spotty's
+# PUBLIC album call (API::album, reached through the same getAPIHandler its own OPML uses)
+# returns the album object itself, and its cache keeps `total_tracks`, `album_type` and
+# `release_date` on the way through (API/Cache.pm normalize, v4.62.2 — _removeUnused strips
+# only available_markets/href/external_urls/external_ids/type/copyright/label). So Spotify
+# joins Qobuz in answering type and count from one fetch, with nothing private touched.
+# Its count is a CATALOGUE count exactly like Qobuz's, and is flagged provisional the same
+# way. (The sibling ListenBrainz plugin found the same field on Spotify's SEARCH payload —
+# it is the one service whose search results carry a usable count.)
 sub albumTrackCount {
     my ($album) = @_;
     return undef unless ref $album eq 'HASH';
-    my $n = $album->{tracks_count} // $album->{nb_tracks} // $album->{numberOfTracks};
+    my $n = $album->{tracks_count} // $album->{nb_tracks} // $album->{numberOfTracks}
+         // $album->{total_tracks};
     return (defined $n && "$n" =~ /^\d+$/ && $n > 0) ? $n + 0 : undef;
 }
 
@@ -728,6 +1042,71 @@ sub _streamingAlbumNode {
         $item{url} = \&Plugins::Deezer::Plugin::getAlbum;
         $item{passthrough} = [ { id => $albumId } ];
     }
+    elsif ($source eq 'spotify' && Plugins::Spotty::OPML->can('album')) {
+        # Spotty's album node lives in OPML, not Plugin (its Plugin.pm `use`s OPML, so the
+        # package is loaded whenever the service is), and it reads a full URI from
+        # $params->{uri} — NOT a bare id. API::album does `$args->{uri} =~ /album:(.*)/`
+        # (v4.62.2 API.pm:279), so handing it the id alone yields no match and an undef
+        # request path. Rebuild the URI from the stored id, which is exactly the id that
+        # match extracts, so the round trip is lossless.
+        #
+        # That regex is GREEDY to end-of-string, which is also why nothing may ever be
+        # appended here: a trailing '?…' would be swallowed into the id. The sibling
+        # ListenBrainz plugin leaves Spotify favurls undecorated for the same reason.
+        $item{url} = \&Plugins::Spotty::OPML::album;
+        $item{passthrough} = [ { uri => "spotify:album:$albumId" } ];
+    }
+    else {
+        return undef;
+    }
+
+    return \%item;
+}
+
+# Rebuild a streaming PLAYLIST node from a captured playlist id — the playlist mirror of
+# _streamingAlbumNode, and the same shape (type => 'playlist' + the service's own coderef),
+# so resolveTracks/_albumTracks need no special case: they find the node and invoke it.
+#
+# The service's LIVE tracklist is what comes back, which is the point — a curated playlist
+# changes under you, and we store only its identity, never its contents.
+#
+# `creatorId => ''` is passed rather than omitted: Tidal's and Deezer's getPlaylist both do
+# `$api->userId eq $params->{creatorId}` to decide whether it's the user's own list, which
+# warns on an undef under `use warnings`. Empty string answers "not yours" without noise.
+sub _streamingPlaylistNode {
+    my ($client, $source, $playlistId, $rec) = @_;
+    return undef unless defined $playlistId && length $playlistId;
+
+    my %item = (
+        name  => $rec->{album_title},
+        type  => 'playlist',
+        image => $rec->{artwork},
+    );
+
+    if ($source eq 'qobuz' && Plugins::Qobuz::Plugin->can('QobuzPlaylistGetTracks')) {
+        $item{url}         = \&Plugins::Qobuz::Plugin::QobuzPlaylistGetTracks;
+        $item{passthrough} = [ { playlist_id => $playlistId } ];
+    }
+    elsif ($source eq 'tidal' && Plugins::TIDAL::Plugin->can('getPlaylist')) {
+        # Tidal's getPlaylist reads $params->{uuid}.
+        $item{url}         = \&Plugins::TIDAL::Plugin::getPlaylist;
+        $item{passthrough} = [ { uuid => $playlistId, creatorId => '' } ];
+    }
+    elsif ($source eq 'deezer' && Plugins::Deezer::Plugin->can('getPlaylist')) {
+        # Deezer's getPlaylist reads $params->{id}.
+        $item{url}         = \&Plugins::Deezer::Plugin::getPlaylist;
+        $item{passthrough} = [ { id => $playlistId, creatorId => '' } ];
+    }
+    elsif ($source eq 'spotify' && Plugins::Spotty::OPML->can('playlist')) {
+        # Spotty's playlist node reads a full URI from $params->{uri}, like its album one.
+        # It takes no creatorId: API::getPlaylistUserAndId (v4.62.2 API.pm:509) derives the
+        # owner from the URI, and for the short 'spotify:playlist:<id>' form we build here
+        # it falls back to the owner Spotty cached when it first rendered the list — so the
+        # short form is sufficient even for a list the legacy 'spotify:user:…:playlist:<id>'
+        # url originally named. No undef-warning workaround is needed on this service.
+        $item{url}         = \&Plugins::Spotty::OPML::playlist;
+        $item{passthrough} = [ { uri => "spotify:playlist:$playlistId" } ];
+    }
     else {
         return undef;
     }
@@ -750,9 +1129,47 @@ sub _searchService {
     # "artist album" into one normalised query made the service's own fuzzy search
     # rank/drop the target (the lesson the sibling ListenBrainz plugin learned); an
     # artist-only search returns the discography so the year/title tiering below can pick
-    # the right same-named release. Octet-encode for the URI layer (a wide-char query warns).
-    my $artistQuery = $artist;
-    utf8::encode($artistQuery) if utf8::is_utf8($artistQuery);
+    # the right same-named release.
+    #
+    # ENCODING: there is no single right spelling, because the service plugins' own URL
+    # layers disagree — so build BOTH and let each branch pick (the sibling ListenBrainz
+    # plugin carries the same split as `query_enc`, LBF 0.9.82, after the Sigur Rós failure
+    # found in Discography on 2026-07-10):
+    #   * CHARACTERS for Qobuz (escapes with uri_escape_utf8), Tidal (transliterates with
+    #     Text::Unidecode) and Spotty (uri_escape_utf8 in _prepareCall) — handing those
+    #     octets double-encodes, so "Sigur Rós" goes out as "Sigur RÃ³s"/"Sigur RA3s" and
+    #     the search returns JUNK for any non-ASCII artist. Not empty: MEASURED live
+    #     2026-09-03, Qobuz returned 1 real hit of 88 (the rest things like "Sigue
+    #     Caminando") and TIDAL 8 of 74, which _albumMatches then rejects — so the user
+    #     sees "Could not find this album to play" either way, but the mechanism is
+    #     wrong/incomplete results, and on TIDAL the album may still be found by luck.
+    #     Never describe this as "returns nothing" — that is what stopped it being
+    #     recognised for two months.
+    #   * OCTETS for Deezer (complex_to_query).
+    #   * OCTETS FOR BANDCAMP TOO (0.1.144). It was exempt from both camps for exactly one
+    #     reason — its branch sends $query, not $artist, and _norm's old
+    #     `s/[^a-z0-9]+/ /g` left ASCII and nothing else, so the two spellings were the
+    #     same string and neither conversion could matter. 0.1.143 ENDED THAT INVARIANT
+    #     without noticing: the fold now keeps letters of every script, so
+    #     _norm('米津玄師 Lemon') is '米津玄師 lemon' as CHARACTERS where 0.1.142 produced
+    #     the bare ASCII 'lemon'. The old comment had already written down what to do when
+    #     that day came ("it acquires a camp and must pick one — Bandcamp's own layer wants
+    #     octets"), so this is that instruction being carried out rather than a new call.
+    #     The sibling ListenBrainz plugin reached the same answer independently and pins it
+    #     as `query_enc => 'bytes'` on the adapter that calls this very function
+    #     (Plugins::Bandcamp::Search::search, LBF Browse.pm), encoding at its own call site.
+    # Both conversions fail safe: decode leaves a non-UTF-8 byte string untouched, and
+    # encode is a no-op on a string that is already octets. Only the outgoing QUERY is
+    # affected — every branch matches candidates with _norm($artist) on the raw value, so
+    # this cannot change what matches, only what the service gives us to match against.
+    my $artistChars = $artist;
+    utf8::decode($artistChars) unless utf8::is_utf8($artistChars);
+    my $artistBytes = $artist;
+    utf8::encode($artistBytes) if utf8::is_utf8($artistBytes);
+    # Bandcamp's spelling of the COMBINED query, built the same fail-safe way: encode is a
+    # no-op on a string that is already octets, so a raw-CLI add is not corrupted either.
+    my $queryBytes = $query;
+    utf8::encode($queryBytes) if utf8::is_utf8($queryBytes);
 
     if ($source eq 'qobuz' && Plugins::Qobuz::Plugin->can('getAPIHandler')
                           && Plugins::Qobuz::Plugin->can('_albumItem')) {
@@ -763,7 +1180,7 @@ sub _searchService {
             my @cand;
             for my $a (@{ ($res && $res->{albums} && $res->{albums}{items}) || [] }) {
                 my $candArtist = ref $a->{artist} eq 'HASH' ? $a->{artist}{name} : '';
-                next unless _albumMatches(_norm($artist), _norm($album), $candArtist, $a->{title});
+                next unless _albumMatches(_norm($artist), _norm($album), $candArtist, $a->{title}, $album);
                 my $item = Plugins::Qobuz::Plugin::_albumItem($client, $a);
                 # Raw date field first; fall back to the year the renderer already shows on
                 # the item (e.g. "… (2026)") so we don't depend on the exact Qobuz key name.
@@ -773,7 +1190,7 @@ sub _searchService {
                 push @cand, [ $item, $a->{title}, $cy ];
             }
             $cb->(_bestMatches(\@cand, $album, $recYear) || _noMatch($client));
-        }, lc($artistQuery), 'albums');
+        }, lc($artistChars), 'albums');
         return;
     }
 
@@ -794,13 +1211,13 @@ sub _searchService {
                 if (defined $wantId && length $wantId && $pt->{album_id} eq $wantId) {
                     push @idHits, $it;
                 }
-                elsif (_albumMatches(_norm($artist), _norm($album), $pt->{artist}, $pt->{title})) {
+                elsif (_albumMatches(_norm($artist), _norm($album), $pt->{artist}, $pt->{title}, $album)) {
                     push @titleHits, $it;
                 }
             }
             my @out = @idHits ? @idHits : @titleHits;
             $cb->(@out ? \@out : _noMatch($client));
-        }, { search => $query });
+        }, { search => $queryBytes });
         return;
     }
 
@@ -817,14 +1234,14 @@ sub _searchService {
                 next unless ref $a eq 'HASH';
                 my $ar = $a->{artist} || ($a->{artists} && $a->{artists}[0]) || {};
                 my $candArtist = ref $ar eq 'HASH' ? $ar->{name} : '';
-                next unless _albumMatches(_norm($artist), _norm($album), $candArtist, $a->{title});
+                next unless _albumMatches(_norm($artist), _norm($album), $candArtist, $a->{title}, $album);
                 my $item = Plugins::TIDAL::Plugin::_renderAlbum($a);
                 my $cy = _yearOf($a->{releaseDate} // $a->{year})
                       || _yearOf($item->{name}) || _yearOf($item->{line1}) || _yearOf($item->{line2});
                 push @cand, [ $item, $a->{title}, $cy ];
             }
             $cb->(_bestMatches(\@cand, $album, $recYear) || _noMatch($client));
-        }, { type => 'albums', search => $artistQuery, limit => 20 });
+        }, { type => 'albums', search => $artistChars, limit => 20 });
         return;
     }
 
@@ -842,14 +1259,70 @@ sub _searchService {
                 next unless ref $a eq 'HASH';
                 my $ar = $a->{artist} || ($a->{artists} && $a->{artists}[0]) || {};
                 my $candArtist = ref $ar eq 'HASH' ? $ar->{name} : '';
-                next unless _albumMatches(_norm($artist), _norm($album), $candArtist, $a->{title});
+                next unless _albumMatches(_norm($artist), _norm($album), $candArtist, $a->{title}, $album);
                 my $item = Plugins::Deezer::Plugin::_renderAlbum($a);
                 my $cy = _yearOf($a->{release_date} // $a->{year})
                       || _yearOf($item->{name}) || _yearOf($item->{line1}) || _yearOf($item->{line2});
                 push @cand, [ $item, $a->{title}, $cy ];
             }
             $cb->(_bestMatches(\@cand, $album, $recYear) || _noMatch($client));
-        }, { search => $artistQuery, type => 'album', strict => 'off', limit => 20 });
+        }, { search => $artistBytes, type => 'album', strict => 'off', limit => 20 });
+        return;
+    }
+
+    # Spotify, via the Spotty plugin — an older, independent codebase, so almost every
+    # convention differs from the three branches above and each difference is load-bearing:
+    #
+    #  • getAPIHandler is a CLASS method (`->`, Plugin.pm:317), not the function-form call
+    #    Qobuz/TIDAL/Deezer use. It returns undef when this client has no Spotty account.
+    #  • the search key is `query`, not `search`, and `type` is SINGULAR 'album'
+    #    (API.pm:229). A wrong key here returns an empty list, not an error.
+    #  • it wants CHARACTERS, not octets: _prepareCall escapes with uri_escape_utf8
+    #    (API.pm:1293), so octets would double-encode an accented name here and find
+    #    nothing. It is in the SAME camp as Qobuz and Tidal — only Deezer and Bandcamp
+    #    want octets; see the encoding note above `$artistChars`. (An earlier version of
+    #    this comment claimed octets were "right for the other three", which was wrong
+    #    for two of them and documented a real bug as intended behaviour.) This branch
+    #    passed the raw $artist for a while, on the grounds that it is already the
+    #    character form on every path reaching here — true today, but nothing enforces
+    #    it, and the decode is a no-op on a string that is already characters. So send
+    #    $artistChars like the other two in this camp: identical output on every current
+    #    path, and correct rather than lucky if a byte-form producer is ever added.
+    #  • the album TITLE is `name` (the others say `title`), and `artist` is a plain string
+    #    holding the first credit, alongside the full `artists` list.
+    #  • the renderer lives in OPML, not Plugin, and yields url => \&OPML::album with the
+    #    album URI in passthrough — the same node _streamingAlbumNode rebuilds from an id.
+    #
+    # Errors are indistinguishable from a clean miss here, and that is Spotty's design, not
+    # an omission: its Pipeline feeds an error hash to the same extractor a result goes
+    # through, so an outage arrives as the same empty arrayref a genuine zero-hit search
+    # does. Nothing downstream can tell them apart, so both end at _noMatch — which is the
+    # honest answer for a replay attempt, and costs only a retry on the next play.
+    if ($source eq 'spotify' && Plugins::Spotty::Plugin->can('getAPIHandler')
+                             && Plugins::Spotty::OPML->can('_albumItem')) {
+        my $api = eval { Plugins::Spotty::Plugin->getAPIHandler($client) };
+        return $cb->(_noMatch($client)) unless $api;
+        $api->search(sub {
+            my $albums = shift;
+            my @cand;
+            for my $a (@{ (ref $albums eq 'ARRAY') ? $albums : [] }) {
+                next unless ref $a eq 'HASH';
+                my $candArtist = spottyArtistName($a);
+                next unless _albumMatches(_norm($artist), _norm($album), $candArtist, $a->{name}, $album);
+                # Guard the foreign renderer: we are inside an async callback, so a die
+                # here is caught by nothing — skip the bad candidate instead (the same
+                # treatment the sibling plugin gives every service's renderer).
+                my $item = eval { Plugins::Spotty::OPML::_albumItem($client, $a) };
+                if ($@ || ref $item ne 'HASH') {
+                    $log->warn("LL: Spotify _albumItem failed: $@") if $@;
+                    next;
+                }
+                my $cy = serviceYear($a)                      # release_date
+                      || _yearOf($item->{name}) || _yearOf($item->{line1}) || _yearOf($item->{line2});
+                push @cand, [ $item, $a->{name}, $cy ];
+            }
+            $cb->(_bestMatches(\@cand, $album, $recYear) || _noMatch($client));
+        }, { query => $artistChars, type => 'album', limit => 50 });
         return;
     }
 
@@ -911,40 +1384,344 @@ sub _serviceCan {
     return 1 if $source eq 'bandcamp' && Plugins::Bandcamp::Plugin->can('get_album');
     return 1 if $source eq 'tidal'    && Plugins::TIDAL::Plugin->can('getAlbum');
     return 1 if $source eq 'deezer'   && Plugins::Deezer::Plugin->can('getAlbum');
-    # A podcast EPISODE needs no service adapter at all — it's a single self-contained
-    # enclosure url, stored podcast://-wrapped, and replay is a straight handoff to the
-    # Podcast plugin's own protocol handler (which also keeps its resume-position
-    # tracking). So the only question is whether that handler exists on this server.
-    return 1 if $source eq 'podcast'  && _hasPodcastHandler();
+    # Spotify's album node is Plugins::Spotty::OPML::album, not a Plugin method — probe the
+    # sub this plugin actually calls, per the adapter spec's R8, rather than the more
+    # familiar-looking Plugin->can(...) that nothing here would invoke.
+    return 1 if $source eq 'spotify'  && Plugins::Spotty::OPML->can('album');
+    # Deezer's podcast episodes are the SAME shape under a different scheme: Deezer browses
+    # them as 'deezerpodcast://<id>' (verified live — NOT 'deezer://', which is why they were
+    # refused as an unknown source until 0.1.124). A saved episode is kind='track', and a
+    # track row replays straight from its stored url (Sources::_trackPlayableItems — no album
+    # node, no matcher, no search), so the question here is the same one 'podcast' asks: does
+    # a handler for that scheme exist. Deliberately NOT folded onto 'deezer' in %SCHEME: the
+    # album adapter has nothing to do with it, and a distinct source tag is what lets Browse
+    # mark the row as a podcast rather than as a Deezer track.
+    return 1 if $source eq 'deezerpodcast' && _hasSchemeHandler('deezerpodcast://1');
     return 0;
 }
 
-# Is the built-in Podcast plugin's podcast:// protocol handler registered? Asked with a
-# representative url because handlerForURL parses the scheme off one (the same call
-# trackAlbumId already relies on).
-sub _hasPodcastHandler {
-    return eval {
-        Slim::Player::ProtocolHandlers->handlerForURL('podcast://https://example.com/e.mp3')
-    } ? 1 : 0;
+# The same "don't store what we can't replay" gate as _serviceCan, asked of the PLAYLIST
+# call rather than the album one. Kept separate rather than folded into _serviceCan: a
+# service can perfectly well expose one and not the other (Bandcamp has no playlists at
+# all), and the album path must not start believing in a service because its playlist
+# call exists, or vice versa.
+sub _serviceCanPlaylist {
+    my ($source) = @_;
+    return 0 unless defined $source && length $source;
+    return 1 if $source eq 'qobuz'  && Plugins::Qobuz::Plugin->can('QobuzPlaylistGetTracks');
+    return 1 if $source eq 'tidal'  && Plugins::TIDAL::Plugin->can('getPlaylist');
+    return 1 if $source eq 'deezer' && Plugins::Deezer::Plugin->can('getPlaylist');
+    return 1 if $source eq 'spotify' && Plugins::Spotty::OPML->can('playlist');
+    return 0;
+}
+
+# Is this row a podcast EPISODE? TWO sources supply them and they answer in two different
+# ways, which is the whole reason this takes a URL as well as a source:
+#
+#   Deezer                  source 'deezerpodcast'   — its own scheme, so its own source tag
+#   Spotify (Spotty)        source 'spotify'         — NO tag of its own; only the url says
+#
+# THE BUILT-IN Podcasts app was a third until 0.1.136, under source 'podcast'. That path is
+# REMOVED and its rows are DELETED by migration rung 6 (DB::_purgeRemovedPodcasts) rather than
+# recognised here — so the absence of a 'podcast' arm below is deliberate, not an oversight,
+# and re-adding one was raised and declined. It would be unreachable: no writer can produce
+# that source any more (Sources::_serviceCan has no arm for it, so every add path's
+# _isReplayableSource gate rejects it, and Plugin's @KNOWN_RADIO_CMDS suppresses the Add on
+# the app's browse rows), and no row survives the purge. The only window where one could be
+# asked about is a boot in which rung 5 withheld its stamp so rung 6 waited — and such a row
+# is unplayable in that boot regardless, so the arm would buy a glyph and nothing else.
+#
+# Spotify is the one that cannot be answered from the source. Spotty plays an episode through
+# 'spotify://episode:<id>' — the same scheme as a music track — so a source-only predicate
+# reads it as an ordinary Spotify track, which is how a Spotify episode came to be offered
+# the Wish List while the identical Deezer one was redirected out of it (0.1.126). The url is
+# the only place the difference is stated, so the url is asked for.
+#
+# ONE predicate rather than an `eq` test at each site, because the question has FOUR
+# consumers — Browse's glyph, its type word, the Wish List rule, and the type word's source
+# segment — and a fifth would otherwise be written without them. That is exactly how
+# 'podcast' came to be spelled out at each site before 0.1.124.
+#
+# Asked of the STORED shape (source + play url), never of the menu the row was tapped in:
+# Material builds a menu per surface, not per row.
+#
+# Both Spotify spellings are accepted. Spotty's favurl is a bare URI ('spotify:episode:<id>')
+# and normaliseFavurl inserts the '//' before anything stores it, so a row written by 0.1.113
+# or later always carries the '//' form — but a row saved before that normalisation existed
+# can carry the bare one, and reading it as a music track is precisely the bug this closes.
+sub isPodcastEpisode {
+    my ($source, $url) = @_;
+    if (defined $source && length $source) {
+        return 1 if $source eq 'deezerpodcast';
+    }
+    return defined spotifyEpisodeUri($url) ? 1 : 0;
+}
+
+# A Spotify episode's canonical URI ('spotify:episode:<id>'), or undef if this url is not one.
+#
+# USED AS A PREDICATE, not for its value (0.1.127). Two callers: isPodcastEpisode above, which
+# only asks whether it answered, and _saveTrackRecord, which uses it as the flag that says
+# "this row's title and artist are episode-shaped, correct them". Nothing consumes the URI
+# itself any more — 0.1.126's `Plugins::Spotty::API::episode` lookup, which wanted the bare
+# form, was removed with the rest of that path.
+#
+# It still RETURNS the URI rather than 1, and that is deliberate: it is the one place the
+# shape is written out, so a future caller that does need the id has somewhere to get it that
+# cannot disagree with the predicate. A second spelling anywhere would mean a row that is a
+# podcast to one reader and a music track to another.
+#
+# Both spellings are accepted. Spotty's favurl is the bare URI and normaliseFavurl inserts the
+# '//' before anything is stored, so a row written from 0.1.113 on carries
+# 'spotify://episode:<id>' — but a row saved before that normalisation existed carries the bare
+# one, and reading THAT as a music track is the bug this closes.
+sub spotifyEpisodeUri {
+    my ($url) = @_;
+    return undef unless defined $url && length $url;
+    return ($url =~ m{^spotify:(?://)?(episode:[^/?#]+)$}i) ? "spotify:$1" : undef;
+}
+
+# Strip the release date Spotty prefixes onto an episode's browse-row title.
+#
+# OPML::episodesList builds the row as `join(' - ', $episode->{release_date}, $title)` (read
+# from the plugin source 2026-09-04), and Material hands us that whole string as $TITLE — so
+# a saved episode was titled "2026-01-05 - Mission Killer". That is not cosmetic: Spotty's
+# own getMetadataFor reports the PLAIN name at play time, so the prefixed title never matched
+# Played's metadata fallback (DB::findSavedTrack keys on the normalised track title).
+#
+# Spotify's release_date precision varies, so 'YYYY-MM-DD' and 'YYYY-MM' are both matched,
+# anchored, and only with the exact ' - ' separator that join built. A BARE 'YYYY - ' is
+# DELIBERATELY NOT stripped, even though Spotify can emit that precision: it is
+# indistinguishable from a real episode title — "1979 - The Year In Review" is a perfectly
+# ordinary name — and mangling a genuine title is worse than leaving a date on a rare one.
+# Podcast episodes carry day precision essentially always; shows are what lose it.
+sub stripEpisodeDatePrefix {
+    my ($title) = @_;
+    return $title unless defined $title && length $title;
+    my $t = $title;
+    return $title unless $t =~ s{^\d{4}-\d{2}(?:-\d{2})? - (?=\S)}{};
+    return $t;
+}
+
+# How a source is written in a row's subtitle. `ucfirst` was the whole rule until a source
+# tag stopped being a service name: 'deezerpodcast' would render "Deezerpodcast". Only the
+# exceptions are listed; everything else keeps ucfirst, so adding a service needs no entry.
+my %SOURCE_LABEL = (
+    deezerpodcast => 'Deezer',
+);
+sub sourceLabel {
+    my ($source) = @_;
+    return '' unless defined $source && length $source;
+    return $SOURCE_LABEL{$source} || ucfirst($source);
+}
+
+# Is a protocol handler registered for this url's scheme? The one question a self-contained
+# play url has to answer, asked with a SAMPLE url rather than a bare scheme because that is
+# the interface LMS exposes. Guarded: handlerForURL dies on some malformed input.
+sub _hasSchemeHandler {
+    my ($sample) = @_;
+    return eval { Slim::Player::ProtocolHandlers->handlerForURL($sample) } ? 1 : 0;
+}
+
+# Latin folding + apostrophe elision, shared with DB::_norm and _normStrict so all
+# three normalisers agree about what a name is. It lives in DB.pm — see the block
+# comment there for why the authority sits with the durable-key consumer rather
+# than here with the rest of the matcher.
+#
+# Reached through ->can at RUNTIME so this leaf module gains no compile-time
+# dependency on DB.pm (neither requires the other; Plugin.pm loads both at init,
+# long before any match runs). The fallback is a plain lc, which is what this sub
+# did before 0.1.112 — a degraded MATCH, thrown away at the end of the request.
+# That is the whole reason the table is not kept here: the same fallback on the
+# dedupe-key path would write a wrong key into a UNIQUE column, permanently.
+sub _fold {
+    my $f = Plugins::ListenLater::DB->can('foldLatin');
+    return $f ? $f->($_[0]) : lc($_[0] // '');
+}
+
+# The punctuation pass the two MATCH normalisers share (0.1.143). Deliberately the same
+# shape as DB::_norm's, so the gate, the ranker and the stored key agree about which
+# characters carry a name — they differ in what they strip BEFORE this point (parens), which
+# is the difference that is meant to exist.
+#
+# \w is Unicode-aware on a decoded string, and _fold decodes. If DB.pm were somehow absent
+# _fold degrades to a plain `lc` with no decode, and this pass then behaves as the old one
+# did on those bytes: a worse live match, discarded at the end of the request, which is the
+# documented trade in _fold's header.
+sub _punctPass {
+    my $s = shift // '';
+
+    # STYLISED LETTERS — a punctuation mark standing in for a LETTER (0.1.145). Copied
+    # VERBATIM from the fleet (PitchforkReviews::Browse::_norm, PFR 0.7.8, 2026-07-21), which
+    # LL never received: that rule predates LL joining the matcher sync at 0.1.112, and the
+    # 0.1.112 port was scoped to the three Discography-origin rules — it took two and skipped
+    # the compound-word collapse with a stated reason. This fourth rule appears in that entry
+    # neither as taken nor as skipped. It was MISSED, not decided.
+    #
+    # What it costs to be without it: `_artistMatch` is an exact-token SUBSET test and the
+    # tokens don't survive, so 'P!nk' keyed 'p nk' against 'pink' and matched NOTHING. In LL
+    # that means the row silently never moves to Played — the plugin's core feature — which is
+    # the same failure the apostrophe rule fixed in 0.1.112.
+    #
+    # ONLY '!' gets the word-boundary test, because only '!' has a genuine decorative use
+    # (Wham!, Panic!, Godspeed You!, Layo & Bushwacka!) — those already worked here, since a
+    # trailing mark falls through to the separator pass either way. '$'/'@' are unconditional:
+    # a trailing '$' is an 's' ($uicideboy$).
+    #
+    # THE `else` BRANCH IS THE NON-OBVIOUS HALF AND MUST NOT BE SIMPLIFIED AWAY. A name made
+    # ENTIRELY of marks ('!!!', a real band) would otherwise reach the fallback below, and
+    # while that fallback now keeps it non-empty, folding to 'iii' is what agrees with the
+    # fleet. Deleting the branch in a repo WITHOUT that fallback sends the name to '', and
+    # LL's gates read empty as ABSENT — i.e. the 0.1.143 bug in a new costume.
+    #
+    # '&'/'+' -> ' and ' CHANGES THE TOKEN SET, and unlike every other rule in this pass it
+    # can COST a match as well as win one. `_artistMatch` is a MANDATORY-subset test, so an
+    # injected token is a new REQUIREMENT on whichever side is shorter — it does not merely
+    # add an alternative spelling. The "measured on five &/+ pairs, all matching before and
+    # after" claim that stood here was hand-built and tested only the winning direction.
+    #
+    # MEASURED 2026-09-11 — every &/+ credit against every other name in a real 8,958-artist
+    # library, old pass vs new:
+    #   WINS  1 — 'Carole King & Gerry Goffin' vs 'Goffin And King'. The other side spells
+    #             'and' as a WORD and is the SHORTER string, so plain stripping failed it.
+    #   COSTS 1 — 'Davie Allan & the Arrows' vs 'The Arrows feat. Davie Allan'. The other
+    #             side carries a DIFFERENT connector, so the injected 'and' matches nothing.
+    # Net zero, which is why the rule STAYS. A loss needs the &-side to be the shorter string
+    # AND the other connector to run 4+ characters ('with'/'feat'/'featuring'); a shorter one
+    # ('vs') fails before and after, so it is not a regression. Both pinned in t_refold.pl §3d.
+    #
+    # IN THE SHAPE THAT ACTUALLY DRIVES PLAYED THERE IS NO EFFECT AT ALL. Played's fallback
+    # compares a playing TRACK's artist to the stored ALBUM artist, and across 43,684 tracks
+    # no within-album credit pair flips either way. A hand-built &-pair proves the BRANCH,
+    # never the POPULATION (see CLAUDE.md's standing rule) — do not re-report one as live.
+    #
+    # It DOES change the Bandcamp outbound query text (_searchService builds it from _norm) —
+    # that string is still ASCII by construction here, so it acquires no encoding hazard, but
+    # the query is re-verified live rather than assumed. See the 0.1.144 entry.
+    $s =~ s/\$/s/g;
+    $s =~ s/\@/a/g;
+    if ($s =~ /[\p{Alnum}]/) { $s =~ s/(?<=\w)!(?=\w)/i/g }
+    else                     { $s =~ s/!/i/g }
+    $s =~ s/\x{20ac}/e/g;   # €
+    $s =~ s/\x{a3}/l/g;     # £
+    $s =~ s/\x{a5}/y/g;     # ¥
+    $s =~ s/[&+]/ and /g;
+
+    # The underscore substitution runs FIRST, and the order is the whole point — see the
+    # block comment in DB::_norm, which carries the measurement. Briefly: '_' is a \w
+    # character, so running the non-word pass first leaves it out of the separator run
+    # round it and a mixed run like '_-_' collapses to three spaces instead of one.
+    # HERE that is a live MATCH failure, not just a key change: a saved
+    # 'Boards_of_Canada_-_Roygbiv' stops matching the service's spelling with spaces.
+    my $w = $s;
+    $w =~ s/_+/ /g;
+    $w =~ s/[^\w]+/ /g;
+    $w =~ s/^\s+|\s+$//g;
+    return $w if length $w;
+    # An all-punctuation name ('†††', '---', '...', '?') would otherwise read as ABSENT and
+    # hand the lenient gates a free pass, exactly as an erased non-Latin one did.
+    #
+    # THE EXAMPLES ARE NOT DB::_norm's, AND ITS LIST MUST NOT BE COPIED BACK OVER THIS ONE.
+    # It was, and stood wrong from 0.1.143 to 0.1.151. DB::_norm has no stylised-letter rule
+    # and no '&'/'+' rule, so there '!!!' and '+/-' genuinely do reach the fallback. HERE two
+    # of the rules above intercept them first and neither can arrive:
+    #   '!!!'  ->  the else branch folds it to 'iii'  (deliberate — see its own comment above)
+    #   '+/-'  ->  '&'/'+' -> ' and '  folds it to 'and'
+    # What still arrives is a name whose marks NO rule above claims: '†††', '---', '...', '?'.
+    # Executed, not reasoned, 2026-09-11; pinned in t_refold.pl §3f.
+    my $p = $s;
+    $p =~ s/\s+//g;
+    return $p;
 }
 
 # Normalise for fuzzy MATCHING. NB: intentionally differs from DB::_norm — this one
 # also STRIPS "(…)"/"[…]" (deluxe/remaster/edition qualifiers) so a saved title
 # matches the service's variant. Don't unify it with DB::_norm, whose dedupe key
 # must keep those qualifiers distinct.
+#
+# FLEET MATCHER SYNC (LL 0.1.112): folding and apostrophe elision came across from
+# DSC/PFR/LBF; the LENIENT gates below (empty artist accepts — saved-item replay,
+# LL 0.1.66) are deliberately NOT aligned and stay pinned as an LL variant.
+#
+# 0.1.143 — AND IT KEEPS LETTERS OF EVERY SCRIPT, for a reason that is sharper here than on
+# the key. `s/[^a-z0-9]+/ /g` does not fold 米津玄師 or Кино, it ERASES them to ''. On the
+# dedupe key that silently merged rows; HERE it aims the LENIENT gates the wrong way, because
+# they read an empty artist as ABSENT and absent means ACCEPT ANYTHING:
+#   * `_artistMatch` answers 1 when either side is empty, so a play of 'Lemon' by 米津玄師
+#     MARKED a stored 'Lemon' by 中島みゆき as Played — the exact outcome the comment above
+#     Played::_albumFallback promises cannot happen. Measured 2026-09-10.
+#   * `_albumMatches` skips its artist check entirely on an empty artist, so a saved album
+#     could replay another artist's release of the same title.
+# The leniency is CORRECT and stays — a streaming Now-Playing add can genuinely carry no
+# artist (LL 0.1.66), and `_norm('')` is still ''. What was wrong is that an ERASED name was
+# indistinguishable from an ABSENT one. Same distinction as DB::_norm; see its header.
+#
+# NOTHING HERE IS PERSISTED, so unlike DB::_norm this owes no migration rung — a match is
+# recomputed every request. That asymmetry is the point of §5 in t_refold.pl.
 sub _norm {
-    my $s = lc($_[0] // '');
+    my $s = _fold($_[0]);
     $s =~ s/\([^)]*\)//g;
     $s =~ s/\[[^\]]*\]//g;
-    $s =~ s/[^a-z0-9]+/ /g;
-    $s =~ s/^\s+|\s+$//g;
+    $s = _punctPass($s);
+    return $s;
+}
+
+# Lowercase and strip whitespace, KEEPING every mark. Copied verbatim from the fleet
+# (0.1.145) as the escape hatch for `_albumMatches`'s short-title branch below. It is not a
+# third normaliser competing with _norm/_normStrict — it is only ever reached when those two
+# have answered (near) nothing, and it deliberately does no folding at all, because the marks
+# ARE the name there.
+sub _punctNorm {
+    my $s = shift // '';
+    if (!utf8::is_utf8($s) && $s =~ /[^\x00-\x7f]/) {
+        my $d = $s;
+        $s = $d if utf8::decode($d);
+    }
+    $s = lc($s);
+    $s =~ s/\s+//g;
     return $s;
 }
 
 # Candidate title must BE or START WITH our album, and artists must match.
 sub _albumMatches {
-    my ($artistNorm, $albumNorm, $candArtist, $candTitle) = @_;
-    return 0 if length $albumNorm < 2;
+    my ($artistNorm, $albumNorm, $candArtist, $candTitle, $albumRaw) = @_;
+
+    # A TITLE THAT NORMALISES TO (NEAR) NOTHING — Sigur Rós's "( )", a one-character CJK
+    # title. `length $albumNorm < 2` rejected these outright, so they could never match from
+    # any source. The fleet has had this escape hatch since DSC 2026-07-10 and LL never took
+    # it; ported at 0.1.145 with the same shape, LL taking FROM the fleet for once.
+    #
+    # Compare a punctuation-PRESERVING form instead: "( )" == "()" but != "( ) (live)".
+    # EXACT equality only — the prefix rule below would let "x" swallow "xx".
+    #
+    # THE ARTIST GATE IS MANDATORY ON OUR SIDE ONLY, AND THAT ASYMMETRY IS DELIBERATE.
+    # Say it precisely, because saying "the artist gate is mandatory here" (0.1.145–0.1.147)
+    # read as a promise the next line does not keep, and FOUR review rounds reported the
+    # difference as a bug. `return 0 if !defined $artistNorm || $artistNorm eq ''` enforces the
+    # RECORD side. The CANDIDATE side is then handed to `_artistMatch`, which answers 1 when
+    # EITHER side is empty — so a candidate with no artist is accepted on the title alone.
+    # That is not an oversight in the port; it is LL's 0.1.66 replay leniency, pinned.
+    #
+    # DECLINED FOUR TIMES (Simon, 2026-09-10) — do not report it a fifth. The reason is a fact
+    # about the SERVICES, not about this branch: every album search credits an artist, so the
+    # `''` in `ref $a->{artist} eq 'HASH' ? … : ''` at all five call sites is a SHAPE default
+    # against a malformed response, not a population. Tightening to the fleet's strict variant
+    # would change nothing real and would cost the replay leniency. The full per-side argument
+    # is in CLAUDE.md §A2 "AN ARTIST-LESS MUSIC ROW DOES NOT EXIST"; t_refold.pl §6 asserts
+    # this branch's behaviour so the decision is a test, not just prose.
+    #
+    # WHAT IS *NOT* RARE, correcting the ledger's own example: the entry called a saved title
+    # normalising under 2 characters a second non-population and cited only "( )". Measured
+    # 2026-09-10 — `x`, `÷`, `=`, `-` (four Ed Sheeran albums), `4` (Beyoncé), `∞`, `…` and any
+    # one-character CJK title all enter here. The branch is ORDINARY; only the artist-less
+    # candidate is not. Anyone re-opening this needs a NAMED SERVICE SURFACE that returns an
+    # album with no artist, not a hand-built hash — see the ledger's method-error note.
+    if (length($albumNorm) < 2) {
+        my $ap = _punctNorm($albumRaw);
+        return 0 unless length $ap;
+        return 0 unless _punctNorm($candTitle) eq $ap;
+        return 0 if !defined $artistNorm || $artistNorm eq '';
+        return _artistMatch($artistNorm, _norm($candArtist));
+    }
 
     my $ct = _norm($candTitle);
 
@@ -1054,6 +1831,34 @@ sub serviceYear {
     return '';
 }
 
+# The artist name off a SPOTTY album object. Two shapes reach us and both are legitimate:
+# Spotty's cache normalises the album to a plain `artist` STRING (API/Cache.pm), while the raw
+# Spotify API shape keeps `artists` as an array of hashes. Prefer the string, fall back to the
+# first entry of the array.
+#
+# ONE sub because two call sites ask the same question of the same object — _searchService's
+# Spotify branch (is this candidate the right artist?) and Plugin::_backfillStreamingArtist
+# (what artist does this row lack?). They were written out separately, so a change to Spotty's
+# response shape had to be found in two places with nothing connecting them; missing one leaves
+# saved rows artist-less, and an artist-less row silently never moves to Played.
+#
+# NOT to be folded together with the Tidal and Deezer extractions in _searchService, which look
+# similar and are a DIFFERENT shape: there `artist` is a HASH you read ->{name} from, where
+# Spotty gives a string.
+#
+# Returns '' rather than undef when nothing is found, so a caller can test length alone.
+sub spottyArtistName {
+    my ($h) = @_;
+    return '' unless ref $h eq 'HASH';
+    return $h->{artist} if defined $h->{artist} && !ref $h->{artist};
+    return $h->{artists}[0]{name}
+        if ref $h->{artists} eq 'ARRAY'
+        && ref $h->{artists}[0] eq 'HASH'
+        && defined $h->{artists}[0]{name}
+        && !ref $h->{artists}[0]{name};
+    return '';
+}
+
 # The release year of a LIBRARY album, straight from the local database. Free, always
 # available, and authoritative — the mirror of libraryTrackCount.
 #
@@ -1074,11 +1879,20 @@ sub libraryAlbumYear {
 # Like _norm but KEEPS distinguishing "(...)" content (e.g. "(LP4)") as words — only
 # quality/format qualifiers are dropped — so replay can tell same-base-title releases
 # apart. (_norm strips ALL parens: right for the fuzzy title GATE, but it collapses these.)
+#
+# FOLDED THE SAME WAY AS _norm (LL 0.1.112), and that is required rather than tidy:
+# _albumMatches gates a candidate with _norm and _bestMatches then RANKS the very
+# same candidate with this sub. If one folded "England's" and the other spaced it,
+# a title could clear the gate and then fail its own exact-title tier — the ranker
+# silently disagreeing with the gate about which release it is looking at.
 sub _normStrict {
-    my $s = lc($_[0] // '');
+    my $s = _fold($_[0]);
     $s =~ s/\((?:hi-res[^)]*|explicit|mono|stereo|album|track|remaster(?:ed)?[^)]*|deluxe[^)]*)\)//g;
-    $s =~ s/[^a-z0-9]+/ /g;
-    $s =~ s/^\s+|\s+$//g;
+    # Shares _punctPass with _norm for the same reason it shares _fold: the gate normalises a
+    # candidate with one and the ranker re-reads it with the other, so a divergence lets a
+    # title clear the gate and then fail its own exact-title tier. 0.1.143 — before this, both
+    # erased a non-Latin title, which agreed but agreed on nothing.
+    $s = _punctPass($s);
     return $s;
 }
 

@@ -265,5 +265,74 @@ my $ty;
 $S->can('classifyRelType')->(undef, 'tidal', 'aid', {}, sub { $ty = $_[3] }, undef);
 is('tidal offers no year',                 ($ty || '(none)'), '(none)');
 
+# ---------------------------------------------------------------------------
+section('Spotify — the second service that answers type, count and year in one fetch');
+#
+# Spotty's public album call returns the album OBJECT (not just a tracklist), and its cache
+# keeps album_type, total_tracks and release_date on the way through — so Spotify gets the
+# same shortcut Qobuz has, with nothing private touched.
+#
+# THE TRAP THIS SECTION EXISTS FOR: Spotify has no EP class. An EP comes back as
+# album_type 'single'. Taken at face value that is a real bug and not a cosmetic one —
+# 'single' means "exactly one track" here, so Played would mark a 5-track EP heard after its
+# first track. Nothing Spotify-specific guards it; singleIsWrong and _settle do, which is
+# why these cases are asserted through classifyRelType rather than against a guard clause.
+our $SPALBUM;
+{
+    package Plugins::Spotty::API;
+    sub album { my ($s, $cb, $args) = @_; $main::LASTURI = $args->{uri}; $cb->($main::SPALBUM) }
+    package Plugins::Spotty::Plugin;
+    sub getAPIHandler { return bless {}, 'Plugins::Spotty::API' }
+}
+our $LASTURI;
+sub spotify {
+    my ($album, $claim, $fallback) = @_;
+    $SPALBUM = $album; @LIST = @{ $fallback || [] }; $resolves = 0;
+    my ($type, $count, $prov);
+    $lastYear = undef; $LASTURI = undef;
+    $S->can('classifyRelType')->(undef, 'spotify', 'aid', {},
+        sub { ($type, $count, $prov, $lastYear) = @_ }, $claim);
+    return ($type, $count, $resolves, $prov);
+}
+
+my ($s1, $sc1, $sr1, $sp1) = spotify({ album_type => 'album', total_tracks => 12, release_date => '2013-05-17' });
+is('Spotify album/12 -> album',            $s1,  'album');
+is('...with the catalogue count',          $sc1, 12);
+is('...and no tracklist resolved',         $sr1, 0);
+is('...flagged provisional, like Qobuz',   $sp1, 1);
+is('...and the year off release_date',     $lastYear, 2013);
+
+# It must ask for a full Spotify URI, never a bare id: API::album matches /album:(.*)/ and
+# gets nothing from an id on its own.
+is('the album is asked for by URI',        $LASTURI, 'spotify:album:aid');
+
+my ($s2, $sc2, $sr2) = spotify({ album_type => 'single', total_tracks => 1 });
+is('a real single stays a single',         $s2,  'single');
+is('...with no tracklist resolved',        $sr2, 0);
+
+# The EP trap. album_type says 'single' and total_tracks says 5, so the short-circuit MUST
+# refuse to fire and prove the claim against a real tracklist instead.
+my ($s3, $sc3, $sr3) = spotify({ album_type => 'single', total_tracks => 5 }, undef, $tracks->(5));
+is('a Spotify EP is NOT stored as single', $s3,  'ep');
+is('...counted from the real tracklist',   $sc3, 5);
+is('...which it went and resolved',        $sr3, 1);
+
+# The same demotion must land on 'album', not unconditionally 'ep', beyond the EP ceiling.
+my ($s4) = spotify({ album_type => 'single', total_tracks => 9 }, undef, $tracks->(9));
+is('a 9-track "single" -> album',          $s4,  'album');
+
+# 'compilation' is a Spotify album_type too, and maps to album.
+my ($s5) = spotify({ album_type => 'compilation', total_tracks => 20 });
+is('compilation -> album',                 $s5,  'album');
+
+# A '&rt=' claim still outranks the service's own word, exactly as on Qobuz.
+my ($s6) = spotify({ album_type => 'album', total_tracks => 4 }, 'EP');
+is('a claimed EP beats album_type',        $s6,  'ep');
+
+# Degradation: no object back at all must fall through to the tracklist, not die or invent.
+my ($s7, $sc7, $sr7) = spotify(undef, undef, $tracks->(8));
+is('no album object -> resolve instead',   $s7,  'album');
+is('...and it did resolve',                $sr7, 1);
+
 printf "\n%d passed, %d failed\n", $pass, $fail;
 exit($fail ? 1 : 0);

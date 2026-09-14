@@ -1,5 +1,11 @@
 # Custom actions on streaming / app browse items
 
+> **STATUS: MERGED and RELEASED — historical (marked 2026-09-10).** Submitted as
+> [PR #1235](https://github.com/CDrummond/lms-material/pull/1235), landed on `dev` (`b631754`),
+> merged to `master` (`519b03a`) and shipped in Material **6.4.4**. Kept as the record of the
+> argument; the plugin has used the released mechanism since 0.1.28. This is the draft body,
+> not what the merged PR ended up saying.
+
 ## What & why
 Custom actions currently only appear on **library** items. There is no way to add one to a **streaming/app** album or track while browsing a service (Qobuz/Tidal/Deezer/Bandcamp — new releases, an artist's discography, search), because that content is delivered as SlimBrowse `item_loop` items which bypass Material's custom-action wiring.
 

@@ -130,7 +130,20 @@ sub _renderSection {
 use constant GLYPH_MULTI   => "\x{266b}";
 use constant GLYPH_SINGLE  => "\x{266a}";
 use constant GLYPH_PODCAST => "\x{275d}";
+#   ≡ (identical to) = a streaming-service PLAYLIST — a list of tracks, not a release
+use constant GLYPH_PLAYLIST => "\x{2261}";
 use constant SEP           => " \x{00b7} ";   # " · " subtitle separator
+
+# Is this stored row a podcast episode? The one carrier, asked with the two facts that
+# identify one — the source tag and the stored play url. Spotify's episodes have no source
+# tag of their own (they are 'spotify', like its music tracks) and are told apart only by
+# the url, so passing the url is not optional here: without it a Spotify episode renders
+# with the ♪ note and the word "Track". See Sources::isPodcastEpisode.
+sub _isPodcast {
+    my ($rec) = @_;
+    my $ref = (ref $rec->{ref} eq 'HASH') ? $rec->{ref} : {};
+    return Plugins::ListenLater::Sources::isPodcastEpisode($rec->{source}, $ref->{url});
+}
 
 # The glyph for a row: ❝ for a podcast episode, ♪ for one track, ♫ for more than one.
 #
@@ -147,8 +160,9 @@ use constant SEP           => " \x{00b7} ";   # " · " subtitle separator
 # their type was classified from the real library count at add time, so it is already sound.
 sub _glyphFor {
     my ($rec) = @_;
-    return GLYPH_PODCAST if ($rec->{source} || '') eq 'podcast';
-    return GLYPH_SINGLE  if ($rec->{kind}   || '') eq 'track';
+    return GLYPH_PODCAST  if _isPodcast($rec);
+    return GLYPH_PLAYLIST if ($rec->{kind}   || '') eq 'playlist';
+    return GLYPH_SINGLE   if ($rec->{kind}   || '') eq 'track';
 
     my $n = $rec->{track_count};
     if (defined $n && $n =~ /^\d+$/ && $n > 0) {
@@ -162,9 +176,10 @@ sub _glyphFor {
 # Dispatch a stored row to the right renderer.
 sub _row {
     my ($client, $rec) = @_;
-    return (($rec->{kind} || '') eq 'track')
-        ? _trackRow($client, $rec)
-        : _albumRow($client, $rec);
+    my $kind = $rec->{kind} || '';
+    return _trackRow($client, $rec)    if $kind eq 'track';
+    return _playlistRow($client, $rec) if $kind eq 'playlist';
+    return _albumRow($client, $rec);
 }
 
 # The type word shown as the first segment of a row's subtitle. A podcast episode says
@@ -173,7 +188,8 @@ sub _row {
 # relTypeFor).
 sub _typeLabel {
     my ($client, $rec) = @_;
-    return cstring($client, 'PLUGIN_LL_TYPE_PODCAST') if ($rec->{source} || '') eq 'podcast';
+    return cstring($client, 'PLUGIN_LL_TYPE_PODCAST') if _isPodcast($rec);
+    return cstring($client, 'PLUGIN_LL_TYPE_PLAYLIST') if ($rec->{kind} || '') eq 'playlist';
     return cstring($client, 'PLUGIN_LL_TYPE_TRACK') if ($rec->{kind} || '') eq 'track';
     my $rt = $rec->{rel_type} || 'album';
     my %str = (album => 'PLUGIN_LL_TYPE_ALBUM', ep => 'PLUGIN_LL_TYPE_EP', single => 'PLUGIN_LL_TYPE_SINGLE');
@@ -204,7 +220,41 @@ sub _albumRow {
     return {
         name        => $name,
         line2       => _glyphFor($rec) . ' ' . _typeLabel($client, $rec)
-                       . SEP . ucfirst($rec->{source} || ''),
+                       . SEP . Plugins::ListenLater::Sources::sourceLabel($rec->{source}),
+        image       => $rec->{artwork} || _iconFor($rec->{status}),
+        type        => 'playlist',
+        url         => \&_albumTracks,
+        passthrough => [ { id => $rec->{id} } ],
+        itemActions => {
+            info => {
+                command     => [ 'listenlater', 'contextmenu' ],
+                fixedParams => { id => $rec->{id} },
+            },
+        },
+    };
+}
+
+# A saved streaming PLAYLIST row. Structurally an album row — type => 'playlist' + the
+# same _albumTracks coderef, so it plays and drills into the service's LIVE tracklist, and
+# carries the same "…" → More menu — but its NAME line is the playlist title ALONE.
+#
+# A release row reads "Artist – Album (Year)"; a playlist has neither an artist nor a
+# release year, so both are omitted rather than rendered empty. Written as its own renderer
+# (the precedent _trackRow set) instead of branching inside _albumRow, because that name
+# line is the whole difference and burying it in conditionals would obscure both.
+#
+# The curator, when the row supplied one, goes in the SUBTITLE — "≡ Playlist · Qobuz ·
+# Qobuz UK" — which is where a name that isn't the artist belongs.
+sub _playlistRow {
+    my ($client, $rec) = @_;
+
+    my $sub = _glyphFor($rec) . ' ' . _typeLabel($client, $rec)
+            . SEP . ucfirst($rec->{source} || '');
+    $sub .= SEP . $rec->{artist} if defined $rec->{artist} && length $rec->{artist};
+
+    return {
+        name        => $rec->{album_title} // cstring($client, 'PLUGIN_LL_UNKNOWN_ALBUM'),
+        line2       => $sub,
         image       => $rec->{artwork} || _iconFor($rec->{status}),
         type        => 'playlist',
         url         => \&_albumTracks,
@@ -233,9 +283,15 @@ sub _trackRow {
 
     my $sub = _glyphFor($rec) . ' ' . _typeLabel($client, $rec);
     $sub .= SEP . $rec->{album_title} if defined $rec->{album_title} && length $rec->{album_title};
-    # The source segment is dropped for a podcast: the type word already reads "Podcast",
-    # so appending it again would give "Podcast · <show> · Podcast".
-    $sub .= SEP . ucfirst($rec->{source} || '')
+    # The source segment is dropped for the BUILT-IN podcast source only: its type word
+    # already reads "Podcast", so appending it again would give "Podcast · <show> · Podcast".
+    # A SERVICE's episode keeps it — "Podcast · <show> · Deezer", and equally
+    # "Podcast · <show> · Spotify" — because that says something the type word does not,
+    # namely which service you will be streaming it from (0.1.124, 0.1.126). This one really
+    # IS a source test rather than a podcast test, which is why it does not ask _isPodcast:
+    # the question here is "would the label repeat the type word", and only the built-in
+    # source's label does.
+    $sub .= SEP . Plugins::ListenLater::Sources::sourceLabel($rec->{source})
         if $rec->{source} && $rec->{source} ne 'podcast';
 
     return {
@@ -269,7 +325,9 @@ sub homeShelf {
 sub _albumTracks {
     my ($client, $callback, $args, $pt) = @_;
 
-    my $rec = Plugins::ListenLater::DB::get($pt->{id});
+    # The row may have been identity-merged since this menu was rendered. Follow the logical
+    # release so an already-visible tap still opens the survivor instead of an empty page.
+    my $rec = Plugins::ListenLater::DB::getCanonical($pt->{id});
     unless ($rec) {
         return $callback->({ items => [{ name => cstring($client, 'PLUGIN_LL_EMPTY'), type => 'text' }] });
     }
@@ -309,18 +367,28 @@ sub _albumTracks {
         #  • a stored 'single' that resolves to MORE than one track — never a single in LL's
         #    sense whatever its source called it — corrected in place (the one forced
         #    update). This is what repairs rows saved before the add-time check existed.
-        if (($rec->{kind} || '') ne 'track' && $resolved) {
+        # kind='album' EXACTLY — not "anything that isn't a track". A playlist resolves to a
+        # tracklist like a release does, but it is not one: writing a track_count and a
+        # rel_type onto it from the playlist's length is how it would start displaying as an
+        # "Album" with a track count and become eligible for the Played machinery.
+        if (($rec->{kind} || '') eq 'album' && $resolved) {
             my $count  = $resolved;
             my $stored = $rec->{rel_type} || '';
             my $wrong  = Plugins::ListenLater::Sources::singleIsWrong($stored, $count);
 
-            Plugins::ListenLater::DB::updateTrackCount($rec->{id}, $count)
+            # The resolve measured THIS record's release on THIS service. If a backfill merged
+            # the row away while the tracklist was in flight, the count belongs to the survivor
+            # only when it still replays the same release — same service AND same ref.
+            my $refId = Plugins::ListenLater::DB::refIdentity($rec);
+
+            Plugins::ListenLater::DB::updateTrackCount($rec->{id}, $count, $rec->{source}, $refId)
                 if ($rec->{source} || '') ne 'library';
 
             if (!$stored || $wrong) {
                 my $rt = Plugins::ListenLater::Sources::relTypeFor(count => $count);
                 if ($rt) {
-                    Plugins::ListenLater::DB::updateRelType($rec->{id}, $rt, $wrong);
+                    Plugins::ListenLater::DB::updateRelType(
+                        $rec->{id}, $rt, $wrong, $rec->{source}, $refId);
                     $log->warn("LL: rec $rec->{id} was stored as a single but resolves to "
                         . "$count tracks — reclassified as $rt") if $wrong;
                 }
@@ -351,15 +419,10 @@ sub _wantHeaders {
 my $_headerTypeCache;
 sub _headerType {
     return $_headerTypeCache if defined $_headerTypeCache;
+    # undef (can't tell) falls to the long-standing 'header' with the false case, which is
+    # the safe answer the unknown case already wanted; a dev/test build gets the new type.
     my $ver = eval { Plugins::MaterialSkin::Plugin->getPluginVersion() };
-    my $useBasic;
-    if (!defined $ver) {
-        $useBasic = 0;                                  # can't tell -> stay safe
-    } elsif ($ver =~ /^(\d+)\.(\d+)\.(\d+)/) {
-        $useBasic = ( $1 <=> 6 || $2 <=> 4 || $3 <=> 3 ) >= 0 ? 1 : 0;
-    } else {
-        $useBasic = 1;                                  # dev/test build -> new
-    }
+    my $useBasic = Plugins::ListenLater::Sources::materialAtLeast($ver, 6, 4, 3) ? 1 : 0;
     return $_headerTypeCache = $useBasic ? 'header-basic' : 'header';
 }
 
