@@ -371,6 +371,20 @@ sub _matchRecord {
     }
 
     my $source = Plugins::ListenLater::Sources::sourceFromUrl($url);
+
+    # Spotify: match by the RELEASE ID first. Every title door below fails Spotify in two
+    # measured ways (CLAUDE.md §B, "A SPOTIFY ROW'S STORED ALBUM TITLE CAN NEVER MATCH"):
+    # Spotty's cleanupTags strips "(Remastered 2018 / Deluxe Edition)" from the album it
+    # REPORTS at playback but not from the one it BROWSES, so the stored title never
+    # matches; and the cleaned name is identical for two editions, so the 2018 remaster's
+    # play hits a saved 1990 "Mixed Up" instead. The id tells them apart, and every Spotify
+    # album row carries one (captured from the favurl at add). A miss — Spotty absent, the
+    # track not cached, no row with that id — falls through to the title doors unchanged.
+    if ($source eq 'spotify') {
+        my $rec = _spotifyAlbumRecord($url);
+        return $rec if $rec;
+    }
+
     my $artist = eval { $track->artistName } // '';
     my $album  = eval { $track->albumname }  // '';
     # Streaming services (Qobuz/Tidal/Deezer) don't store album/artist on the LMS Track
@@ -422,6 +436,51 @@ sub _matchRecord {
             $na, Plugins::ListenLater::Sources::_norm($c->{artist}));
     }
     return undef;
+}
+
+# The saved Spotify album a playing Spotify track belongs to, by release id, or undef.
+#
+# The id is not in the playback metadata (getMetadataFor reports artist/album/title only),
+# but Spotty builds that metadata from its own track cache, and the cached track carries
+# the album it was fetched under: Spotty's API::Cache::normalize gives every track of an
+# album fetch that album's id and uri, and a track fetched on its own keeps the album object
+# the Web API returned. So this reads the SAME cache entry the player's metadata came from,
+# with `noLookup` — no Web API call, so a 429 can never stall a newsong.
+#
+# Guarded for everything outside our control: Spotty not installed or not loaded (`can`
+# never loads a package), a URI that is not a track (episodes are not albums), a track not
+# cached, and a cached track with no album id — which Spotty does produce: tracks past the
+# first 50 of a long album are paged in with an album of name and image only. Each of those
+# returns undef and the caller carries on to the title doors exactly as before; a DIE does
+# too, but is WARNed first, for the reason at the eval.
+sub _spotifyAlbumRecord {
+    my ($url) = @_;
+    return undef unless defined $url && length $url;
+
+    # Spotty's own URI form: it strips the slashes the same way before its cache lookup.
+    (my $uri = $url) =~ s{/}{}g;
+    return undef unless $uri =~ /^spotify:track:/;
+
+    return undef unless Plugins::Spotty::API->can('trackCached');
+    my $cached = eval {
+        Plugins::Spotty::API->trackCached(undef, $uri, { noLookup => 1 });
+    };
+
+    # A DIE is the one failure this door cannot see any other way. It returns undef, the
+    # title doors run, and those are MEASURED never to match a Spotify row — so a wrong call
+    # signature would look exactly like "track not cached" and match NOTHING, silently, for
+    # ever. The signature (callback slot, uri, args) is pinned by the stub in t_played, but a
+    # stub only proves we call ourselves consistently, and the live playback test is deferred
+    # (§B). So log it and let the fault name itself in log.txt. Deliberately not latched:
+    # at most one line per newsong, and only on a Spotify url.
+    $log->warn("LL: Spotty trackCached died for $uri: $@") if $@;
+
+    return undef unless ref $cached eq 'HASH' && ref $cached->{album} eq 'HASH';
+
+    my $albumId = $cached->{album}{id};
+    return undef unless defined $albumId && length $albumId;
+
+    return Plugins::ListenLater::DB::findAlbumBySourceAlbumId('spotify', $albumId);
 }
 
 # How many tracks the release actually has, or undef when that isn't known. The difference

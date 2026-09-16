@@ -2485,7 +2485,12 @@ sub _savePlaylistRecord {
 # album_id, and `album` is never a hash — so trackAlbumId answers undef for every Spotify
 # url and adding 'spotify' here would buy one wasted metadata lookup and a WARN per add.
 # The id is reachable one layer down in API->trackCached, which is Spotty-internal and was
-# DECLINED for Tidal/Deezer on 2026-07-25 and again for Spotify on 2026-09-02.
+# DECLINED for Tidal/Deezer on 2026-07-25 and again for Spotify on 2026-09-02 — a decline
+# that is scoped to THIS PATH, the add. It is NOT a fleet ban on the helper: since 1.0.1
+# Played::_spotifyAlbumRecord DOES call `API->trackCached` (with `noLookup`, off the newsong
+# metadata's own cache entry — CLAUDE.md §B). Two different questions: matching a PLAY to a
+# saved row earns the internals, classifying a fresh ADD does not. So the decline above still
+# stands here, and a grep that lands on it from Played.pm has found the wrong entry.
 # It would also be actively HARMFUL: a Spotify podcast EPISODE reaches _saveTrackRecord on
 # this same branch, so a service listed here that ever did answer with the show's id would
 # classify a podcast series as a release. Anything added here must exclude episodes first.
@@ -3106,12 +3111,14 @@ sub _addCtxCommand {
         # distinguisher OUTSIDE the title (all four American Football LPs are titled
         # "American Football"; "LP2"/"LP3" live in MB's `disambiguation`), whereas the
         # service prints "American Football (LP2)". Played's streaming path matches on the
-        # album TITLE only (no id anchor — see Played::_matchRecord), so storing MB's bare
-        # name alone would stop the playing track ever matching this row. Keep both: the
-        # clean name is what we show and key on, this is what the service will call it
-        # when it plays. Only when they actually differ — an identical label is noise.
+        # album TITLE (see Played::_matchRecord; only Spotify has an id door ahead of it), so
+        # storing MB's bare name alone would stop the playing track ever matching this row.
+        # Keep both: the clean name is what we show and key on, this is the service's own
+        # label for it. Only when they actually differ — an identical label is noise.
         # NB `$album` is already stripped of a trailing "(YYYY)"/format qualifier by here;
-        # `$p{name}` is the raw label, which is exactly what the player will report.
+        # `$p{name}` is the RAW label, which is NOT always what the player reports: a native
+        # Spotty label carries " (YYYY)" and Spotty's cleanupTags edits the album at playback
+        # (CLAUDE.md §B, "A SPOTIFY ROW'S STORED ALBUM TITLE CAN NEVER MATCH").
         $ref->{svc_title} = $p{name}
             if defined $p{name} && length $p{name}
             && defined $album && $p{name} ne $album;
@@ -3251,6 +3258,12 @@ sub _addCtxCommand {
         artwork     => $artwork,
         ref_kind    => ($source eq 'library' ? 'album_id' : 'search'),
         ref         => $ref,
+        # PROVENANCE of album_title, for _finishAlbumAdd's Spotify repair — transient, the
+        # same shape as _provisionalCount, and never a column. True means no '&al=' arrived,
+        # so the title above can only have come from $p{name}, i.e. the row LABEL. The test
+        # must stay HERE, where $favAlbum is in scope and the choice is actually made: by the
+        # time the tail runs, a label-derived title and a handshake one are the same string.
+        _titleFromLabel => (defined $favAlbum && length $favAlbum) ? 0 : 1,
     };
 
     my $albumId = $ref->{album_id} || ($ref->{passthrough} && $ref->{passthrough}{album_id});
@@ -3330,10 +3343,26 @@ sub _finishAlbumAdd {
     # Tidal/Deezer/Spotify browse rows can send no $ARTISTNAME (Material doesn't map their
     # subtitle) and their cover URL has no artist/id — but the favurl gives the album id, so
     # fetch the artist in the background. Without it the row never auto-moves to
-    # Played (keys on source+artist+album). Fire-and-forget; only for a fresh artist-less add.
+    # Played (keys on source+artist+album). Fire-and-forget: nothing waits on it. Tidal and
+    # Deezer run once, for a fresh artist-less add; Spotify retries a failed lookup once
+    # (_armBackfillRetry) and also runs for the reason below.
+    #
+    # SPOTIFY HAS A SECOND REASON TO GO, and it is not artist-less-ness (2026-09-16). Its
+    # favurl cannot carry the '&al=' handshake — decorating it breaks Spotty's own replay,
+    # settled in LBF's _attachFavUrl — so a Spotify row that came from a sibling plugin stored
+    # that plugin's row LABEL as the album title. For Pitchfork Reviews that label is
+    # "Artist - Album", or "3. Artist - Album" on a year-end list; the row should show the
+    # album the sibling MATCHED TO instead (Simon's call), as a native Spotty add does. Played
+    # does not depend on this — it matches Spotify by release id (Played::_spotifyAlbumRecord).
+    # The absence of '&al=' IS the signal — it says the title can only have come from the
+    # label — and it is the caller's job to say so, because DB::updateAlbumTitle must not
+    # guess from the string.
+    my $titleFromLabel = $rec->{_titleFromLabel} ? 1 : 0;
     if ($id && !$already && ($source eq 'tidal' || $source eq 'deezer' || $source eq 'spotify')
-            && (!defined $artist || !length $artist) && $albumId) {
-        _backfillStreamingArtist($request->client, $id, $albumId, $source);
+            && $albumId
+            && ((!defined $artist || !length $artist)
+                || ($source eq 'spotify' && $titleFromLabel))) {
+        _backfillStreamingArtist($request->client, $id, $albumId, $source, $titleFromLabel);
     }
 
     if (my $client = $request->client) {
@@ -3634,8 +3663,15 @@ sub _verifyRetryTick {
 # (Played keys on source+artist+album). Both plugins' getAlbum share the same shape
 # ($client,$cb,$args,{id=>…} → {items=>…}), so one helper covers both. Async /
 # best-effort; guarded so an API hiccup can never break the add.
+#
+# SPOTIFY ALSO REPAIRS THE ALBUM TITLE when $titleFromLabel says the add carried no '&al='
+# (2026-09-16) — its favurl is the one that cannot take the handshake, so a sibling plugin's
+# row LABEL became the stored title. The row now shows the album Spotify matched to, exactly
+# as a native Spotty add of it would. Title and artist come off the ONE album object this
+# already fetches, so the repair is free. `name` is the RAW service title: Spotty cleans it at
+# playback, which is why Played matches Spotify by id, not by this.
 sub _backfillStreamingArtist {
-    my ($client, $recId, $albumId, $source) = @_;
+    my ($client, $recId, $albumId, $source, $titleFromLabel, $attempt) = @_;
     return unless $client && $recId && defined $albumId && length $albumId;
 
     # Spotify goes its own way, and NOT for want of trying to share the path below. Its
@@ -3648,24 +3684,51 @@ sub _backfillStreamingArtist {
     # Asking the API directly is both simpler and exact: the normalized album object carries
     # a plain `artist` string (its cache fills it from artists[0] — API/Cache.pm normalize),
     # so there is no string surgery and nothing to get subtly wrong. Same call
-    # Sources::classifyRelType makes; it only ever runs on a row that arrived artist-less.
+    # Sources::classifyRelType makes. It runs for a row that arrived artist-less, or whose
+    # title came off a sibling's row label (see _finishAlbumAdd).
     if ($source eq 'spotify' && Plugins::Spotty::Plugin->can('getAPIHandler')) {
         my $api = eval { Plugins::Spotty::Plugin->getAPIHandler($client) };
         return unless $api && $api->can('album');
         eval {
             $api->album(sub {
                 my $album = shift;
-                return unless ref $album eq 'HASH';
+                # A FAILED call arrives through this same callback, looking like an album.
+                # Spotty's _gotError answers { name => '<error text>', type => 'text' } (a
+                # 429 included), and album() normalises and hands that on unchanged, so
+                # `name` is the ERROR MESSAGE. Storing it would put "rate limit exceeded"
+                # in the album title. Only an object carrying an id is an answer; anything
+                # else is a failure and is retried, as the release verify is.
+                unless (_spottyAlbumAnswered($album)) {
+                    _armBackfillRetry($client, $recId, $albumId, $source,
+                        $titleFromLabel, $attempt);
+                    return;
+                }
                 # Shared with _searchService's Spotify branch — see Sources::spottyArtistName
                 # for the two shapes and why this is NOT the Tidal/Deezer extraction.
                 my $artist = Plugins::ListenLater::Sources::spottyArtistName($album);
-                return unless length $artist;
-                my $canonical = Plugins::ListenLater::DB::updateArtist($recId, $artist);
-                $log->info("LL: backfilled spotify artist '$artist' onto rec "
-                    . ($canonical || $recId));
+                my $id     = $recId;
+                $id = Plugins::ListenLater::DB::updateArtist($id, $artist) || $id
+                    if length $artist;
+                $log->info("LL: backfilled spotify artist '$artist' onto rec $id")
+                    if length $artist;
+
+                # The title comes off the SAME object, so it costs no second call — and the
+                # id must be the one updateArtist just returned, because that call can merge
+                # this row into an earlier cross-source save and retire the id we came in
+                # with. `name` is Spotify's album title (the key PFR's _searchSpotify matches
+                # on); updateAlbumTitle no-ops when it agrees with what we hold.
+                return unless $titleFromLabel;
+                my $title = (defined $album->{name} && !ref $album->{name}) ? $album->{name} : '';
+                return unless length $title;
+                my $canonical = Plugins::ListenLater::DB::updateAlbumTitle($id, $title);
+                $log->info("LL: backfilled spotify album title '$title' onto rec "
+                    . ($canonical || $id));
             }, { uri => "spotify:album:$albumId" });
             1;
-        } or $log->warn("LL: spotify artist backfill failed: $@");
+        } or do {
+            $log->warn("LL: spotify metadata backfill failed: $@");
+            _armBackfillRetry($client, $recId, $albumId, $source, $titleFromLabel, $attempt);
+        };
         return;
     }
 
@@ -3691,6 +3754,67 @@ sub _backfillStreamingArtist {
         }, {}, { id => $albumId });
         1;
     } or $log->warn("LL: $source artist backfill failed: $@");
+    return;
+}
+
+# Did Spotty's album() callback get a real album? Its error route calls the same callback with
+# { name => <error text>, type => 'text' } and album() passes that through normalize untouched,
+# so the only trustworthy test is POSITIVE: a real album object keeps its Spotify `id`
+# (API::Cache::normalize strips `type` from an album and keeps `id`); an error object has none.
+sub _spottyAlbumAnswered {
+    my ($album) = @_;
+    return 0 unless ref $album eq 'HASH';
+    return 0 if ($album->{type} // '') eq 'text';
+    return (defined $album->{id} && !ref $album->{id} && length $album->{id}) ? 1 : 0;
+}
+
+# Spotify's artist/title backfill is RETRIED ONCE on failure, on the release verify's schedule
+# and budget (VERIFY_RETRY_SECS, VERIFY_MAX_ATTEMPTS — Simon, 2026-09-16). The cost of a failure
+# is a row that shows the sending plugin's LABEL with no artist for good, and on a rig where
+# Spotify answers 429 routinely (retry-after is a few seconds) that was most sibling adds.
+# Spotify only: Tidal and Deezer keep their one-shot backfill unchanged.
+sub _armBackfillRetry {
+    my ($client, $recId, $albumId, $source, $titleFromLabel, $attempt) = @_;
+
+    if (($attempt || 1) >= VERIFY_MAX_ATTEMPTS) {
+        $log->warn("LL: rec $recId — no $source album details after " . ($attempt || 1)
+            . ' attempts; the row keeps the title and artist it was added with');
+        return;
+    }
+    return unless $client;
+
+    $log->warn("LL: rec $recId — $source album details unavailable, retrying in "
+        . VERIFY_RETRY_SECS . 's');
+    Slim::Utils::Timers::setTimer($client, time() + VERIFY_RETRY_SECS, \&_backfillRetryTick, {
+        recId          => $recId,
+        source         => $source,
+        albumId        => $albumId,
+        titleFromLabel => $titleFromLabel ? 1 : 0,
+        attempt        => ($attempt || 1) + 1,
+    });
+    return;
+}
+
+# The retry. A NAMED sub for the same reason as _verifyRetryTick, and it re-reads the row for
+# the same reasons: in the minute since, it may have been removed, merged into a row that
+# replays a different release, or filled in by another route.
+sub _backfillRetryTick {
+    my ($client, $args) = @_;
+    return unless ref $args eq 'HASH' && $args->{recId};
+
+    my $rec = eval { Plugins::ListenLater::DB::getCanonical($args->{recId}) } or return;
+    return if ($rec->{source} // '') ne ($args->{source} // '');
+    return if Plugins::ListenLater::DB::refIdentity($rec) ne ($args->{albumId} // '');
+
+    # Nothing left to ask for: the artist is in and there is no label title to replace.
+    my $needArtist = !(defined $rec->{artist} && length $rec->{artist});
+    return unless $needArtist || $args->{titleFromLabel};
+
+    return unless $client;
+    my $live = eval { Slim::Player::Client::getClient($client->id) } or return;
+
+    _backfillStreamingArtist($live, $rec->{id}, $args->{albumId}, $args->{source},
+        $args->{titleFromLabel}, $args->{attempt});
     return;
 }
 

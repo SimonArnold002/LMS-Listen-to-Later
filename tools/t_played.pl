@@ -255,7 +255,8 @@ section('0.1.107 — a saved PLAYLIST is invisible to the Played detector');
 # way the lookups are rewritten.
 #
 # The risk is not hypothetical: a playlist is routinely NAMED after a release it draws
-# from, and Played matches streaming plays on artist+title alone with no id anchor.
+# from, and Played matches streaming plays on artist+title (Spotify alone has an id door in
+# front, and that door filters kind='album' too — see the 2026-09-16 section below).
 {
     my $match = \&Plugins::ListenLater::Played::_matchRecord;
 
@@ -316,6 +317,141 @@ section('0.1.107 — a saved PLAYLIST is invisible to the Played detector');
     );
     is('the loose artist fallback does not reach a playlist either',
        $match->(undef, $feat, 'qobuz://2.flac'), undef);
+}
+
+# ---------------------------------------------------------------------------
+section('2026-09-16 — a Spotify play matches its saved album by RELEASE ID first');
+# Measured live (CLAUDE.md §B, "A SPOTIFY ROW'S STORED ALBUM TITLE CAN NEVER MATCH"): two
+# editions saved natively from Spotty. Spotty REPORTS both as album 'Mixed Up' at playback
+# (cleanupTags), so the title doors miss the remaster's row entirely and hit the 1990 row
+# when the remaster plays. The playing track's album id, read from Spotty's track cache,
+# is the only thing that tells them apart.
+#
+# The stub tracks report album 'Mixed Up' — the string the title doors really see (a Spotty
+# RemoteTrack has no albumname, so _matchRecord reads the handler's cleaned metadata).
+{
+    my $match = \&Plugins::ListenLater::Played::_matchRecord;
+    my $db    = 'Plugins::ListenLater::DB';
+
+    my ($orig) = $db->can('add')->({
+        kind => 'album', source => 'spotify', artist => 'The Cure',
+        album_title => 'Mixed Up', year => 1990, rel_type => 'album', ref_kind => 'search',
+        ref => { _svc => 'spotify', album_id => '705VGsDQvBnlwO1I8D3vD9',
+                 passthrough => { album_id => '705VGsDQvBnlwO1I8D3vD9' } },
+    }, 'later');
+    my ($remaster) = $db->can('add')->({
+        kind => 'album', source => 'spotify', artist => 'The Cure',
+        album_title => 'Mixed Up (Remastered 2018 / Deluxe Edition)', year => 1990,
+        rel_type => 'album', ref_kind => 'search',
+        ref => { _svc => 'spotify', album_id => '3huHRCpnBNMIrU4e10HDtr',
+                 passthrough => { album_id => '3huHRCpnBNMIrU4e10HDtr' },
+                 svc_title => 'Mixed Up (Remastered 2018 / Deluxe Edition) (1990)' },
+    }, 'later');
+    is('both editions stored as separate rows',
+       ($orig && $remaster && $orig != $remaster ? 'yes' : 'no'), 'yes');
+
+    my $remUrl  = 'spotify://track:3oHh50CILa1PKDBSvfVuDd';
+    my $origUrl = 'spotify://track:6VyG0Oj183tXtpCACKwTaC';
+    my $remT  = Slim::Schema::add_test_track(id => -10, url => $remUrl,
+        artist => 'The Cure', album => 'Mixed Up');
+    my $origT = Slim::Schema::add_test_track(id => -11, url => $origUrl,
+        artist => 'The Cure', album => 'Mixed Up');
+    my $id = sub { my $r = shift; $r ? $r->{id} : undef };
+
+    # Spotty ABSENT (its package never loaded): the title doors run exactly as before. This
+    # is also the CONTROL for the cases below — it shows what the id door changes: the
+    # remaster's play lands on the 1990 row.
+    is('Spotty absent: remaster play falls to the title door (1990 row)',
+       $id->($match->(undef, $remT, $remUrl)), $orig);
+
+    # Spotty present: a stub of API->trackCached serving a fake cache.
+    my %cache;
+    my @asked;
+    no warnings 'once';
+    *Plugins::Spotty::API::trackCached = sub {
+        my ($class, $cb, $uri, $args) = @_;
+        push @asked, [$uri, ($args && $args->{noLookup}) ? 1 : 0];
+        return $cache{$uri};
+    };
+
+    $cache{'spotify:track:3oHh50CILa1PKDBSvfVuDd'} =
+        { name => 'Lullaby - Extended Mix', album => { id => '3huHRCpnBNMIrU4e10HDtr',
+          name => 'Mixed Up (Remastered 2018 / Deluxe Edition)' } };
+    $cache{'spotify:track:6VyG0Oj183tXtpCACKwTaC'} =
+        { name => 'Lullaby', album => { id => '705VGsDQvBnlwO1I8D3vD9', name => 'Mixed Up' } };
+
+    @asked = ();
+    is('the remaster play matches the REMASTER row',
+       $id->($match->(undef, $remT, $remUrl)), $remaster);
+    is('...asking Spotty with its own URI form',  ($asked[0] || [])->[0], 'spotify:track:3oHh50CILa1PKDBSvfVuDd');
+    is('...and never a Web API lookup',           ($asked[0] || [])->[1], 1);
+    is('the 1990 play still matches the 1990 row',
+       $id->($match->(undef, $origT, $origUrl)), $orig);
+
+    # Every miss falls through to the title doors, unchanged.
+    my $newUrl = 'spotify://track:NOTCACHED000000000000a';
+    my $newT = Slim::Schema::add_test_track(id => -12, url => $newUrl,
+        artist => 'The Cure', album => 'Mixed Up');
+    is('track not cached: title door as before',
+       $id->($match->(undef, $newT, $newUrl)), $orig);
+
+    $cache{'spotify:track:NOTCACHED000000000000a'} = { name => 'x', album => { name => 'Mixed Up' } };
+    is('cached with NO album id (Spotty past track 50): title door',
+       $id->($match->(undef, $newT, $newUrl)), $orig);
+
+    $cache{'spotify:track:NOTCACHED000000000000a'} = { name => 'x', album => { id => 'NoSuchAlbum' } };
+    is('album id no row has: title door',
+       $id->($match->(undef, $newT, $newUrl)), $orig);
+
+    # A non-album row carrying the same id must never be matched as the album: without the
+    # kind filter this returns the playlist; with it, the title door's album row.
+    my ($pl) = $db->can('add')->({
+        kind => 'playlist', source => 'spotify', artist => '',
+        album_title => 'Some Playlist', ref_kind => 'playlist_id',
+        ref => { _svc => 'spotify', playlist_id => 'PL1', album_id => 'PLAYLISTALBUMID' },
+    }, 'later');
+    $cache{'spotify:track:NOTCACHED000000000000a'} = { name => 'x', album => { id => 'PLAYLISTALBUMID' } };
+    my $got = $match->(undef, $newT, $newUrl);
+    is('a playlist row with that id is never the match', $id->($got), $orig);
+
+    # Other sources never consult Spotty.
+    @asked = ();
+    my $q = Slim::Schema::add_test_track(id => -13, url => 'qobuz://99.flac',
+        artist => 'The Cure', album => 'Mixed Up');
+    $match->(undef, $q, 'qobuz://99.flac');
+    is('a Qobuz play never asks Spotty', scalar @asked, 0);
+
+    # An episode is not an album.
+    @asked = ();
+    my $ep = Slim::Schema::add_test_track(id => -14, url => 'spotify://episode:EP1',
+        artist => 'x', album => 'y');
+    $match->(undef, $ep, 'spotify://episode:EP1');
+    is('a Spotify episode never asks Spotty', scalar @asked, 0);
+
+    # A DIE inside trackCached (a changed Spotty signature is the live risk — the call is
+    # pinned only by the stub above, and the live playback test is deferred) must still fall
+    # to the title doors, and must SAY SO. Without the warn the fault is indistinguishable
+    # from "track not cached", which is also a title-door fall-through, so the id door would
+    # match nothing for ever in silence. Both halves are asserted: the answer AND the line.
+    {
+        local *Plugins::Spotty::API::trackCached = sub { die "bad signature at Spotty.pm line 1\n" };
+        @Slim::Utils::Log::LINES = ();
+        is('trackCached dies: still falls to the title door',
+           $id->($match->(undef, $remT, $remUrl)), $orig);
+        my $warned = grep { $_ && /trackCached died/ } @Slim::Utils::Log::LINES;
+        is('...and warns, naming the failure',  $warned ? 1 : 0, 1);
+        my ($line) = grep { $_ && /trackCached died/ } @Slim::Utils::Log::LINES;
+        is('...with the uri in the message',
+           (($line || '') =~ /spotify:track:3oHh50CILa1PKDBSvfVuDd/) ? 1 : 0, 1);
+    }
+
+    # CONTROL: the ordinary not-cached miss is silent. It is the expected case on any track
+    # Spotty has not fetched, so warning there would bury the real fault above in noise.
+    @Slim::Utils::Log::LINES = ();
+    delete $cache{'spotify:track:NOTCACHED000000000000a'};
+    $match->(undef, $newT, $newUrl);
+    is('a plain cache miss logs nothing',
+       scalar(grep { $_ && /trackCached died/ } @Slim::Utils::Log::LINES), 0);
 }
 
 printf "\n%d passed, %d failed\n", $pass, $fail;

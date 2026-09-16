@@ -1907,6 +1907,15 @@ Per-release user-facing notes live in `CHANGELOG.md`. Append new entries at the 
   to read an id from), which still works off the album+artist names Spotty does publish.
   Every other path carries the id and replays exactly.
 
+  **SUPERSEDED IN PART (1.0.1, 2026-09-16) — read this before quoting the decline above.**
+  What stayed declined is the ADD. `API->trackCached` itself is now USED, by
+  `Played::_spotifyAlbumRecord`, to match a playing Spotify track to a saved row by release
+  id; it reads the cache entry Spotty already built the playback metadata from (`noLookup`,
+  no Web API call, so no 429 can stall a newsong). The internals objection was outweighed
+  there by a MEASURED defect the title doors could not fix — `cleanupTags` strips a remaster
+  suffix at playback but not at browse, so a Spotify row's stored title can never match, and
+  two editions clean to the same string. See CLAUDE.md §B.
+
   **VERIFIED LIVE 2026-09-02** against Spotty v4.62.2 on the test server, from two real
   Material adds (`log.txt` + the rendered rows over `jsonrpc.js`):
   - a playlist add with `svc=spotty` → source `spotify` (the `%SVC_ALIAS` fold) and
@@ -3133,3 +3142,49 @@ Per-release user-facing notes live in `CHANGELOG.md`. Append new entries at the 
   mixed shape the existing assertions did not cover — a metacharacter among marks (`'!%!'`),
   where a leak would land in a live non-empty key rather than an empty one. Both entries are
   in CLAUDE.md §A2. Suites 1,575 -> 1,591 assertions, all green.
+
+- **1.0.1** (dev, 2026-09-16) — **Spotify albums: Played matches by release id, and a sibling's
+  row shows the album it matched to.** Two causes were measured on plex:9000 (CLAUDE.md §B, `A
+  SPOTIFY ROW'S STORED ALBUM TITLE CAN NEVER MATCH`). (1) Spotify's favurl cannot carry `&al=`,
+  so a Pitchfork Reviews row stored its label (`The Cure - Mixed Up`) as the title. (2) Spotty's
+  `cleanupTags` cleans the album only at PLAYBACK (`Mixed Up (Remastered 2018 / Deluxe Edition)`
+  plays as `Mixed Up`), so even a native keyword add never matched, and the 2018 remaster's play
+  marked a saved 1990 `Mixed Up` instead. Changes:
+  - `Played::_matchRecord` first asks `_spotifyAlbumRecord`. It reads the playing track's album
+    id from Spotty's track cache (`API->trackCached`, `noLookup`, no Web API call) and looks it
+    up with the new `DB::findAlbumBySourceAlbumId` (`kind='album'` only). Any miss falls through
+    to the title doors unchanged.
+  - A Spotify add with no `&al=` now takes Spotify's own album name from the backfill it
+    already makes (`_titleFromLabel` → `DB::updateAlbumTitle`, re-keyed through
+    `_updateIdentityField`, merging with a same-list native twin).
+  - A first, title-based attempt was reverted unapplied earlier the same day.
+  - Qobuz, Tidal, Deezer, Bandcamp and library are untouched.
+  - Suites 1,591 → 1,619 (t_played +12, t_db +13, t_addpath +3), each anti-tested.
+  - Display title verified live. The id door could not be: Spotify audio does not play on the
+    rig. (Settled at 1.0.3 — that test is DEFERRED and classed OK until a user reports
+    otherwise.)
+
+- **1.0.2** (dev, 2026-09-16) — **A failed Spotify lookup is refused and retried once.** Spotty
+  reports a failure, 429 included, through `album()`'s SUCCESS callback as `{ name => <error
+  text>, type => 'text' }`, so 1.0.1 would have stored the error message as the title of a
+  label-titled row. No live row was affected. Changes:
+  - `_spottyAlbumAnswered` accepts only an object with a Spotify `id`.
+  - A failure goes to `_armBackfillRetry`: one retry after 60s, on the release verify's
+    constants, then a WARN. `_backfillRetryTick` re-reads the row first.
+  - Spotify only.
+  - `classifyRelType`'s Spotify path was audited and is safe: it reads no field the error
+    object has.
+  - t_addpath +14; with the check disabled, 7 fail. Suites 1,633, all green.
+  - Verified live for the success path; the retry path has not been seen live.
+
+- **1.0.3** (dev, 2026-09-16) — **Stale comments corrected; no runtime change from 1.0.2.**
+  A doc sweep before review found four comments today's work had made untrue:
+  - the `svc_title` comment in `_addCtxCommand` ("TITLE only (no id anchor)", and "the raw label
+    is exactly what the player will report");
+  - two comments claiming `_backfillStreamingArtist` runs only for an artist-less add;
+  - `t_played.pl`'s "no id anchor".
+
+  `Plugin.pm` differs from 1.0.2 in comment lines only, 0 code lines. Suites 1,633, all green.
+  1.0.3 INSTALLED and TESTED on plex:9000 (13:46): the test add plus three real Pitchfork Reviews
+  adds listed with the Spotify album names. **The live playback test (the id door, and the
+  failed-lookup retry) is DEFERRED by Simon and classed OK until a user reports otherwise.**
