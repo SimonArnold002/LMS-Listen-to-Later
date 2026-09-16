@@ -70,7 +70,8 @@ numbers rot on the next edit; these do not.
 | `_punctPass` fallback examples, `'!!!'`/`'+/-'` reaching the fallback | **COMMENT FIXED 0.1.151** — the code was always right; DB's example list had been copied onto a sub with two rules ahead of it | `WHICH MARKS-ONLY NAMES REACH` |
 | `ESCAPE`, LIKE metacharacters, `[a-z0-9 ]`, `findByArtistAlbum`/`findTrackByArtistTitle`/`findByAlbum` | **COMMENT FIXED 0.1.151** — no ESCAPE is still correct, but by `_norm`'s strip rules, not the dead range claim | `THE ESCAPE JUSTIFICATION` |
 | migration reachability vs `main` | judge against what main ships TODAY, never a quoted number | `JUDGE MIGRATION REACHABILITY` |
-| Spotify album TITLE never matching Played, `cleanupTags`, a Spotify row storing `"Artist - Album"`, `ref.svc_title` | **B, 1.0.4 BUILT (dev, uncommitted, suites green) 2026-09-16 — 1.0.3 is the last build INSTALLED + TESTED on the rig; live PLAYBACK test DEFERRED and classed OK until a user reports otherwise (Simon) — do not re-raise as unverified** — Spotify plays now match by release id (`_spotifyAlbumRecord`), title doors are the fallback; a label-titled Spotify row now DISPLAYS the Spotify album it matched to (`updateAlbumTitle`, Simon's call; verified live 1.0.1), with a failed/429 lookup refused and retried once (1.0.2). **The repair is gated on `!$already`, so a pre-existing row is repaired by DELETE-then-add, never by a plain re-add — accepted, not a defect (2026-09-16)** | `A SPOTIFY ROW'S STORED ALBUM TITLE CAN NEVER MATCH` |
+| Spotify album TITLE never matching Played, `cleanupTags`, a Spotify row storing `"Artist - Album"`, `ref.svc_title` | **B, 1.0.5 BUILT (dev, suites green) 2026-09-16 — 1.0.3 is the last build INSTALLED + TESTED on the rig; live PLAYBACK test DEFERRED and classed OK until a user reports otherwise (Simon) — do not re-raise as unverified** — Spotify plays now match by release id (`_spotifyAlbumRecord`), title doors are the fallback; a label-titled Spotify row now DISPLAYS the Spotify album it matched to (`updateAlbumTitle`, Simon's call; verified live 1.0.1), with a failed/429 lookup refused and retried once (1.0.2). **The repair is gated on `!$already`, so a pre-existing row is repaired by DELETE-then-add, never by a plain re-add — accepted, not a defect (2026-09-16)** | `A SPOTIFY ROW'S STORED ALBUM TITLE CAN NEVER MATCH` |
+| `_updateIdentityField` / `updateAlbumTitle` guard ownership, `_titleFromLabel` provenance, "the caller owns the guard" | **C, FIXED 1.0.5 (prose only) 2026-09-16** — the DB.pm header wrongly named `updateAlbumTitle` as the guard's owner; the guard is the caller's `return unless $titleFromLabel`. Same round CLEARED `_spottyAlbumAnswered`, `_backfillRetryTick`'s stricter guard, `_mergeKeyRows`' title retention and the `_titleFromLabel` leak paths — reasons tabled in the entry, do not re-derive | `2026-09-16 review (1.0.5)` |
 
 **Two standing rules that kill most repeat findings:**
 
@@ -2668,6 +2669,48 @@ module still applies to any build that changes behaviour; this one does not, so 
 re-verified on the server. Bandcamp was exercised end to end against it — an add, a resolve to a
 full tracklist, and a Buy link to the real album page. Commits sit on `dev` UNPUSHED, which is the
 review gate and not an oversight.
+
+### 2026-09-16 review (1.0.5) — ONE finding: the guard-ownership comment in `_updateIdentityField`
+
+Round against the 1.0.4 commit (`git diff @{upstream}...HEAD`): `Played.pm` release-id door,
+`DB.pm` `updateAlbumTitle` / `findAlbumBySourceAlbumId` / `album_title` on `_updateIdentityField`,
+`Plugin.pm` `_titleFromLabel` provenance + the widened `_backfillStreamingArtist` and its retry.
+
+**THE FINDING — `_updateIdentityField`, `updateAlbumTitle`, `_titleFromLabel`, `album_title`
+provenance: FIXED 2026-09-16 (prose only, 0 code lines).** `_updateIdentityField`'s header said
+the title guard "lives in updateAlbumTitle, which only accepts a title the CALLER has established
+was read off a row LABEL". It does not. `updateAlbumTitle($id, $title)` takes no provenance
+argument and checks none; it only skips the rewrite when the new title normalises equal to the
+stored one, then writes. The guard is the caller's `return unless $titleFromLabel`
+(`Plugin.pm`, in the Spotify branch of `_backfillStreamingArtist`), which both `Plugin.pm`'s own
+comment and `updateAlbumTitle`'s header state correctly — the DB.pm line was the lone
+contradiction, and it contradicted a header that shouts `THE CALLER OWNS THE GUARD` 140 lines
+below it.
+
+**Why it was worth a version.** This is exactly the second standing rule — a comment is not the
+contract — and the failure it invites is concrete: a later caller trusting the DB.pm line fires
+`updateAlbumTitle` on a row whose title arrived on an `&al=` handshake, and it overwrites and
+re-keys, undoing the 0.1.92 `svc_title` decision with nothing in `DB.pm` to refuse it. The fix
+names the caller as the owner and cross-references the header.
+
+**WHAT THE ROUND CLEARED, recorded so the next one does not re-derive it:**
+
+| checked | why it is not a finding |
+|---|---|
+| `_spotifyAlbumRecord`'s `trackCached(undef,$uri,{noLookup=>1})` signature and `{album}{id}` | source-read and pinned; the live playback test is a RECORDED DEFERRED decision, not a gap |
+| `_spottyAlbumAnswered` now gating the ARTIST backfill too (was `ref eq 'HASH'`) | confirmed by the live 1.0.3 PFR adds, which returned both title and artist |
+| `_backfillRetryTick`'s ref-identity guard being stricter than `_verifyRetryTick`'s deliberately-permissive empty-identity rule | no WRITER nameable that produces an empty-identity Spotify survivor — the branch is real, the input is not |
+| the title repair firing for NATIVE Spotty adds, and the second `album()` after `classifyRelType` | both reachable; native adds arrive artist-less so they already fired the backfill, and Spotty caches album objects. No concrete failure |
+| `_mergeKeyRows` keeping the earlier row's title while writing the new key | safe: a key collision implies the two titles already normalise equal |
+| `_titleFromLabel` leaking into `DB::add`, the now-playing fallback, `_addCommand` / `_saveTrackRecord` | explicit column list (harmless); the fallback yields no Spotify `album_id` so the repair never fires; no flag means the repair is inert |
+
+**State at close.** **1.0.5** in `install.xml` and `repo.xml`, zip rebuilt with a matching
+`<sha>`, 15/15 suites green at 1,637 assertions. `Plugin.pm` and `Played.pm` are byte-identical
+to 1.0.4; `DB.pm` differs in comment lines only, 0 executable lines — so nothing was re-verified
+on the server and nothing needed to be. `docs/VERSION-HISTORY.md` gained the 1.0.4 entry it was
+missing (the `trackCached` die WARN) alongside 1.0.5. **README/CHANGELOG deliberately NOT
+regenerated** — dev build, merge-to-`main` artifacts. **1.0.3 remains the last build INSTALLED
+and TESTED on the rig**, and the live PLAYBACK test stays DEFERRED by Simon.
 
 ### D. ADDING TO THIS LEDGER
 

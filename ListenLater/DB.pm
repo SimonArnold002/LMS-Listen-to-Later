@@ -1405,8 +1405,11 @@ sub _sameSourceCanonicalId {
 # `album_title` joined artist and year on 2026-09-16 and is the odd one of the three: artist and
 # year backfill a value that is MISSING, and refuse to overwrite one we hold, so they can be
 # fired on anything. A title is never missing — the add refuses a row without one — so the
-# guard cannot live here. It lives in updateAlbumTitle, which only accepts a title the CALLER
-# has established was read off a row LABEL rather than supplied by a handshake.
+# guard cannot live here. Nor does it live in updateAlbumTitle: that sub checks PROVENANCE
+# NOWHERE, it only skips the rewrite when the new title normalises equal to the stored one.
+# The guard lives in the CALLER, which must have established that the stored title was read
+# off a row LABEL rather than supplied by a handshake before it calls at all. See
+# updateAlbumTitle's own header: THE CALLER OWNS THE GUARD.
 sub _updateIdentityField {
     my ($id, $field, $value) = @_;
     return unless $id && defined $field

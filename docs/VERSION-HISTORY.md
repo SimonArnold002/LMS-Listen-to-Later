@@ -3188,3 +3188,38 @@ Per-release user-facing notes live in `CHANGELOG.md`. Append new entries at the 
   1.0.3 INSTALLED and TESTED on plex:9000 (13:46): the test add plus three real Pitchfork Reviews
   adds listed with the Spotify album names. **The live playback test (the id door, and the
   failed-lookup retry) is DEFERRED by Simon and classed OK until a user reports otherwise.**
+
+- **1.0.4** (dev, 2026-09-16) — **A silent Spotty failure now names itself.** The release-id door
+  added in 1.0.1 reads the playing track's album id through `Plugins::Spotty::API->trackCached`,
+  and every way that call can come up empty — Spotty absent, a non-track URI, an uncached track,
+  a cached album with no id — is an expected fall-through to the title doors and stays silent.
+  A DIE is not, and it is invisible: it produces the SAME fall-through, and the title doors are
+  measured never to match a Spotify row, so a changed Spotty call signature would match nothing
+  for ever with no symptom at all. Changes:
+  - `Played::_spotifyAlbumRecord` WARNs on a die from the eval'd `trackCached` call:
+    `LL: Spotty trackCached died for spotify:track:…`. Not latched (one line per newsong,
+    Spotify only). **This is the one thing to grep `log.txt` for if Spotify plays stop matching.**
+  - Nothing else changed: no new call, no behaviour change on any path that does not die.
+  - t_played +4, including a CONTROL that a plain cache miss logs nothing; 2 of the 4 fail with
+    the warn removed. Suites 1,633 → 1,637, all green.
+  - The live playback test remains DEFERRED (settled at 1.0.3); this warn line exists precisely
+    because it is. 1.0.3 is still the last build INSTALLED and TESTED on the rig.
+
+- **1.0.5** (dev, 2026-09-16) — **A review round; one stale comment corrected, no runtime change
+  from 1.0.4.** `_updateIdentityField`'s header claimed the album-title provenance guard "lives in
+  updateAlbumTitle". It does not: `updateAlbumTitle($id, $title)` takes no provenance argument and
+  checks none — it only skips the rewrite when the new title normalises equal to the stored one,
+  then writes. The guard is the CALLER's `return unless $titleFromLabel`, which `Plugin.pm`'s own
+  comment and `updateAlbumTitle`'s header (`THE CALLER OWNS THE GUARD`) both state correctly; the
+  `DB.pm` line was the lone contradiction. Left standing it invites a later caller to fire the sub
+  on an `&al=` handshake title and re-key the row, undoing the 0.1.92 `svc_title` decision.
+  - `DB.pm` differs from 1.0.4 in comment lines only, 0 code lines. `Plugin.pm` and `Played.pm`
+    are byte-identical.
+  - The round also CLEARED six things it examined without finding a defect (`_spottyAlbumAnswered`
+    widening to the artist backfill, `_backfillRetryTick`'s stricter ref-identity guard,
+    `_mergeKeyRows`' title retention, the `_titleFromLabel` leak paths, the native-Spotty title
+    repair, and the `trackCached` signature). Reasons are tabled in `CLAUDE.md` under
+    "2026-09-16 review (1.0.5)" so the next round does not re-derive them.
+  - Suites 1,637, all green. Nothing re-verified on the server: nothing executable changed.
+  - 1.0.3 is still the last build INSTALLED and TESTED on the rig, and the live PLAYBACK test
+    stays DEFERRED.
