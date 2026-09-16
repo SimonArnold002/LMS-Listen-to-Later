@@ -2777,6 +2777,26 @@ that log line is the log viewer's rendering of the plugin's `—` literals — t
 `_pruneMaterialActions` line shows the same — not something this fix introduced. **1.0.6 is now
 the last build INSTALLED on the rig.**
 
+### 2026-09-16 review (after 1.0.6) — CLOSED, ZERO findings; round closed and pushed to `dev`
+
+Round against the four commits then unpushed on `dev` (1.0.4, 1.0.5, the spec re-copy, 1.0.6
+`b68b1d3`), clean working tree. Nothing reported. Checked: `updateAlbumTitle` re-key/merge and
+survivor choice, `_titleFromLabel` provenance into the Spotify backfill, `_spottyAlbumAnswered` +
+`_armBackfillRetry` / `_backfillRetryTick` (attempt count, timer), `_sameReleaseRow`,
+`Played::_spotifyAlbumRecord`'s release-id door, `DB::findAlbumBySourceAlbumId`.
+
+**CLEARED, so the next round does not re-derive them:**
+
+| checked | why it is not a finding |
+|---|---|
+| `findAlbumBySourceAlbumId` picking the LOWEST id across lists when two Spotify rows share a release id | the existing title doors resolve the same way; no new exposure |
+| re-adding a sibling's Spotify album after its title was repaired saves a second row (key moved) | for artist-less sibling adds the artist backfill already moved the key before 1.0.4; the repair MERGES such a twin on the same list; re-adds of already-saved rows are accepted by design |
+| everything the 1.0.5 and 1.0.6 tables above list | already settled there |
+
+**State at close.** **1.0.6** installed and verified live (see the entry above); 15/15 suites green.
+This entry is ledger-only — no plugin file changed, so no version bump and no rebuild. Commits
+PUSHED to `origin/dev` on Simon's instruction, which is the review PASS signal.
+
 ### D. ADDING TO THIS LEDGER
 
 When a finding is declined, or accepted-but-deferred, add it here in the same
