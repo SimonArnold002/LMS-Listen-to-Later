@@ -72,6 +72,7 @@ numbers rot on the next edit; these do not.
 | migration reachability vs `main` | judge against what main ships TODAY, never a quoted number | `JUDGE MIGRATION REACHABILITY` |
 | Spotify album TITLE never matching Played, `cleanupTags`, a Spotify row storing `"Artist - Album"`, `ref.svc_title` | **B, 1.0.5 BUILT (dev, suites green) 2026-09-16 — 1.0.3 is the last build INSTALLED + TESTED on the rig; live PLAYBACK test DEFERRED and classed OK until a user reports otherwise (Simon) — do not re-raise as unverified** — Spotify plays now match by release id (`_spotifyAlbumRecord`), title doors are the fallback; a label-titled Spotify row now DISPLAYS the Spotify album it matched to (`updateAlbumTitle`, Simon's call; verified live 1.0.1), with a failed/429 lookup refused and retried once (1.0.2). **The repair is gated on `!$already`, so a pre-existing row is repaired by DELETE-then-add, never by a plain re-add — accepted, not a defect (2026-09-16)** | `A SPOTIFY ROW'S STORED ALBUM TITLE CAN NEVER MATCH` |
 | `_updateIdentityField` / `updateAlbumTitle` guard ownership, `_titleFromLabel` provenance, "the caller owns the guard" | **C, FIXED 1.0.5 (prose only) 2026-09-16** — the DB.pm header wrongly named `updateAlbumTitle` as the guard's owner; the guard is the caller's `return unless $titleFromLabel`. Same round CLEARED `_spottyAlbumAnswered`, `_backfillRetryTick`'s stricter guard, `_mergeKeyRows`' title retention and the `_titleFromLabel` leak paths — reasons tabled in the entry, do not re-derive | `2026-09-16 review (1.0.5)` |
+| `_sameReleaseRow`, the Spotify title repair landing on a MERGED survivor, `updateAlbumTitle` after `updateArtist`, a library/Qobuz row renamed to a Spotify edition title | **C, FIXED 1.0.6 2026-09-16, REPRODUCED LIVE on 1.0.3 first, VERIFIED LIVE on 1.0.6 (installed)** — the title write (first attempt AND retry) now lands only on a canonical row that is still the same Spotify release; the retry tick shares the same helper. The trigger is an earlier same-list row with equal artist+title+YEAR from any source, NOT a yearless one (classify stamps Spotify's year before insert) | `2026-09-16 review (1.0.6)` |
 
 **Two standing rules that kill most repeat findings:**
 
@@ -2711,6 +2712,70 @@ on the server and nothing needed to be. `docs/VERSION-HISTORY.md` gained the 1.0
 missing (the `trackCached` die WARN) alongside 1.0.5. **README/CHANGELOG deliberately NOT
 regenerated** — dev build, merge-to-`main` artifacts. **1.0.3 remains the last build INSTALLED
 and TESTED on the rig**, and the live PLAYBACK test stays DEFERRED by Simon.
+
+### 2026-09-16 review (1.0.6) — ONE finding: the Spotify title repair renamed the row it MERGED INTO
+
+Round against the three unpushed `dev` commits (1.0.4, 1.0.5, the spec re-copy).
+
+**THE FINDING — `_backfillStreamingArtist` (Spotify branch), `updateAlbumTitle`, `updateArtist`,
+`_sameReleaseRow`: FIXED 1.0.6, and REPRODUCED ON THE LIVE SERVER BEFORE ANY CODE CHANGED.** The
+1.0.5 round cleared `_mergeKeyRows` keeping the earlier row's title; that is still right. What it
+did not reach is the title write AFTER the merge. `updateArtist` can merge the new Spotify row into
+an earlier save from ANOTHER source, the earlier row survives, and `updateAlbumTitle` was then
+called on it — renaming and re-keying a row whose title was never a label.
+`DB::_norm` keeps bracket WORDS, so `Heaux Tales` vs `Heaux Tales, Mo' Tales: The Deluxe` never
+normalised equal and the no-op check did not save it.
+
+**Live on plex:9000 (1.0.3, 17:49), test rows only, all removed after:**
+
+| step | result |
+|---|---|
+| `listenlater add source:library artist:"Jazmine Sullivan" album:"Heaux Tales" year:2022` | row 362 |
+| LBF-shaped `addctx name:"Heaux Tales" artist: svc: favurl:spotify:album:4cogt2uqKoSyL61tzWaQei` | row 363; log `update artist for id 363 merged 1 cross-source duplicate(s) into id 362` |
+| list | 362 read `Jazmine Sullivan – Heaux Tales, Mo' Tales: The Deluxe (2022) · Library` |
+| the same library add again | a SECOND row, 364 — the key no longer matched |
+
+**THE WRITER, corrected from the review's first statement.** The review named "a library album
+with no year tag". That cannot merge: a sibling Spotify add carries no `&rt=` (its favurl cannot
+be decorated), so it goes through `_classifyThenAdd`, which stamps Spotify's `release_date` year
+BEFORE the insert. The real precondition is an earlier row on the SAME list with equal
+artist + title + year, from any source (library, Qobuz, Tidal). The sender is LBF, whose label is
+the plain album name. **PFR cannot reach it**: its label is `Artist - Album`, which never keys
+equal to another row. A native Spotty add cannot either — its label is already Spotify's name.
+
+**THE FIX.** `Plugin::_sameReleaseRow($id, $source, $albumId)` returns the canonical row only while
+it is still that service's row for that album id; the title write asks it and logs a WARN
+(`not applying spotify album title`) when it refuses. It is asked of the CANONICAL row, not of
+`updateArtist`'s return, because `updateAlbumTitle` follows lineage itself — a merge made by another
+carrier (`_verifyRelease`'s `updateYear`) would reach a foreign row the same way. The retry tick's
+inline check is now the same helper, so the two carriers cannot drift. STRICT on an empty identity
+(unlike `DB::_sameSourceCanonicalId`) — a Spotify row always carries its album id.
+
+**Carriers checked, and why nothing else changed:** `updateAlbumTitle` has ONE caller. `updateArtist`
+(Tidal/Deezer/Spotify) and `updateYear` only fill a MISSING value, so following a merge there is
+settled behaviour (2026-09-09 carrier audit); the title is the only carrier that overwrites a held
+value. The artist backfill onto a merged survivor is untouched on purpose.
+
+**Tests.** `t_addpath.pl` +11, section "the Spotify title repair never renames ANOTHER row": the
+first-attempt merge and the retry-tick merge each leave the library row's title alone, a re-add of
+the library album answers already-saved as the same row, the refusal is logged, and a CONTROL that
+an unmerged Spotify row still takes the Spotify title. Run against the unfixed code first: 5 red,
+including both carriers. The `(merged)` assertions exist because a fixture whose keys never meet
+passes every other line without the merge happening — the retry case seeds a YEARLESS twin for
+that reason, since a failed lookup also fails classify.
+
+**State at close.** **1.0.6** in `install.xml` and `repo.xml`, zip rebuilt, `<sha>`
+`811d8a1d…` equal to it, 15/15 suites green at 1,687 assertions. README/CHANGELOG deliberately
+NOT regenerated (dev build).
+
+**INSTALLED AND VERIFIED LIVE on 1.0.6 (plex:9000, restarted 17:55; log `Listen Later version =
+1.0.6`).** The same three steps: library row 365; the LBF-shaped Spotify add became 366 and
+`merged 1 cross-source duplicate(s) into id 365`, then `not applying spotify album title 'Heaux
+Tales, Mo' Tales: The Deluxe'`; 365 still read `Jazmine Sullivan – Heaux Tales (2022) · Library`;
+the library re-add answered `id=365, already=1`. Test rows removed, list back to 58. The `â` in
+that log line is the log viewer's rendering of the plugin's `—` literals — the long-standing
+`_pruneMaterialActions` line shows the same — not something this fix introduced. **1.0.6 is now
+the last build INSTALLED on the rig.**
 
 ### D. ADDING TO THIS LEDGER
 

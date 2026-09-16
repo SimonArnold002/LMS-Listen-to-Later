@@ -1738,5 +1738,95 @@ section('2026-09-16 — a FAILED Spotify lookup never becomes the title, and is 
     $FakeSpottyAPI::RESPOND = $ok;
 }
 
+# ---------------------------------------------------------------------------
+section('2026-09-16 — the Spotify title repair never renames ANOTHER row it merged into');
+# REPRODUCED on plex:9000 (1.0.3, 17:49): a library row "Jazmine Sullivan – Heaux Tales (2022)"
+# (362), then an LBF-shaped Spotify add of the Deluxe (363, label "Heaux Tales", no artist).
+# Classify gave 363 the year 2022, the artist backfill gave it the artist, and the key then
+# equalled 362's — so updateArtist merged 363 INTO 362, and updateAlbumTitle renamed the
+# LIBRARY row to "Heaux Tales, Mo' Tales: The Deluxe". A re-add of the library album then
+# stored a duplicate (364), its key no longer matching. The title is a fact about ONE Spotify
+# release; it may land only on a survivor that still replays that release.
+{
+    my $deluxe = sub { { id => '4cogt2uqKoSyL61tzWaQei',
+                         name => "Heaux Tales, Mo' Tales: The Deluxe", artist => 'Jazmine Sullivan',
+                         album_type => 'album', total_tracks => 20, release_date => '2022-02-11' } };
+    my $err = sub { { name => 'Spotify rate limit exceeded', type => 'text', tracks => [] } };
+    my $tick    = \&Plugins::ListenLater::Plugin::_backfillRetryTick;
+    my $retries = sub { grep { ($_->{cb} // 0) == $tick } Slim::Utils::Timers::armed() };
+    my $rows = sub {
+        grep { lc($_->{artist} // '') eq 'jazmine sullivan' }
+            @{ Plugins::ListenLater::DB::list('later', 'added') };
+    };
+    # $year must equal what the Spotify row will carry by the time its artist lands, or the
+    # keys never meet and the tests below pass without the merge ever happening — hence the
+    # '(merged)' assertions. A failed lookup also fails classify, so that row stays yearless.
+    my $seed = sub {
+        my ($year) = @_;
+        my ($id) = Plugins::ListenLater::DB::add({ source => 'library', artist => 'Jazmine Sullivan',
+            album_title => 'Heaux Tales', year => $year, ref_kind => 'album_id', ref => {} });
+        return $id;
+    };
+    my $clean = sub { Plugins::ListenLater::DB::remove($_->{id}) for $rows->() };
+
+    # FIRST-ATTEMPT path.
+    $clean->();
+    my $lib = $seed->(2022);
+    $FakeSpottyAPI::RESPOND = $deluxe;
+    Slim::Utils::Timers::clear();
+    Slim::Utils::Log::clear();
+    add(_client => $playing, name => 'Heaux Tales', svc => '',
+        favurl => 'spotify:album:4cogt2uqKoSyL61tzWaQei');
+    my @after = $rows->();
+    is('(the Spotify add merged into the library row)', scalar @after, 1);
+    is('(...and the library row is the survivor)', ($after[0] ? $after[0]{id} : undef), $lib);
+    is('the merged-into LIBRARY row keeps its own title',
+       ($after[0] ? $after[0]{album_title} : undef), 'Heaux Tales');
+    is('...and its own source',          ($after[0] ? $after[0]{source} : undef), 'library');
+    is('...and says why in the log',
+       ((join ' ', Slim::Utils::Log::lines()) =~ /not applying spotify album title/
+            ? 'logged' : 'SILENT'), 'logged');
+
+    # ...so a re-add of the library album is recognised, not duplicated (the live 364).
+    my ($again, $already) = Plugins::ListenLater::DB::add({ source => 'library',
+        artist => 'Jazmine Sullivan', album_title => 'Heaux Tales', year => 2022,
+        ref_kind => 'album_id', ref => {} });
+    is('a re-add of the library album is "already saved"', $already ? 1 : 0, 1);
+    is('...as the same row',                              $again, $lib);
+
+    # RETRY path — the merge happens inside the retry tick's own updateArtist.
+    $clean->();
+    $lib = $seed->(undef);
+    $FakeSpottyAPI::RESPOND = $err;
+    Slim::Utils::Timers::clear();
+    my $sp = add(_client => $playing, name => 'Heaux Tales', svc => '',
+                 favurl => 'spotify:album:4cogt2uqKoSyL61tzWaQei');
+    my @t = $retries->();
+    is('(the failed lookup armed a retry)', scalar @t, 1);
+    $FakeSpottyAPI::RESPOND = $deluxe;
+    Slim::Utils::Timers::clear();
+    $tick->($t[0]{obj}, $t[0]{args}[0]) if @t;
+    my $got = Plugins::ListenLater::DB::getCanonical($sp ? $sp->{id} : 0);
+    is('(the retry merged the Spotify row into the library row)',
+       ($got ? $got->{id} : undef), $lib);
+    is('the retry does not rename the library row either',
+       ($got ? $got->{album_title} : undef), 'Heaux Tales');
+
+    # CONTROL — the guard must not stop the repair on the row it is FOR. The same add with no
+    # twin on the list still shows the Spotify title (without it every assertion above passes
+    # against a build that simply never repairs anything).
+    $clean->();
+    Slim::Utils::Timers::clear();
+    my $own = add(_client => $playing, name => 'Heaux Tales', svc => '',
+                  favurl => 'spotify:album:4cogt2uqKoSyL61tzWaQei');
+    my $ownRow = Plugins::ListenLater::DB::get($own ? $own->{id} : 0);
+    is('CONTROL: an unmerged Spotify row still takes the Spotify title',
+       ($ownRow ? $ownRow->{album_title} : undef), "Heaux Tales, Mo' Tales: The Deluxe");
+
+    $clean->();
+    $FakeSpottyAPI::RESPOND = sub { { id => '4cogt2uqKoSyL61tzWaQei',
+        name => "Heaux Tales, Mo' Tales: The Deluxe", artist => 'Jazmine Sullivan' } };
+}
+
 printf "\n%d passed, %d failed\n", $pass, $fail;
 exit($fail ? 1 : 0);

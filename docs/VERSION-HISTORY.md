@@ -3223,3 +3223,15 @@ Per-release user-facing notes live in `CHANGELOG.md`. Append new entries at the 
   - Suites 1,637, all green. Nothing re-verified on the server: nothing executable changed.
   - 1.0.3 is still the last build INSTALLED and TESTED on the rig, and the live PLAYBACK test
     stays DEFERRED.
+
+- **1.0.6** (dev, 2026-09-16) — **The Spotify title repair no longer renames a row it merged
+  into.** An LBF Spotify add (label title, no artist) gets its year from classify and its artist
+  from the backfill; if an earlier same-list row from another source had the same artist, title
+  and year, the Spotify row merged into it and `updateAlbumTitle` then renamed that row to
+  Spotify's edition name, so a re-add of it stored a duplicate. Reproduced live on 1.0.3 (rows
+  362–364, removed). The title write — first attempt and retry — now requires the canonical row
+  to still be that Spotify release (`_sameReleaseRow`, shared with `_backfillRetryTick`).
+  - t_addpath +11 (5 red on the unfixed code). Suites 1,687, all green.
+  - INSTALLED and VERIFIED LIVE (17:56): the merged-into library row kept its title, the WARN
+    fired, and the re-add answered `already=1`. Test rows removed. Ledger: `CLAUDE.md`,
+    "2026-09-16 review (1.0.6)". The live PLAYBACK test stays DEFERRED.

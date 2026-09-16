@@ -3712,15 +3712,28 @@ sub _backfillStreamingArtist {
                 $log->info("LL: backfilled spotify artist '$artist' onto rec $id")
                     if length $artist;
 
-                # The title comes off the SAME object, so it costs no second call — and the
-                # id must be the one updateArtist just returned, because that call can merge
-                # this row into an earlier cross-source save and retire the id we came in
-                # with. `name` is Spotify's album title (the key PFR's _searchSpotify matches
-                # on); updateAlbumTitle no-ops when it agrees with what we hold.
+                # The title comes off the SAME object, so it costs no second call. `name` is
+                # Spotify's album title (the key PFR's _searchSpotify matches on);
+                # updateAlbumTitle no-ops when it agrees with what we hold.
                 return unless $titleFromLabel;
                 my $title = (defined $album->{name} && !ref $album->{name}) ? $album->{name} : '';
                 return unless length $title;
-                my $canonical = Plugins::ListenLater::DB::updateAlbumTitle($id, $title);
+
+                # ...and it may land ONLY on a row that still replays THIS Spotify release.
+                # updateArtist can merge this row into an earlier save from ANOTHER source (the
+                # artist is what makes the keys meet), and the earlier row survives: a library
+                # or Qobuz row whose title was never a label. Renaming that to Spotify's
+                # edition name re-keys it, so the next add of the same album stores a
+                # duplicate (reproduced on plex:9000, 2026-09-16). Asked of the CANONICAL row,
+                # not of $id: updateAlbumTitle follows lineage itself, so a merge made by some
+                # other carrier (_verifyRelease's year) would reach a foreign row just the same.
+                my $own = _sameReleaseRow($id, $source, $albumId);
+                unless ($own) {
+                    $log->warn("LL: rec $id is no longer the $source row for album $albumId "
+                        . "(merged into an earlier save) — not applying $source album title '$title'");
+                    return;
+                }
+                my $canonical = Plugins::ListenLater::DB::updateAlbumTitle($own->{id}, $title);
                 $log->info("LL: backfilled spotify album title '$title' onto rec "
                     . ($canonical || $id));
             }, { uri => "spotify:album:$albumId" });
@@ -3795,6 +3808,23 @@ sub _armBackfillRetry {
     return;
 }
 
+# The canonical row for $id, but ONLY while it still replays the given release on the given
+# service; undef otherwise (removed, or merged into a row with another source or album id).
+# The Spotify backfill's two carriers share it — the retry deciding whether to ask again, and
+# the title write deciding whether the answer is still this row's to take — so they cannot
+# disagree about which row a Spotify album object describes.
+#
+# STRICT on an empty identity, unlike DB::_sameSourceCanonicalId: a Spotify row always carries
+# its album id (it is how the backfill was armed at all), so a survivor without one is some
+# other row, and a title is not a value to guess onto it.
+sub _sameReleaseRow {
+    my ($id, $source, $albumId) = @_;
+    my $rec = eval { Plugins::ListenLater::DB::getCanonical($id) } or return;
+    return if ($rec->{source} // '') ne ($source // '');
+    return if Plugins::ListenLater::DB::refIdentity($rec) ne ($albumId // '');
+    return $rec;
+}
+
 # The retry. A NAMED sub for the same reason as _verifyRetryTick, and it re-reads the row for
 # the same reasons: in the minute since, it may have been removed, merged into a row that
 # replays a different release, or filled in by another route.
@@ -3802,9 +3832,7 @@ sub _backfillRetryTick {
     my ($client, $args) = @_;
     return unless ref $args eq 'HASH' && $args->{recId};
 
-    my $rec = eval { Plugins::ListenLater::DB::getCanonical($args->{recId}) } or return;
-    return if ($rec->{source} // '') ne ($args->{source} // '');
-    return if Plugins::ListenLater::DB::refIdentity($rec) ne ($args->{albumId} // '');
+    my $rec = _sameReleaseRow($args->{recId}, $args->{source}, $args->{albumId}) or return;
 
     # Nothing left to ask for: the artist is in and there is no label title to replace.
     my $needArtist = !(defined $rec->{artist} && length $rec->{artist});
