@@ -40,11 +40,12 @@ numbers rot on the next edit; these do not.
 
 | symbol / subject | verdict | find it with |
 |---|---|---|
-| `_artistMatch`, `_albumMatches`, empty artist, artist-less candidate | **DECLINED ×4** — no service returns an artist-less album; the `''` is a shape default, not a population | `AN ARTIST-LESS MUSIC ROW` |
+| `_artistMatch`, `_albumMatches`, empty artist, artist-less candidate/record | **DECLINED ×4, reinforced fleet-wide 2026-09-16** — out of scope BY DECISION; a compilation is credited upstream (Various Artists / curator), so a local artist-less row disproves nothing | `AN ARTIST-LESS MUSIC ROW` |
 | `_norm`, `_normStrict`, `DB::_norm`, three normalisers | not unified, deliberately | `THREE normalisers` |
 | `_norm` non-Latin fold, CJK/Cyrillic erasure | FIXED 0.1.143; the old generator is gone | `NO LONGER DELETES A NON-LATIN` |
 | `trackUrlKey`, `\|u:` key, nameless track, `_keyIsNamelessTrack` | DELIBERATE, owes no rung; needs a WRITER named | `THE \`\|u:\` KEY IS DELIBERATE` |
 | `_keyForRow`, dedupe key writers | one writer only, by design | `THE DEDUPE KEY HAS ONE WRITER` |
+| Default / Classic web skins, `isWeb`, old-skin dividers, info entries missing on web | **NOT SUPPORTED, by Simon 2026-09-16** — LL stays Material-only (LBF + PFR were ported; LL was not). Add and Remove/Move are Material custom actions and `menuMode` info providers, which `Slim/Menu/Base.pm:180` hides on web pages; not a gap, do not report | `LL DOES NOT SUPPORT THE OLD WEB SKINS` |
 | `_insertTrackRow`, track identity = play url | settled 0.1.129 | `IDENTITY IS ITS PLAY URL` |
 | `_migrateRefold` retry loop | cannot be trapped in one | `CANNOT be trapped` |
 | `_migrateRefold` NULL `added_at` sort | NULL sorts last, not a defect | `puts a NULL \`added_at\` LAST` |
@@ -70,6 +71,9 @@ numbers rot on the next edit; these do not.
 | `_punctPass` fallback examples, `'!!!'`/`'+/-'` reaching the fallback | **COMMENT FIXED 0.1.151** — the code was always right; DB's example list had been copied onto a sub with two rules ahead of it | `WHICH MARKS-ONLY NAMES REACH` |
 | `ESCAPE`, LIKE metacharacters, `[a-z0-9 ]`, `findByArtistAlbum`/`findTrackByArtistTitle`/`findByAlbum` | **COMMENT FIXED 0.1.151** — no ESCAPE is still correct, but by `_norm`'s strip rules, not the dead range claim | `THE ESCAPE JUSTIFICATION` |
 | migration reachability vs `main` | judge against what main ships TODAY, never a quoted number | `JUDGE MIGRATION REACHABILITY` |
+| Spotify album TITLE never matching Played, `cleanupTags`, a Spotify row storing `"Artist - Album"`, `ref.svc_title` | **B, 1.0.5 BUILT (dev, suites green) 2026-09-16 — 1.0.3 is the last build INSTALLED + TESTED on the rig; live PLAYBACK test DEFERRED and classed OK until a user reports otherwise (Simon) — do not re-raise as unverified** — Spotify plays now match by release id (`_spotifyAlbumRecord`), title doors are the fallback; a label-titled Spotify row now DISPLAYS the Spotify album it matched to (`updateAlbumTitle`, Simon's call; verified live 1.0.1), with a failed/429 lookup refused and retried once (1.0.2). **The repair is gated on `!$already`, so a pre-existing row is repaired by DELETE-then-add, never by a plain re-add — accepted, not a defect (2026-09-16)** | `A SPOTIFY ROW'S STORED ALBUM TITLE CAN NEVER MATCH` |
+| `_updateIdentityField` / `updateAlbumTitle` guard ownership, `_titleFromLabel` provenance, "the caller owns the guard" | **C, FIXED 1.0.5 (prose only) 2026-09-16** — the DB.pm header wrongly named `updateAlbumTitle` as the guard's owner; the guard is the caller's `return unless $titleFromLabel`. Same round CLEARED `_spottyAlbumAnswered`, `_backfillRetryTick`'s stricter guard, `_mergeKeyRows`' title retention and the `_titleFromLabel` leak paths — reasons tabled in the entry, do not re-derive | `2026-09-16 review (1.0.5)` |
+| `_sameReleaseRow`, the Spotify title repair landing on a MERGED survivor, `updateAlbumTitle` after `updateArtist`, a library/Qobuz row renamed to a Spotify edition title | **C, FIXED 1.0.6 2026-09-16, REPRODUCED LIVE on 1.0.3 first, VERIFIED LIVE on 1.0.6 (installed)** — the title write (first attempt AND retry) now lands only on a canonical row that is still the same Spotify release; the retry tick shares the same helper. The trigger is an earlier same-list row with equal artist+title+YEAR from any source, NOT a yearless one (classify stamps Spotify's year before insert) | `2026-09-16 review (1.0.6)` |
 
 **Two standing rules that kill most repeat findings:**
 
@@ -87,6 +91,11 @@ whose FIRST LINE names the **symbols** a future review would grep for, then the 
 the date and who decided. Add a row to the index above in the same edit. State the reason as
 a fact that can be DISPROVEN ("no service returns X"), never as "unlikely" — a rarity claim
 invites the next round to find one counter-example and reopen the whole entry.
+
+**CLOSING A ROUND IS NOT A SUPPRESSION** (Simon, 2026-09-14). A §C entry records that a defect,
+as described, was fixed. Never head it "Do not re-report" — that wording is for a DECISION Simon
+asked for (declined, by design, a stated residual, null behaviour that keeps being mis-reported),
+always with its reason, and those stay suppressed. The code a fix added is new and open to review.
 
 ### ⚠ PODCAST SUPPORT — THE BUILT-IN PATH WAS REMOVED IN 0.1.136. READ THIS FIRST.
 
@@ -161,8 +170,10 @@ stack depth 38). Neither was ever a performance defect.
 ### 2026-09-09 carrier audit, part 2 (0.1.139) — what part 1 got wrong
 
 Two of part 1's claims above were written ahead of the code. Both are now true; both were
-reproduced first, and each has a test that fails without its fix. Do not re-report either, and
-do not assume the surrounding entries were verified to the same standard.
+reproduced first, and each has a test that fails without its fix. This closes the two defects as
+described (the fix code is not thereby settled); the "Deliberately NOT taken" item below is a
+recorded decision and stays. Do not assume the surrounding entries were verified to the same
+standard.
 
 - **THE SERVICE IS NOT THE BUNDLE — `_sameSourceCanonicalId` compared only `source`.** Part 1
   says these writes "follow only a survivor that still uses that service/ref bundle"; the guard
@@ -378,6 +389,8 @@ subsystem.
 
 ### A2. NOT FINDINGS — Listen Later specific
 
+- **LL DOES NOT SUPPORT THE OLD WEB SKINS (Default / Classic) — Simon, 2026-09-16.** The fleet's web-skin pass (LBF 1.0.12, PFR 0.9.44: styled textarea dividers, escaped text rows, web icons, bounce-backs, relative settings link) was deliberately NOT ported here. LL's whole job is Add and Remove/Move, and on those skins neither exists: Add and the saved row's "…" menu are Material custom actions, and the Add entries in the track/album info menus are `menuMode => 1` providers, which `Slim::Menu::Base` skips when `$tags->{menuMode}` is false (line 180 in 9.1) — verified live, a library track's Default Information page lists every other plugin's entries and none of LL's. A web-only provider plus in-drill Move/Remove rows was offered and declined: "we will not support old skins for this one". Not a gap; do not report old-skin rendering or the missing web entries. Re-open only on Simon's word.
+
 - **AN ARTIST-LESS MUSIC ROW DOES NOT EXIST, ON EITHER SIDE OF ANY COMPARE — DECLINED FOR THE
   THIRD TIME (Simon, 2026-09-10). Podcast episodes are the ONLY exception and they route
   elsewhere.** *"empty artists do not exist, if they did we just don't add, we need an artist
@@ -421,6 +434,30 @@ subsystem.
   bug is the mistake this entry exists to stop. It is the 0.1.66 replay leniency, pinned; with
   no artist-less writer on either side it can only ever be reached by a malformed response,
   where accepting is the same answer the branch gave before the guard was written.
+
+  **REINFORCED 2026-09-16 (Simon): artist-less is out of scope FLEET-WIDE, not just here.** PFR's
+  ledger now carries its own copy in §A2. Every leg of this entry stands as written; the note below
+  exists only because I tried to weaken one and was corrected, and the next round should not repeat
+  the attempt.
+  - **A COMPILATION IS NOT A COUNTER-EXAMPLE — settled the same day.** `Melodies International
+    presents Ariwa Sounds` sits in the live list on plex:9000 with an empty `artist` (`Browse.pm`
+    prefixes the artist only `if $rec->{artist}`, so it renders bare), and I cited it as
+    disproving "no service surface returns an artist-less album". **It does not.** Simon: *"That
+    would be classifed as Various Artists or sometimes it would be under the person who curated it
+    in a service."* A comp IS credited upstream — Various Artists, or the curator. So that row is
+    a LOCAL record gap, not a population of artist-less releases, and **the CANDIDATE-side leg is
+    untouched by it.**
+  - **Do not report the row, and do not hunt its writer as review work.** It stores, displays and
+    resolves its tracklist perfectly well. The decision is that such a row is left exactly as it
+    is — stored, playable, never special-cased. Name its writer only if some OTHER defect turns
+    on it.
+  - **Simon's steer for the case is MATCH BY ALBUM TITLE ALONE** — which is precisely what the
+    pinned 0.1.66 leniency (`_artistMatch`, the paragraph just above) already does. **Nothing is
+    owed here**; it is the existing behaviour, not a change to build, and not a gap to report.
+  - **Where that row came from, verified 2026-09-16:** PFR's High Scoring Albums, Spotify-matched.
+    PFR parsed no artist for that review (its label is album-only where every neighbour is
+    `Artist - Album`). Why the Spotty artist backfill left it empty is NOT established and is not
+    review work — see the rule above.
 
   **THE ADD GATE IS NOT GOING TO ENFORCE IT, AND THAT IS SETTLED (Simon, 2026-09-10).**
   `_saveTrackRecord` requires source + play url + TITLE only, so "we need an artist field" is a
@@ -769,8 +806,10 @@ subsystem.
       it for two releases — the gate cannot tell the two apart and was never asked to.
 
   **THE 2026-09-10 ROUND, PART 2 — three findings against this entry, all REPRODUCED, none of
-  them the two pre-answered above. Two are now pinned by tests; one is a recorded limitation.
-  Do not re-report any of them without a real row.**
+  them the two pre-answered above. Two are now pinned by tests; one is a recorded limitation.**
+  The DECISIONS here stay suppressed — the url guard deliberately NOT fixed in `DB.pm`, and the
+  `|u:` reachability limitation (re-raise only with a real row). The tests and caller pin added
+  for them close those findings as described; they are not thereby settled against new findings.
 
   - **The lazy disambiguation is NOT idempotent at the `DB::add` layer, and the CALLER is what
     closes it.** An add rec carries no `dedupe_key`, so `_keyForRow` rebuilds the plain
@@ -1327,6 +1366,196 @@ subsystem.
   the repo builds a LIKE pattern from it (checked 2026-09-11; every LIKE lives in `DB.pm`).
 
 ### B. KNOWN-OPEN AND ACCEPTED — do not re-report as new
+
+- **A SPOTIFY ROW'S STORED ALBUM TITLE CAN NEVER MATCH PLAYED FOR TWO MEASURED REASONS — FIXED IN
+  DEV 1.0.2 (current dev build 1.0.3, comments only), 2026-09-16, UNCOMMITTED. INSTALLED AND
+  TESTED on plex:9000; the live PLAYBACK test is DEFERRED and CLASSED OK (Simon).
+
+  Symbols: `_addCtxCommand` title choice,
+  `_backfillStreamingArtist`, `Played::_matchRecord`, `Played::_spotifyAlbumRecord`,
+  `DB::findAlbumBySourceAlbumId`, `DB::updateAlbumTitle`, `_spottyAlbumAnswered`,
+  `_armBackfillRetry`, `ref.svc_title`, Spotty `cleanupTags`.**
+
+  **THE FIX (1.0.1, uncommitted, suites green, t_played 56 → 68).** Played no longer relies on the title
+  for Spotify. `_matchRecord` first asks `_spotifyAlbumRecord`: the playing url, with its slashes
+  stripped (Spotty's own URI form), goes to `Plugins::Spotty::API->trackCached(undef, $uri,
+  {noLookup=>1})`. That is the cache entry Spotty builds the playback metadata from, so there is
+  no Web API call. The cached track's `{album}{id}` is then looked up with
+  `DB::findAlbumBySourceAlbumId('spotify', …)`, which filters `kind='album'` in SQL so the
+  playlist guarantee (0.1.107) holds. A hit is exact and tells the two editions apart. Any miss
+  falls through to the unchanged title doors: Spotty not loaded, a non-track URI (episodes), an
+  uncached track, a cached album with no id (Spotty pages tracks past the 50th of a long album
+  with `{name,image}` only), or no row with that id. Only `source eq 'spotify'` reaches it; no
+  shared-matcher, PFR or fleet change. Source-read basis: LMS 9.1.2 never gives a Spotty
+  RemoteTrack an `albumname` (`setRemoteMetadata` sets no album), so the title doors see the
+  cleaned handler string; Spotty's `API::Cache::normalize` stamps an album fetch's tracks with
+  the album's `id`.
+  **Deliberately NOT changed:** when the playing album id is known and NO row carries it, the
+  title doors still run, so a saved 1990 `Mixed Up` is still marked by a 2018-remaster play when
+  only the 1990 row exists. That is today's behaviour; blocking it would also block a
+  market-relinked track whose album id differs from the saved one.
+
+  **A DIE inside `trackCached` is WARNed (1.0.4, 2026-09-16), and this is the one thing to grep for if
+  Spotify plays stop matching.** Every other miss — Spotty absent, a non-track URI, an uncached
+  track, a cached album with no id — is an expected fall-through to the title doors and stays
+  silent. A die is not: it produces the SAME fall-through, and the title doors are measured
+  never to match a Spotify row, so a changed Spotty call signature would match nothing for ever
+  with no symptom but silence. The live playback test being deferred is exactly why this line
+  exists. `log.txt`: `LL: Spotty trackCached died for spotify:track:…`. Not latched (one line
+  per newsong, Spotify only). Pinned by t_played +4, including a CONTROL that a plain cache miss
+  logs nothing; 2 of the 4 fail with the warn removed. **`API->trackCached` being 'DECLINED' is
+  an ADD-path entry only** — see the scoping note at the `_hasAlbumIdFromTrack` bullet and in
+  `Plugin.pm::_canClassifyTrack`; a grep landing there from `Played.pm` has the wrong entry.
+
+  **THE DISPLAY TITLE (Reason 1) — decided by Simon 2026-09-16: "it should show what its matched
+  to".** Also in the working tree. It is the reverted patch re-applied, minus its rename, with
+  its rationale corrected: it is for DISPLAY, not for Played. `_addCtxCommand` records a
+  transient `_titleFromLabel` (no `&al=` arrived, so the title can only be the row label).
+  `_finishAlbumAdd` then also runs `_backfillStreamingArtist` for Spotify when that is set.
+  Its Spotify branch takes `$album->{name}` off the album object it already fetches and calls
+  `DB::updateAlbumTitle`, which does nothing when the normalised titles agree and otherwise
+  re-keys through `_updateIdentityField` (now accepting `album_title`). Effects:
+  - A PFR row shows `Mixed Up (Remastered 2018 / Deluxe Edition)`, the same as a native add.
+  - A native add is a no-op, because its label is already the name.
+  - A row that lands on a native save's key on the same list MERGES into the earlier save.
+  - A same-source twin on another list blocks the write, and the row keeps its label.
+  - A handshake (`&al=`) title is never overwritten.
+  - Tests: t_db +13, t_addpath +3 (the wiring test fails with `_titleFromLabel => 0`).
+  - Fire-and-forget: nothing waits on it. A failed lookup (429) is retried once from 1.0.2
+    (below); on 1.0.1 the row kept its label.
+  - **Rows saved before this build (349–351) are not repaired, and a plain re-add does not
+    repair them either — BY DESIGN, not a bug (Simon, 2026-09-16). ACCEPTED: delete the row,
+    then add it again.** The trigger is gated on `!$already`, and a re-add of a label-titled row
+    rebuilds the same label title, so it lands on the same `dedupe_key`, sets `already=1` and
+    never reaches `_backfillStreamingArtist`. Letting the repair run on an existing row was
+    considered and declined: the add path's job is to add, a silent title rewrite of a row the
+    user did not think they were touching is the wrong surface for it, and the affected set is
+    three rows on Simon's own list. **Do not report the `!$already` gate as a defect.**
+  - **VERIFIED LIVE on 1.0.1 (dev build, 2026-09-16 13:14):** a PFR-shaped addctx
+    (`name=Jazmine Sullivan - Heaux Tales`, `artist=`, `svc=`, `favurl=spotify:album:4cogt2uq…`)
+    logged `_finishAlbumAdd (3318)` and listed as `Jazmine Sullivan – Heaux Tales, Mo' Tales: The
+    Deluxe (2022)`: title, artist and year all came from Spotify. Test row 356 was removed. The
+    same add on the old 1.0.0 build (13:07, row 355) kept the label, because Spotify answered
+    `429` and the one-shot backfill gave up.
+  - **A FAILED SPOTIFY LOOKUP WAS STORED AS THE TITLE on 1.0.1. Fixed in 1.0.2, with the retry
+    Simon approved.** Spotty reports every failure, a 429 included, through `album()`'s SUCCESS
+    callback as `{ name => <error text>, type => 'text' }` (`API::_gotError`; `album()`
+    normalises it and passes it on). 1.0.1 would have written "rate limit exceeded" as the
+    album title of a label-titled row. No live row was affected (list scanned 13:2x). 1.0.2:
+    - `_spottyAlbumAnswered` accepts only an object with a Spotify `id`; `normalize` keeps `id`
+      and strips `type` from a real album.
+    - A failure, or a die, goes to `_armBackfillRetry`: ONE retry after `VERIFY_RETRY_SECS`,
+      within `VERIFY_MAX_ATTEMPTS`, then a WARN.
+    - `_backfillRetryTick` re-reads the canonical row and does nothing if it was removed, now
+      replays a different source or id, or has an artist and no label title left to replace.
+    - Spotify only; the Tidal and Deezer backfill is unchanged.
+    - t_addpath +14. With the answer check disabled, the error text is stored and 7 of them fail.
+    - **Live on 1.0.2 (server restarted 13:29, after the 13:24 build):** the same PFR-shaped add
+      listed as `Jazmine Sullivan – Heaux Tales, Mo' Tales: The Deluxe (2022)`; test row 357 was
+      removed. Spotify answered first time, so the failure and retry path has NOT been seen
+      live. To confirm it, look for `spotify album details unavailable, retrying in 60s` in the
+      log after a 429.
+    - **Real PFR adds on 1.0.3 (Simon, 13:48–13:49):**
+      - `The Cure - Mixed Up` (row 359) → `The Cure – Mixed Up (Remastered 2018 / Deluxe Edition) (1990)`.
+      - `Art of Noise - In Visible Silence` (row 360, Wish List) → `The Art Of Noise – In Visible Silence (1986)`.
+      - `The Eagles - Their Greatest Hits (1971-1975)` (row 361) → `Eagles – Their Greatest Hits 1971-1975 (2013 Remaster) (1976)`.
+      - No 429 occurred. `Melodies International presents Ariwa Sounds` answered `already=1`: it
+        cross-source-deduped onto the existing artist-less QOBUZ row 248 (0.1.33), so no
+        backfill ran, by design. It is not a gap in this fix; the artist-less row is the A2
+        DECLINED class.
+  - **Same callback, audited SAFE:** `Sources::classifyRelType`'s Spotify path reads only
+    `album_type`, `total_tracks` and `release_date`. The error object has none of them, so it
+    gets no count and no year, falls to `_countThen`, and then to the verify retry. The 13:07
+    log shows exactly that: `release verify got no track count, retrying in 60s`.
+  **INSTALLED AND TESTED (1.0.3, 2026-09-16). LIVE PLAYBACK TEST DEFERRED — Simon's call: classed OK until a user reports otherwise.** What was tested live: the display title and the add path (real PFR
+  adds, above). What was NOT, and why: the Played trigger needs real audio, and Spotify
+  playback does not work on this rig even after a fresh Spotty sign-in (2026-09-16: `mode play`,
+  `time 0` for 18s). The retry after a failed lookup has also not fired live, because no 429
+  occurred during testing. Both are covered by the suites and are **treated as working**. A
+  review must NOT report either as "unverified". Reopen only on a USER REPORT: a Spotify album
+  that did not move to Played, the wrong edition moving, or a label or error text left as a
+  title. To check then: play 2+ tracks of the album on a player that plays Spotify, and look
+  for `LL: marked album rec <id>` for the right row, or for `spotify album details
+  unavailable, retrying in 60s`.
+
+  **The original investigation** (written before the fix above; nothing had been built yet):
+  a first fix was written, tested green, then **reverted unapplied** the same day because live
+  probing showed it would have stored a string Played still cannot match. Once the id door made
+  Played independent of the title, it was re-applied for DISPLAY (above). Everything below was MEASURED on plex:9000 (Spotty signed in; audio blocked for new
+  Web API accounts, but **track metadata still resolves** — append a `spotify://track:` url to a
+  stopped player and read `status tags:aAlKuN`; that is the playback-layer test, and it works).
+
+  **Reason 1 — a sibling's row LABEL becomes the title (sender: PFR).** Four PFR adds logged:
+  `name=The Cure - Mixed Up, artist=, year=(undef), svc=, favurl=spotify://album:3huHRC…`. No
+  `&al=` because the Spotify favurl is `native_favurl` (see PFR `_attachFavUrl`), so
+  `$album = $p{name}` = the label. Stored as `The Cure – The Cure - Mixed Up (1990)`.
+  - **The artist and year are NOT part of this.** `artist=` arrives empty. Material's
+    `browse-resp.js` app-item branch would set `item.artist = item.subtitle` AND `item.service`,
+    and both arrived empty, so that branch did not run for PFR rows; with `item.artist` undefined,
+    `customactions.js` never substitutes `$ARTISTNAME` and addctx drops the literal. And `_backfillStreamingArtist` recovered the
+    right artist on 4/4 (`The Cure`, `The Art Of Noise`, `Dinosaur Jr.`, `Haruomi Hosono`), with
+    the year also recovered. Only the title has no recovery.
+  - `svc_title` is not set either: it is written only when `$p{name} ne $album`, and with no `&al=`
+    they are the same string.
+
+  **Reason 2 — Spotty cleans the album at PLAYBACK but not at BROWSE (sender: any, native Spotty
+  included).** `Plugins::Spotty::ProtocolHandler::getMetadataFor` — what `Played` reads — runs
+  `API::Cache->cleanupTags` over title and album when pref `cleanupTags` is on. **It defaults ON**
+  (`$prefs->init({ cleanupTags => 1 … })`) and is on here. The regex is KEYWORD-GATED, not a
+  bracket strip:
+  ```
+  s/[([][^)\]]*?(deluxe|edition|remaster|live|anniversary)[^)\]]*?[)\]]//ig;
+  s/ -[^-]*(deluxe|edition|remaster|live|anniversary).*//ig;
+  ```
+  The album OBJECT (`$album->{name}`, the browse rows, any API album fetch) is never cleaned.
+
+  | album id | `$album->{name}` / browse | playback `album` |
+  |---|---|---|
+  | `3huHRCpnBNMIrU4e10HDtr` | `Mixed Up (Remastered 2018 / Deluxe Edition)` | `Mixed Up` |
+  | `3Q0yrBSY6UjCPfUZvT7JyF` | `In Visible Silence` | `In Visible Silence` |
+  | `0DOnSBWpWwGGrO5DQZZ0Qf` | `American Football (LP2)` | `American Football (LP2)` — kept, no keyword |
+
+  **Consequence: a natively-added Spotify album whose name contains one of those five keywords
+  already fails Played today, whoever sent it** — it stores the raw browse name and Played looks
+  up the cleaned one. **REPRODUCED 2026-09-16** with two native Spotty adds of the same album
+  (Simon added them from Spotty's own browse; the earlier PFR row 352 was removed first):
+
+  | id | addctx `name=` (native label, `artist=` empty, `svc=` empty) | stored title | playback album (track probed) | Played |
+  |---|---|---|---|---|
+  | 353 | `Mixed Up (Remastered 2018 / Deluxe Edition) (1990)` — `album:3huHRC…` | `Mixed Up (Remastered 2018 / Deluxe Edition)` | `Mixed Up` (`track:3oHh50…`) | **misses all three doors** |
+  | 354 | `Mixed Up (1990)` — `album:705VGsDQ…` | `Mixed Up` | `Mixed Up` (`track:6VyG0O…`) | door 1 hits |
+
+  Doors replayed with `DB::_norm` (which keeps bracket WORDS, turning only punctuation into
+  spaces): 353's key is `the cure|mixed up remastered 2018 deluxe edition|1990`, so the
+  year-agnostic prefix `the cure|mixed up|` misses it, `findByAlbum` misses it, and its
+  `svc_title` is the raw label WITH the year (`… deluxe edition 1990` after `_norm`), so door 3
+  misses too. Artist and year were backfilled on both. **Worse than a miss:** playing the 2018
+  remaster reports `Mixed Up` / `The Cure`, which hits row **354** through door 1, so with both
+  saved the WRONG row moves to Played and 353 stays for ever. Native adds do NOT hit Reason 1:
+  Spotty's label is the bare album name plus ` (YYYY)`, and LL strips that year.
+
+  Two side facts from the same probe: (a) the comment at the `svc_title` write in
+  `_addCtxCommand` said `$p{name}` "is exactly what the player will report". That is false for
+  a native Spotty row, because the label carries ` (YYYY)` and the player does not. The comment
+  was corrected 2026-09-16. (b) Which string `_matchRecord` reads for a Spotty track was
+  settled from source (LMS 9.1.2): a Spotty RemoteTrack never gets an `albumname`, so it reads
+  `playingMeta`, the same handler string the probe's `status` tags show.
+
+  **What this rules out — read before designing a fix:**
+  - **`$album->{name}` as the title source.** It is the uncleaned string. This is the reverted fix.
+  - **Stripping parentheticals.** Playback KEEPS `(LP2)`; A2's American Football entry depends on it.
+  - **Copying `cleanupTags` into LL** without accepting the coupling: it is another plugin's
+    private pref and private regex, and a drift fails silently in exactly the no-log way the
+    `&al=` FLEET RULE calls the hardest failure in this plugin to notice.
+  - **Judging a Spotify title by the browse layer.** The two layers disagree by design.
+
+  **Two earlier inferences that were WRONG, so nobody reuses them:** that PFR rows arrive with the
+  review capsule as `$ARTISTNAME` (they arrive empty — see above), and that the recovered year
+  (1990) proved the matched album was the original release (`3huHRC…` is the 2018 deluxe; Spotify
+  keeps the original release date on it).
+
+  **Rows already saved** (ids 349–352 and any earlier Spotify keyword album) keep their titles
+  until a fix decides whether they are repaired or re-added.
 
 - **A STREAMING podcast SERIES row still shows a dead "Add" — ACCEPTED 2026-09-05, it
   cannot be fixed from the plugin side. Do not re-report, and do not "fix" it by emptying a
@@ -2231,7 +2460,9 @@ succeeding**, which is now a measured constraint rather than a preference. The l
 the add depends on the answer: `_backfillStreamingArtist`'s Spotify branch still calls
 `$api->album` and is fine, because it is fire-and-forget — no `setStatusProcessing`, no timeout,
 a guarded callback — so a 429 costs one row its artist rather than hanging an add. That is the
-distinction, not "no API calls".
+distinction, not "no API calls". (From 1.0.2 that branch retries a failed lookup ONCE, 60s later,
+on a timer; the add still never waits. And its callback must check the answer: Spotty reports a
+429 through the success callback with the error text as `name` — §B, `A FAILED SPOTIFY LOOKUP`.)
 
 **Round of 2026-09-04 (second) — CLOSED, one finding, FIXED.** Run against the
 0.1.134 tree. `Podcast::resolveEpisode` walked on past a non-perfect match while
@@ -2442,6 +2673,132 @@ module still applies to any build that changes behaviour; this one does not, so 
 re-verified on the server. Bandcamp was exercised end to end against it — an add, a resolve to a
 full tracklist, and a Buy link to the real album page. Commits sit on `dev` UNPUSHED, which is the
 review gate and not an oversight.
+
+### 2026-09-16 review (1.0.5) — ONE finding: the guard-ownership comment in `_updateIdentityField`
+
+Round against the 1.0.4 commit (`git diff @{upstream}...HEAD`): `Played.pm` release-id door,
+`DB.pm` `updateAlbumTitle` / `findAlbumBySourceAlbumId` / `album_title` on `_updateIdentityField`,
+`Plugin.pm` `_titleFromLabel` provenance + the widened `_backfillStreamingArtist` and its retry.
+
+**THE FINDING — `_updateIdentityField`, `updateAlbumTitle`, `_titleFromLabel`, `album_title`
+provenance: FIXED 2026-09-16 (prose only, 0 code lines).** `_updateIdentityField`'s header said
+the title guard "lives in updateAlbumTitle, which only accepts a title the CALLER has established
+was read off a row LABEL". It does not. `updateAlbumTitle($id, $title)` takes no provenance
+argument and checks none; it only skips the rewrite when the new title normalises equal to the
+stored one, then writes. The guard is the caller's `return unless $titleFromLabel`
+(`Plugin.pm`, in the Spotify branch of `_backfillStreamingArtist`), which both `Plugin.pm`'s own
+comment and `updateAlbumTitle`'s header state correctly — the DB.pm line was the lone
+contradiction, and it contradicted a header that shouts `THE CALLER OWNS THE GUARD` 140 lines
+below it.
+
+**Why it was worth a version.** This is exactly the second standing rule — a comment is not the
+contract — and the failure it invites is concrete: a later caller trusting the DB.pm line fires
+`updateAlbumTitle` on a row whose title arrived on an `&al=` handshake, and it overwrites and
+re-keys, undoing the 0.1.92 `svc_title` decision with nothing in `DB.pm` to refuse it. The fix
+names the caller as the owner and cross-references the header.
+
+**WHAT THE ROUND CLEARED, recorded so the next one does not re-derive it:**
+
+| checked | why it is not a finding |
+|---|---|
+| `_spotifyAlbumRecord`'s `trackCached(undef,$uri,{noLookup=>1})` signature and `{album}{id}` | source-read and pinned; the live playback test is a RECORDED DEFERRED decision, not a gap |
+| `_spottyAlbumAnswered` now gating the ARTIST backfill too (was `ref eq 'HASH'`) | confirmed by the live 1.0.3 PFR adds, which returned both title and artist |
+| `_backfillRetryTick`'s ref-identity guard being stricter than `_verifyRetryTick`'s deliberately-permissive empty-identity rule | no WRITER nameable that produces an empty-identity Spotify survivor — the branch is real, the input is not |
+| the title repair firing for NATIVE Spotty adds, and the second `album()` after `classifyRelType` | both reachable; native adds arrive artist-less so they already fired the backfill, and Spotty caches album objects. No concrete failure |
+| `_mergeKeyRows` keeping the earlier row's title while writing the new key | safe: a key collision implies the two titles already normalise equal |
+| `_titleFromLabel` leaking into `DB::add`, the now-playing fallback, `_addCommand` / `_saveTrackRecord` | explicit column list (harmless); the fallback yields no Spotify `album_id` so the repair never fires; no flag means the repair is inert |
+
+**State at close.** **1.0.5** in `install.xml` and `repo.xml`, zip rebuilt with a matching
+`<sha>`, 15/15 suites green at 1,637 assertions. `Plugin.pm` and `Played.pm` are byte-identical
+to 1.0.4; `DB.pm` differs in comment lines only, 0 executable lines — so nothing was re-verified
+on the server and nothing needed to be. `docs/VERSION-HISTORY.md` gained the 1.0.4 entry it was
+missing (the `trackCached` die WARN) alongside 1.0.5. **README/CHANGELOG deliberately NOT
+regenerated** — dev build, merge-to-`main` artifacts. **1.0.3 remains the last build INSTALLED
+and TESTED on the rig**, and the live PLAYBACK test stays DEFERRED by Simon.
+
+### 2026-09-16 review (1.0.6) — ONE finding: the Spotify title repair renamed the row it MERGED INTO
+
+Round against the three unpushed `dev` commits (1.0.4, 1.0.5, the spec re-copy).
+
+**THE FINDING — `_backfillStreamingArtist` (Spotify branch), `updateAlbumTitle`, `updateArtist`,
+`_sameReleaseRow`: FIXED 1.0.6, and REPRODUCED ON THE LIVE SERVER BEFORE ANY CODE CHANGED.** The
+1.0.5 round cleared `_mergeKeyRows` keeping the earlier row's title; that is still right. What it
+did not reach is the title write AFTER the merge. `updateArtist` can merge the new Spotify row into
+an earlier save from ANOTHER source, the earlier row survives, and `updateAlbumTitle` was then
+called on it — renaming and re-keying a row whose title was never a label.
+`DB::_norm` keeps bracket WORDS, so `Heaux Tales` vs `Heaux Tales, Mo' Tales: The Deluxe` never
+normalised equal and the no-op check did not save it.
+
+**Live on plex:9000 (1.0.3, 17:49), test rows only, all removed after:**
+
+| step | result |
+|---|---|
+| `listenlater add source:library artist:"Jazmine Sullivan" album:"Heaux Tales" year:2022` | row 362 |
+| LBF-shaped `addctx name:"Heaux Tales" artist: svc: favurl:spotify:album:4cogt2uqKoSyL61tzWaQei` | row 363; log `update artist for id 363 merged 1 cross-source duplicate(s) into id 362` |
+| list | 362 read `Jazmine Sullivan – Heaux Tales, Mo' Tales: The Deluxe (2022) · Library` |
+| the same library add again | a SECOND row, 364 — the key no longer matched |
+
+**THE WRITER, corrected from the review's first statement.** The review named "a library album
+with no year tag". That cannot merge: a sibling Spotify add carries no `&rt=` (its favurl cannot
+be decorated), so it goes through `_classifyThenAdd`, which stamps Spotify's `release_date` year
+BEFORE the insert. The real precondition is an earlier row on the SAME list with equal
+artist + title + year, from any source (library, Qobuz, Tidal). The sender is LBF, whose label is
+the plain album name. **PFR cannot reach it**: its label is `Artist - Album`, which never keys
+equal to another row. A native Spotty add cannot either — its label is already Spotify's name.
+
+**THE FIX.** `Plugin::_sameReleaseRow($id, $source, $albumId)` returns the canonical row only while
+it is still that service's row for that album id; the title write asks it and logs a WARN
+(`not applying spotify album title`) when it refuses. It is asked of the CANONICAL row, not of
+`updateArtist`'s return, because `updateAlbumTitle` follows lineage itself — a merge made by another
+carrier (`_verifyRelease`'s `updateYear`) would reach a foreign row the same way. The retry tick's
+inline check is now the same helper, so the two carriers cannot drift. STRICT on an empty identity
+(unlike `DB::_sameSourceCanonicalId`) — a Spotify row always carries its album id.
+
+**Carriers checked, and why nothing else changed:** `updateAlbumTitle` has ONE caller. `updateArtist`
+(Tidal/Deezer/Spotify) and `updateYear` only fill a MISSING value, so following a merge there is
+settled behaviour (2026-09-09 carrier audit); the title is the only carrier that overwrites a held
+value. The artist backfill onto a merged survivor is untouched on purpose.
+
+**Tests.** `t_addpath.pl` +11, section "the Spotify title repair never renames ANOTHER row": the
+first-attempt merge and the retry-tick merge each leave the library row's title alone, a re-add of
+the library album answers already-saved as the same row, the refusal is logged, and a CONTROL that
+an unmerged Spotify row still takes the Spotify title. Run against the unfixed code first: 5 red,
+including both carriers. The `(merged)` assertions exist because a fixture whose keys never meet
+passes every other line without the merge happening — the retry case seeds a YEARLESS twin for
+that reason, since a failed lookup also fails classify.
+
+**State at close.** **1.0.6** in `install.xml` and `repo.xml`, zip rebuilt, `<sha>`
+`811d8a1d…` equal to it, 15/15 suites green at 1,687 assertions. README/CHANGELOG deliberately
+NOT regenerated (dev build).
+
+**INSTALLED AND VERIFIED LIVE on 1.0.6 (plex:9000, restarted 17:55; log `Listen Later version =
+1.0.6`).** The same three steps: library row 365; the LBF-shaped Spotify add became 366 and
+`merged 1 cross-source duplicate(s) into id 365`, then `not applying spotify album title 'Heaux
+Tales, Mo' Tales: The Deluxe'`; 365 still read `Jazmine Sullivan – Heaux Tales (2022) · Library`;
+the library re-add answered `id=365, already=1`. Test rows removed, list back to 58. The `â` in
+that log line is the log viewer's rendering of the plugin's `—` literals — the long-standing
+`_pruneMaterialActions` line shows the same — not something this fix introduced. **1.0.6 is now
+the last build INSTALLED on the rig.**
+
+### 2026-09-16 review (after 1.0.6) — CLOSED, ZERO findings; round closed and pushed to `dev`
+
+Round against the four commits then unpushed on `dev` (1.0.4, 1.0.5, the spec re-copy, 1.0.6
+`b68b1d3`), clean working tree. Nothing reported. Checked: `updateAlbumTitle` re-key/merge and
+survivor choice, `_titleFromLabel` provenance into the Spotify backfill, `_spottyAlbumAnswered` +
+`_armBackfillRetry` / `_backfillRetryTick` (attempt count, timer), `_sameReleaseRow`,
+`Played::_spotifyAlbumRecord`'s release-id door, `DB::findAlbumBySourceAlbumId`.
+
+**CLEARED, so the next round does not re-derive them:**
+
+| checked | why it is not a finding |
+|---|---|
+| `findAlbumBySourceAlbumId` picking the LOWEST id across lists when two Spotify rows share a release id | the existing title doors resolve the same way; no new exposure |
+| re-adding a sibling's Spotify album after its title was repaired saves a second row (key moved) | for artist-less sibling adds the artist backfill already moved the key before 1.0.4; the repair MERGES such a twin on the same list; re-adds of already-saved rows are accepted by design |
+| everything the 1.0.5 and 1.0.6 tables above list | already settled there |
+
+**State at close.** **1.0.6** installed and verified live (see the entry above); 15/15 suites green.
+This entry is ledger-only — no plugin file changed, so no version bump and no rebuild. Commits
+PUSHED to `origin/dev` on Simon's instruction, which is the review PASS signal.
 
 ### D. ADDING TO THIS LEDGER
 
@@ -2787,6 +3144,10 @@ Played albums are auto-removed after `played_retention_days` (default 7; **0 = k
 
 **ADDING A NEW SERVICE — READ `docs/streaming-adapter-spec.md` FIRST.** It is the adapter contract across the released plugins (LBF, PFR, LL), carried verbatim in each repo: what a service's own plugin must expose (R1-R8), the leg semantics (`undef` = inconclusive vs `[]` = a real miss, and the TTL each picks), the item fields to stamp, the acceptance tests, and — per plugin — every site that still forces an edit OUTSIDE the adapter table, with the registry field that closes it. **This repo is the exception the spec's section 9 describes: it RECOGNISES a service from a url scheme rather than searching one, and its capability logic sits in per-source branches across `Sources.pm` and `Plugin.pm` rather than in an adapter table.** The claim that full support "wants those branches collected into a sources table of coderefs first" was **DISPROVEN by the Spotify build (0.1.113)** — full parity landed in ten branches with no refactor. The refactor is still worth doing; it is not a prerequisite, so do not let it block a service. The THIRTEEN sites, so the next one is counted rather than guessed at: `_streamingAlbumNode`, `_streamingPlaylistNode`, `_searchService`, `_serviceCan`, `_serviceCanPlaylist`, `%SUPPORTED_CMD`, `classifyRelType` (only if the service states a type/count on its album object), `_backfillStreamingArtist` (only if its rows can arrive artist-less), `sourceFromSvc`/`%SVC_ALIAS` (only if the service's BROWSE COMMAND differs from its source tag — Spotty browses as `spotty` and plays `spotify://`), `normaliseFavurl` (only if its favurl is not a `<scheme>://` url — Spotty sends the bare URI `spotify:album:<id>`), `unsupportedContainer` (only if the service browses CONTAINERS we cannot replay — a podcast series, a mix; added 0.1.123 after Spotify shows and Deezer podcasts were found storing as albums and tracks respectively), `isPodcastEpisode` (only if the service browses podcast EPISODES under its ordinary music scheme, so the source tag cannot identify one — Spotify does, Deezer does not because its episodes carry `deezerpodcast://`; added 0.1.126), and `_canClassifyTrack` (only if the service's own protocol handler exposes an album id in its cached track metadata — read `getMetadataFor` at the consuming end before adding one, and note it must exclude podcast EPISODES, which reach `_saveTrackRecord` and now fall through to this very branch: 0.1.126's early return for Spotify episodes was removed with `_saveSpotifyEpisode` in 0.1.127, so nothing diverts an episode ahead of it any more. It is safe today only because no episode source — `podcast`, `deezerpodcast`, `spotify` — appears in the list; adding one that does would classify a podcast SERIES as a release). **Two of these were MISSED by this very sentence when 0.1.113 wrote it, and two more were added after 0.1.123 and 0.1.126 found them the hard way**, which is exactly the failure the count exists to prevent: both are conditional, like the two before them, so a service that needs neither reads the list as complete and a service that needs one finds nothing telling it to look. A missed alias silently drops the native album id (the row falls back to fuzzy search, 0.1.96's class of bug); a missed normalisation misreads the favurl in all four readers at once; a missed container type stores a row that can never replay, which is the one thing `_isReplayableSource` exists to prevent; and a missed episode predicate renders a podcast as a music track and lets it into the Wish List. **Every one of the conditional sites has now been missed at least once**, which is the argument for reading the whole list rather than the ones a new service obviously needs. **`_fillFromPlayingMeta` is deliberately NOT a fourteenth site, and that is the point of it:** it asks the url's own protocol handler, so it already answers for every service — including one that does not exist yet — without naming any. If a new service needs a branch there, the branch is the bug. Edit the canonical copy in the ListenBrainz repo and re-copy, per the header.
 
+**SPEC RE-COPIED 2026-09-16 (sha1 `504f722a…`, identical in LBF, PFR and LL).** §6's rate-limit rules gained three points from LBF's third Spotify back-off review: tag the refusal on the answer itself; every loop that searches must check the back-off on its own (nothing inherits it); and a refusal can answer SYNCHRONOUSLY (Spotty's `getToken` returns `$cb->(-429)` in-stack), so a pump must not treat every in-loop completion as a cache hit. Its pointer to `docs/spotify-rate-limits.md` now says that file is in the LBF repo only. No code in this repo was changed by the re-copy.
+
+**SPEC RE-COPIED AGAIN 2026-09-16 (sha1 `f43421aa…`, identical in LBF, PFR and LL).** §6 now names PFR's implementation of the refusal rules (0.9.39): the 6th `$refused` argument to `_svcCantAnswer`, `_refused` forwarded by the subtitle and "A / B" wrappers and given to callers that joined the search, and PFR's ONE consumer (`_resolveSection` in `warm` mode — home shelves resolve on request, like a view). It also gained "keep the gap to ONE wakeup, re-armed". No code in this repo was changed by the re-copy. **Then, the same day, every `Browse.pm:NNNN` / `Settings.pm:NN` / `Sources.pm:NN` line reference was replaced by the sub or variable it points at (they had drifted — e.g. LBF's adapter table cited at 5688, now ~7069), §8's sites re-checked against current code, and §3's reference shape gained LBF's optional `ready` probe. Re-copied; sha1 `fccba6c4…` in all three.**
+
 **AN ELEVENTH SITE, added 0.1.120: `_searchService`'s QUERY ENCODING.** It is inside a site already
 on the list, which is exactly why it went unnoticed for two months — a new service's branch is written
 next to four existing ones and inherits whichever spelling of `$artistQuery` its neighbour used. There
@@ -2809,7 +3170,7 @@ Browse rows differ by service, which is why each needs handling (all confirmed f
   - `getAPIHandler` is a **class** method (`Plugins::Spotty::Plugin->getAPIHandler`), unlike Qobuz's and TIDAL's function-form calls, and the renderers live in `OPML`, not `Plugin` — so `_serviceCan` probes `Plugins::Spotty::OPML->can('album')`.
   - Search wants `{query => …, type => 'album'}` (key `query`, type SINGULAR) and **characters, not octets** — `_prepareCall` escapes with `uri_escape_utf8`. It is in the SAME camp as Qobuz and Tidal; only Deezer and Bandcamp want octets. (Through 0.1.119 this line read "the octet-encoded `$artistQuery` that is right for the other three", which was wrong for two of the three and documented a real bug as intended — see 0.1.120.)
   - **Spotify is the SECOND service that answers type, count and year in one fetch** (after Qobuz): its album object keeps `album_type`, `total_tracks` and `release_date` through Spotty's cache, all via the public API. **The trap: Spotify has no EP class — an EP reports `album_type: 'single'`.** No Spotify-specific guard exists and none should be added: `singleIsWrong`/`_settle` already refuse a claimed single the count contradicts, so a 5-track "single" goes and proves itself against a real tracklist and settles as an EP. A hand-written `total_tracks` guard would only duplicate that, less carefully.
-  - **No album id from a PLAYING track** — `getMetadataFor` flattens the album to a title, exactly like Deezer, so Spotify stays out of `_hasAlbumIdFromTrack` and a Now Playing add falls back to the recovered album/artist. Getting the id would mean reaching into `API->trackCached`, which is the private-internals route **declined for Tidal/Deezer on 2026-07-25** — do not re-attempt it here either.
+  - **No album id from a PLAYING track** — `getMetadataFor` flattens the album to a title, exactly like Deezer, so Spotify stays out of `_hasAlbumIdFromTrack` and a Now Playing add falls back to the recovered album/artist. Getting the id would mean reaching into `API->trackCached`, which is the private-internals route **declined for Tidal/Deezer on 2026-07-25** — do not re-attempt it here either. **Scope of that decline (2026-09-16): the ADD path only.** `API->trackCached` is NOT banned outright — since 1.0.1 `Played::_spotifyAlbumRecord` calls it to match a PLAY to a saved row by release id (§B, "A SPOTIFY ROW'S STORED ALBUM TITLE CAN NEVER MATCH"). The two are not the same question: the Played door reads a cache entry the player already built and has a measured failure to fix, the add would pay a fresh lookup for a row it can already name. A grep landing here from `Played.pm` has found the wrong entry — that code is live and deliberate.
   - `_backfillStreamingArtist` gives it its own branch rather than the shared `$getAlbum` coderef: Spotty's tracklist `line2` is `"Artist • Album"`, not the bare artist Tidal and Deezer put there, so the shared path would store the wrong artist. It asks the API for the album object instead, which carries a plain `artist` string.
   - **`spotty` is deliberately EXCLUDED from `_ownedCats`' legacy seed** (alongside `listenlater`). The seed may only claim Material categories LL can have written, and a service supported from the day it arrives has no pre-ledger husks — claiming `spotty-album`/`-track` would claim categories only somebody else can have written, which the prune could then delete.
 - `resolveTracks` finds the playable node (`type=>playlist`, `url=>CODE`) from `buildPlayableItems`, then calls `node->{url}->($client,$cb,{},$pt)` where `$pt = passthrough[0]`. Source tag from `favorites_url` scheme via `sourceFromUrl`; `sourceFromImage` (cover host) is a fallback when there's no favurl.
@@ -2850,13 +3211,13 @@ session scratchpads and are gone — so nothing carried forward. Anything worth 
 
 | suite | protects |
 |---|---|
-| `t_db.pl` | dedupe keys and migrations against real SQLite: 0.1.43 (same title, different year), 0.1.33 (cross-source), 0.1.74+ (track vs album keys), 0.1.81 (same track from two surfaces), 0.1.88 (`track_count`, forced `rel_type`), an old schema file upgrading with its rows intact, and the live `updateArtist`/`updateYear` carriers reconciling a newly-equal key across services without separating source from ref or guessing across statuses. Also pins the inverse async race (year merge deletes the artist callback's id), exact vs canonical lookup, logical Move/Remove following, same-source result propagation, and cross-source rejection for counts/types/URLs. **Its Latin fold controls gained the underscore-ORDER cases in 0.1.144**, and the gap they close is worth stating because the old row looked complete: `under_score` was the only underscore seeded, an underscore BETWEEN word characters is its own whole separator run, and it therefore folds identically whichever of `_norm`'s two substitutions runs first — so it passes against the bug. Only an underscore ADJACENT to other punctuation or a space can show the order, which is why `01_-_Intro` and `foo_ _bar` are now seeded alongside it, with the plain `01 - Intro` as the control that must NOT move |
-| `t_played.pl` | the thresholds that keep regressing in both directions: 0.1.82 (a single/short EP CAN reach Played), 0.1.83 (a one-track release does NOT mark when it starts), 0.1.88 (a real total beats the 4-track floor), plus the live-library-count rule |
+| `t_db.pl` | dedupe keys and migrations against real SQLite: 0.1.43 (same title, different year), 0.1.33 (cross-source), 0.1.74+ (track vs album keys), 0.1.81 (same track from two surfaces), 0.1.88 (`track_count`, forced `rel_type`), an old schema file upgrading with its rows intact, and the live `updateArtist`/`updateYear` carriers reconciling a newly-equal key across services without separating source from ref or guessing across statuses. Also pins the inverse async race (year merge deletes the artist callback's id), exact vs canonical lookup, logical Move/Remove following, same-source result propagation, and cross-source rejection for counts/types/URLs. **Its Latin fold controls gained the underscore-ORDER cases in 0.1.144**, and the gap they close is worth stating because the old row looked complete: `under_score` was the only underscore seeded, an underscore BETWEEN word characters is its own whole separator run, and it therefore folds identically whichever of `_norm`'s two substitutions runs first — so it passes against the bug. Only an underscore ADJACENT to other punctuation or a space can show the order, which is why `01_-_Intro` and `foo_ _bar` are now seeded alongside it, with the plain `01 - Intro` as the control that must NOT move Plus 2026-09-16 (1.0.1): `updateAlbumTitle`: a label title replaced and re-keyed, an agreeing title a no-op, junk refused, a track key kept, a same-list native twin MERGED, and a twin on another list left alone. |
+| `t_played.pl` | the thresholds that keep regressing in both directions: 0.1.82 (a single/short EP CAN reach Played), 0.1.83 (a one-track release does NOT mark when it starts), 0.1.88 (a real total beats the 4-track floor), plus the live-library-count rule Plus 2026-09-16 (1.0.1): the Spotify RELEASE-ID door (`_spotifyAlbumRecord`): the remaster play matches the remaster row, not the 1990 one (the Spotty-absent case is the control); a cache miss, an id-less album or an unknown id falls to the title doors; a playlist is never matched; Qobuz plays and Spotify episodes never consult Spotty. |
 | `t_reltype.pl` | 0.1.88's classification: `singleIsWrong`, the full `relTypeFor` table, `classifyRelType` end to end, that the Qobuz album-object path fetches **no** tracklist, and that a CATALOGUE count comes back flagged provisional while a resolved one doesn't (the flag is the only thing stopping an inflated Played total) |
 | `t_verify_retry.pl` | 0.1.90's retry: that it retries, retries EXACTLY once (an unbounded retry would be worse than the bug), never gives up silently, and re-reads the row first — plus the three distinct answers `_verifyRelease` must keep apart (real count → store; provisional → neither store nor retry; no count → retry), canonical-id propagation after a year rekey, service-independent year propagation to a cross-service survivor, and the rule that an in-flight result from one service never writes its count/type onto another service's survivor |
 | `t_learn_count.pl` | 0.1.93's in-flight guard on `Played::_learnTrackCount` and specifically its EXPIRY: that a lost request stops blocking after `COUNT_STALE_SECS`, that it is logged rather than swallowed, that an answered request stays immediately re-askable, that records don't block each other, and that a library release is never asked at all. Uses `TestClock::advance()` |
 | `t_favurl.pl` | the private favurl handshake (`Plugin::_stripPrivateParams`): `?cover=`/`?b=`/`&a=`/`&y=`/`&al=`/`&rt=`/`&tc=` — what each yields, that junk is stripped-but-rejected, that `&a=` can't eat `&al=`, that `&rt=`+`&tc=` really do reach `singleIsWrong`, and that a NATIVE favurl comes back byte-for-byte unchanged with no field set. Calls the real sub — see the `&tc=` lesson below |
-| `t_addpath.pl` | the ADD PATH end to end — a Material action into `_addCtxCommand`, out as a row in SQLite. Also 0.1.92's `ref.svc_title`: that the service label is kept when it differs and not when it doesn't, that a play of the QUALIFIED title finds the row while a different artist's doesn't, and that the dedupe key still ignores the label. What the handshake params become on the stored row, that `&tc=` settles the type but never fills `track_count`, that the cross-kind single dedupe eats a REAL single but not a disproved one, that an UNKNOWN type defers instead of inserting a guess, and that unreplayable/unidentifiable adds are refused. Plus the NOW-PLAYING FALLBACK's gate on BOTH paths (0.1.98): on the album path, that a browse row with a non-service container verb does NOT adopt the playing track, while a genuine Now Playing add (no `svc` at all) still recovers its source; on the TRACK path, that a tapped row whose `trackid` resolves to NOTHING (no svc — it shares `$trackCmd` with Now Playing) and an online-track row with a container verb are both refused, while a real Now Playing track add still recovers the playing song and its url. In both cases both directions are needed, or "doesn't adopt" passes with the fallback simply switched off. And the other side of that gate: a REMOTE queue row (negative `trackid`, no favurl) is resolved by its id and stored as the row that was TAPPED — its own title, its own play url, its source read off that url and not hardcoded `library` — while the library row on the same branch still takes its album/year from the Album row — and, since the RemoteTrack that row resolves to is normally BARE, that a `''` title/artist off the object never overwrites what Material sent (the stub answers `''` for a negative id, so this cannot pass by the test having supplied the metadata itself). Also what a REJECTED add logs (0.1.98): that an empty source reads `(none identified)` rather than `''`, that the container verb is named, and that the clause which actually failed is named — a missing play url and an empty title each say so instead of blaming the service, while a genuinely unsupported source still reads exactly as it did. The reject is silent to the user, so that one line is the whole trace. **And since 2026-09-10, the NAMELESS-TRACK collision** (`DB::trackUrlKey`): two artist-less tracks sharing a title store as two rows, the FIRST keeping the `|||t:<title>` key it already had — that assertion is what says no migration is owed — while only the second carries the `|u:<svc>:<url>` tail; a re-add of the second answers "already saved" with ITS id; and a NAMED track key still dedupes across differing urls. The last two ask `DB::add` DIRECTLY, because through the add command they pass against a broken build — one on the UNIQUE constraint dying, one on `_insertTrackRow`'s earlier artist guard. **Plus the two halves that round 2 added:** that a nameless track with NO url still dedupes to its twin and mints no `|u:` key around an empty url (asked at `DB::add`, since the command refuses a urlless add outright), and — the other way round — that once the title twin is DELETED, a re-add of the url-keyed track is refused by `_insertTrackRow`'s url guard. That last pair pins a CALLER: `DB::add` alone would store a second row for one play url, and the guard is the only thing that stops it. Needs no service: the whole path asks only `client`/`getParam`/`setStatusDone`/`setStatusProcessing`/`addResult`/`addResultLoop`, and `client => undef` makes the background jobs no-op (pass `_client` for the Now Playing cases — it is pulled out of the params, not passed as one). **The service plugins must be declared** (`_serviceCan`) or the gate rejects everything and every assertion passes against an empty DB |
+| `t_addpath.pl` | the ADD PATH end to end — a Material action into `_addCtxCommand`, out as a row in SQLite. Also 0.1.92's `ref.svc_title`: that the service label is kept when it differs and not when it doesn't, that a play of the QUALIFIED title finds the row while a different artist's doesn't, and that the dedupe key still ignores the label. What the handshake params become on the stored row, that `&tc=` settles the type but never fills `track_count`, that the cross-kind single dedupe eats a REAL single but not a disproved one, that an UNKNOWN type defers instead of inserting a guess, and that unreplayable/unidentifiable adds are refused. Plus the NOW-PLAYING FALLBACK's gate on BOTH paths (0.1.98): on the album path, that a browse row with a non-service container verb does NOT adopt the playing track, while a genuine Now Playing add (no `svc` at all) still recovers its source; on the TRACK path, that a tapped row whose `trackid` resolves to NOTHING (no svc — it shares `$trackCmd` with Now Playing) and an online-track row with a container verb are both refused, while a real Now Playing track add still recovers the playing song and its url. In both cases both directions are needed, or "doesn't adopt" passes with the fallback simply switched off. And the other side of that gate: a REMOTE queue row (negative `trackid`, no favurl) is resolved by its id and stored as the row that was TAPPED — its own title, its own play url, its source read off that url and not hardcoded `library` — while the library row on the same branch still takes its album/year from the Album row — and, since the RemoteTrack that row resolves to is normally BARE, that a `''` title/artist off the object never overwrites what Material sent (the stub answers `''` for a negative id, so this cannot pass by the test having supplied the metadata itself). Also what a REJECTED add logs (0.1.98): that an empty source reads `(none identified)` rather than `''`, that the container verb is named, and that the clause which actually failed is named — a missing play url and an empty title each say so instead of blaming the service, while a genuinely unsupported source still reads exactly as it did. The reject is silent to the user, so that one line is the whole trace. **And since 2026-09-10, the NAMELESS-TRACK collision** (`DB::trackUrlKey`): two artist-less tracks sharing a title store as two rows, the FIRST keeping the `|||t:<title>` key it already had — that assertion is what says no migration is owed — while only the second carries the `|u:<svc>:<url>` tail; a re-add of the second answers "already saved" with ITS id; and a NAMED track key still dedupes across differing urls. The last two ask `DB::add` DIRECTLY, because through the add command they pass against a broken build — one on the UNIQUE constraint dying, one on `_insertTrackRow`'s earlier artist guard. **Plus the two halves that round 2 added:** that a nameless track with NO url still dedupes to its twin and mints no `|u:` key around an empty url (asked at `DB::add`, since the command refuses a urlless add outright), and — the other way round — that once the title twin is DELETED, a re-add of the url-keyed track is refused by `_insertTrackRow`'s url guard. That last pair pins a CALLER: `DB::add` alone would store a second row for one play url, and the guard is the only thing that stops it. Needs no service: the whole path asks only `client`/`getParam`/`setStatusDone`/`setStatusProcessing`/`addResult`/`addResultLoop`, and `client => undef` makes the background jobs no-op (pass `_client` for the Now Playing cases — it is pulled out of the params, not passed as one). **The service plugins must be declared** (`_serviceCan`) or the gate rejects everything and every assertion passes against an empty DB Plus 2026-09-16: a label-titled Spotify add shows the Spotify album title while a handshake title is kept (1.0.1), and (1.0.2) a FAILED Spotty answer (`type => 'text'`) never becomes the title, arms exactly one retry that then repairs the row, gives up loudly after the second failure, and skips a removed row. |
 | `t_resolve_count.pl` | what a resolve writes BACK to the row (`Browse::_albumTracks`): a FAILED resolve records nothing and never clobbers a real `track_count`/`rel_type`, Bandcamp helper-only rows count as a failure too, and 0.1.88's successful-resolve refresh + forced single-correction still work. Plus `Sources::hasDirectAlbumRef` — whether a row's tracklist costs one album call or a whole service SEARCH (the Bandcamp page-url case), which is what gates background work |
 | `t_prefs_migration.pl` | 0.1.94's pref migrations and the rule that makes them one-shot: that a leading-underscore pref cannot be stored at all (pinning the stub against `Slim::Utils::Prefs::Base::set` — if that assertion ever passes with a value, every other one here stops meaning anything), that the rebrand copy runs once and never reverts a later choice, that an install which already ran the broken copy isn't copied over again, and that the threshold bump re-applies exactly once. Runs the two migrations in the real startup order — the ordering IS the bug — for both an install that carries a pre-rebrand namespace and one that doesn't. **A real user's box is the second shape**: the rebrand landed in 0.1.25 and the first release was tagged v0.1.69, so no installed copy ever wrote a `plugin.listentolater` pref and the copy has nothing to import. `reset_prefs` seeds that namespace (Simon's dev box, the only one that ran the pre-rebrand code); `reset_prefs_no_legacy` doesn't — pick the one that matches the install you mean, or an assertion proves the wrong thing |
 | `t_material_actions.pl` | 0.1.95's delivery split: that the six SERVER-resolved positive categories are REGISTERED with Material (6.4.6+) and no longer written to actions.json while `track`/`queue-track` stay in the file (0.1.97), that nothing registered is also left in the file (the merge is additive — a leftover means every "Add" shows twice), that registration happens exactly ONCE across a re-register, a Settings save and the deferred radio write, that the suppressors and `podcasts-*` stay in the file where Material can actually see them, that an older Material still gets the byte-identical file it always did, and that a third party's entries in a category we vacated survive. Plus the FAILURE path: a `registerCustomAction` that dies falls back to the file (all of it, or exactly the refused sections on a partial failure — never both places), and a file write with no registration behind it (the pref switched on mid-run) writes the full set. Plus the SETTINGS save itself, driven through `Settings::handler` with `debug_log` OFF (0.1.97): turning `material_action` off clears the file half on the save and warns about the registered half, turning it back on restores `track`/`queue-track` without re-writing anything Material already took, and turning it on when nothing registered writes everything. And the 0.1.98 rule that the OFF save must obey: while entries are still registered, the empty suppressors (ours and the radio ones) STAY and stay EMPTY — deleting them while the `online-*` pair cannot be withdrawn ADDS "Add" to our own rows instead of removing it — including on the path that rule was written for and originally missed, **the file being GONE**, where all three families have to be RE-CREATED rather than preserved. And the same rule from the other side for the one category that is ours, file-only AND per-app: with nothing registered, `podcasts-*` is DELETED rather than left as an empty husk — including for a user who has since unsubscribed from every feed, the state `_materialActionSet` can no longer name — because an empty per-app override hides Add on the Podcasts app for good; with entries still live it stays, and stays empty, for exactly the reason the radio empties do. Plus the 0.1.110 DELIVERY TIER, which needed `set_material_version()` because without a `getPluginVersion` stub every one of the previous 746 checks ran at tier 1 and could not reach the new code at all: the tier table (capability alone is never enough — the one-argument empty-section call pushes a null on 6.4.6/6.4.7), the folded action set, an upgrade from a file install ending with the file UNLINKED, a hand-written actions.json surviving verbatim — populated category, their own empty suppressor, and an entry titled like ours that is not ours — both refusal fallbacks (a refused positive and a refused empty section each reach the user through the file, and the file is created for them if it has gone), the deferred pass registering a late-discovered radio command without re-pushing anything, the pref off at STARTUP vs mid-run (only the latter has anything registered to suppress), the uninstall stranding nothing, and both downgrade steps rebuilding the file. Plus 0.1.114's `Sources::materialAtLeast`, the ONE version comparator the three gates now share: the comparison table, all THREE return values with `undef` (cannot tell) pinned as distinct from `0` (too old) even though both are falsy today, and the LIST-CONTEXT trap that shipped during the refactor — `_materialVersion` is `return eval {...}`, so inlining it into the argument list collapses `(undef,6,4,8)` to `(6,4,8)` and every Material-less install silently reaches the NEWEST tier. That last one is reproduced directly AND pinned as a source check on both callers (`LL_PLUGIN_SRC=`/`LL_BROWSE_SRC=` point those at mutated copies), since no return value shows which spelling a caller used. Plus 0.1.119's two Material fixes: that the PRUNE's diagnostics do not claim the API delivered anything when registration never ran (the pref off at STARTUP — the dump must not say "plugin API"/"streaming Add active"/"registered sections" under "material_action pref = OFF"), with the mirror case pinned so the gate cannot be widened into never reporting the API half at all; and that a category appearing MID-RUN still reaches Material — subscribing to a first podcast registers `podcasts-*` while pushing nothing already registered a second time (a duplicate push is how every "Add" comes to show twice), is not ALSO written to the file, and a repeat pass adds nothing. The `setChange` wiring that triggers it WAS a source check, because the harness's `setChange` was a no-op — and that is exactly how 0.1.121's finding 1 hid for six rounds: a source grep pins that a call EXISTS, never WHERE it lives, so it matched just as happily with the watcher inside the pref-ON arm, where a box-unticked boot installed none. The stub now RECORDS into `@Slim::Utils::Prefs::Obj::CHANGES` and the suite drives `postinitPlugin` on BOTH arms, plus the subscribe-first/tick-second ordering that shows why no second watcher belongs in `Settings.pm` (`setChange` STACKS). When a behaviour can only be pinned at source, the stub is too thin |

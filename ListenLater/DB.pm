@@ -1394,16 +1394,26 @@ sub _sameSourceCanonicalId {
     return $rec->{id};
 }
 
-# Apply one of the two live metadata backfills that changes a dedupe key. DB::add checks
+# Apply one of the live metadata backfills that changes a dedupe key. DB::add checks
 # findAnyByKey before inserting, but a row can still CONVERGE on another service's key later:
 # one source arrives without an artist/year, a second source supplies it and is stored under a
 # different key, then this backfill fills the missing value. UNIQUE(source,dedupe_key) cannot
 # see that collision. Settle it with the same cross-source, same-status policy as the refold.
 # Returns the canonical id because the row being updated may be the later duplicate and be
 # merged into the earlier save.
+#
+# `album_title` joined artist and year on 2026-09-16 and is the odd one of the three: artist and
+# year backfill a value that is MISSING, and refuse to overwrite one we hold, so they can be
+# fired on anything. A title is never missing — the add refuses a row without one — so the
+# guard cannot live here. Nor does it live in updateAlbumTitle: that sub checks PROVENANCE
+# NOWHERE, it only skips the rewrite when the new title normalises equal to the stored one.
+# The guard lives in the CALLER, which must have established that the stored title was read
+# off a row LABEL rather than supplied by a handshake before it calls at all. See
+# updateAlbumTitle's own header: THE CALLER OWNS THE GUARD.
 sub _updateIdentityField {
     my ($id, $field, $value) = @_;
-    return unless $id && defined $field && ($field eq 'artist' || $field eq 'year');
+    return unless $id && defined $field
+        && ($field eq 'artist' || $field eq 'year' || $field eq 'album_title');
 
     $id = canonicalId($id) or return;
 
@@ -1513,6 +1523,50 @@ sub updateYear {
     my $rec = get($id) or return;
     return $id if $rec->{year};                                  # don't overwrite a real year
     return _updateIdentityField($id, 'year', $year);
+}
+
+# Replace an album title that was read off the row LABEL with the one the SERVICE gives, and
+# recompute the dedupe key with it. Same carrier as updateArtist/updateYear because the title
+# is the largest segment of the key — but it is NOT the same guard, so read this before reusing it.
+#
+# WHAT IT IS FOR (Simon, 2026-09-16): a saved row shows the album the sibling MATCHED TO, not
+# the sibling's display label — the same title a native add of that album gets. It is NOT what
+# makes a Spotify row reach Played: Played::_spotifyAlbumRecord matches Spotify by release id,
+# and Spotty cleans the album name at playback anyway ("(Remastered 2018 / Deluxe Edition)"
+# is dropped), so this service title is not guaranteed to be what plays. It does help the
+# title doors for the plain case, and it lets the key meet a native save of the same album.
+#
+# WHY A ROW CAN HOLD ITS LABEL AS THE TITLE. The '&al=' handshake exists so a sibling plugin
+# can hand over the clean album name, because its row LABEL is a display string that may carry
+# anything. Spotify is the one service whose favurl cannot be decorated — Spotty's album() ends
+# at a greedy /album:(.*)/, so a query string is captured into the id and replay dies (see
+# LBF's _attachFavUrl, which settled this and named LL as the place to recover) — so a Spotify
+# row arrives with NO handshake at all and _addCtxCommand falls back to the label. For a
+# Pitchfork Reviews row that label is "Artist - Album", and on a year-end list "3. Artist -
+# Album", which is then what the list shows. (_migrateArtistPrefix cleans the same shape historically, but only strips a stored
+# artist and knows nothing of a rank.)
+#
+# THE CALLER OWNS THE GUARD, and it is an assertion about PROVENANCE, not a string test. Only
+# fire this when the add supplied no '&al=', i.e. the stored title can only have come from the
+# label. Do NOT try to detect a bad title by shape: a real album IS called "Nas - Illmatic"
+# ("Artist - Album" is a legitimate title), and guessing would clobber it. Provenance is
+# knowable exactly; shape is not.
+#
+# It also deliberately does NOT keep the old label as ref.svc_title. That field means "what
+# the SERVICE will call this while it plays" (0.1.92) and is Played's last-resort door — and
+# the label is the sibling plugin's string, not the service's, so storing it there would open
+# a door onto a name nothing will ever report.
+sub updateAlbumTitle {
+    my ($id, $title) = @_;
+    return unless $id && defined $title && length $title;
+    $id = canonicalId($id) or return;
+    my $rec = get($id) or return;
+    # Nothing to do when the service agrees with what we stored — the common case once a
+    # service's own browse row supplied the label, and it must not cost a key rewrite or a
+    # merge pass. Compared on the NORMALISED form: a difference the key cannot see is not a
+    # difference worth rekeying for.
+    return $id if defined $rec->{album_title} && _norm($rec->{album_title}) eq _norm($title);
+    return _updateIdentityField($id, 'album_title', $title);
 }
 
 # Persist a resolved value into the row's ref_json (e.g. a Bandcamp purchase URL
@@ -1710,6 +1764,26 @@ sub findBySourceRefTitle {
         push @out, $h if _norm($t) eq $want;
     }
     return @out;
+}
+
+# The saved ALBUM (kind='album') of this source whose stored release id is $albumId — the
+# exact-id door Played::_spotifyAlbumRecord opens for a playing Spotify track. Unlike
+# findBySourceAlbumId (the library door) this filters kind='album' in SQL, so the Played
+# detector keeps the property t_played.pl pins: a saved playlist or track is never matched
+# as the album being played, whichever fields a future row shape happens to carry.
+sub findAlbumBySourceAlbumId {
+    my ($source, $albumId) = @_;
+    return undef unless defined $albumId && length $albumId;
+
+    my $rows = dbh()->selectall_arrayref(
+        "SELECT * FROM albums WHERE source = ? AND kind = 'album' ORDER BY id",
+        { Slice => {} }, $source);
+    for my $row (@$rows) {
+        my $h = _rowToHash($row);
+        my $aid = refAlbumId($h);
+        return $h if length $aid && $aid eq "$albumId";
+    }
+    return undef;
 }
 
 # list($status, $sort) — $sort: added|artist|album|year|played

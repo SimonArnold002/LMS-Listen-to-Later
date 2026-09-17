@@ -1,5 +1,17 @@
 # Changelog
 
+## 1.0.6 — 2026-09-17
+
+Spotify albums now reliably move to *Played* when you hear them, and show their real album name in your list.
+
+### Improvements
+- **Spotify albums you save from another plugin now show Spotify's own album name.** Albums added from places like ListenBrainz Fresh Releases or Pitchfork Reviews used to show a label such as "The Cure - Mixed Up" as the title. The plugin now looks up the real album name on Spotify and shows that instead. If Spotify can't be reached at that moment, for example because it's rate-limiting requests, it tries once more a minute later rather than saving the error text as the title.
+- **If Spotify matching stops working after a Spotty update, the server log now says why.** A warning starting `LL: Spotty trackCached died` is written instead of the failure going unnoticed.
+
+### Fixes
+- **Playing a saved Spotify album now moves it to *Played*.** Spotify changes some album titles when they play (for example, dropping "(Remastered 2018 / Deluxe Edition)"), so a saved Spotify album could fail to match. Worse, playing one edition could mark a *different* saved edition as played. Plays are now matched on Spotify's own album ID, so the right album moves every time. Other services are unchanged.
+- **Adding a Spotify album no longer renames an album you already had saved from another source.** If your list already held the same album from your library or another service (same artist, title and year), adding the Spotify copy could replace that album's title with Spotify's edition name. After that, adding it again could create a duplicate. The existing album now keeps its title.
+
 ## 1.0.0 — 2026-09-11
 
 ### Added

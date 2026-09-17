@@ -208,6 +208,94 @@ section('updateYear — fill a MISSING year and re-key the row');
 }
 
 # ---------------------------------------------------------------------------
+section('2026-09-16 — updateAlbumTitle replaces a title read off the row LABEL');
+# Spotify's favurl is the one that cannot carry the '&al=' handshake (decorating it breaks
+# Spotty's own replay), so a Spotify row from a sibling plugin stores that plugin's row LABEL
+# as the album title. Pitchfork Reviews labels a row "Artist - Album", and "3. Artist - Album"
+# on a year-end list. The row should show the album it matched to. The key is asserted through
+# findByArtistAlbum as well as get(): that is the title door Played falls back to when the
+# Spotify id door misses, and the same key is what lets a native save of the album meet it.
+{
+    my $D = 'Plugins::ListenLater::DB';
+    my ($id) = $D->can('add')->(
+        $rec->(source=>'spotify', artist=>'', album=>'3. Jazmine Sullivan - Heaux Tales'), 'later');
+    # The artist backfill lands first in the live path; do the same here so the row under test
+    # is the one Played will actually see.
+    $D->can('updateArtist')->($id, 'Jazmine Sullivan');
+
+    # THE BITE, asserted before the fix runs: the playing track reports the album alone.
+    is('before: the title lookup cannot find the row',
+       ($D->can('findByArtistAlbum')->('spotify', 'Jazmine Sullivan', 'Heaux Tales') ? 'found' : 'MISSED'),
+       'MISSED');
+
+    $D->can('updateAlbumTitle')->($id, 'Heaux Tales');
+    is('the label title is replaced',
+       $D->can('get')->($id)->{album_title}, 'Heaux Tales');
+    is('...and the key is recomputed',
+       $D->can('get')->($id)->{dedupe_key}, 'jazmine sullivan|heaux tales|');
+    # ANTI-TEST for the whole change: revert updateAlbumTitle to a no-op returning $id, or drop
+    # 'album_title' from _updateIdentityField's field gate, and THIS is the assertion that fails.
+    is('after: the title lookup finds it',
+       ($D->can('findByArtistAlbum')->('spotify', 'Jazmine Sullivan', 'Heaux Tales') ? 'found' : 'MISSED'),
+       'found');
+
+    # A service that AGREES with the stored title must not cost a rewrite or a merge pass.
+    my ($id2) = $D->can('add')->($rec->(source=>'spotify', artist=>'Low', album=>'HEY WHAT'), 'later');
+    my $key2 = $D->can('get')->($id2)->{dedupe_key};
+    $D->can('updateAlbumTitle')->($id2, 'HEY WHAT');
+    is('an agreeing title is a no-op',   $D->can('get')->($id2)->{album_title}, 'HEY WHAT');
+    is('...and leaves the key alone',    $D->can('get')->($id2)->{dedupe_key}, $key2);
+
+    # Junk must never reach the column: unlike artist and year, this field is NEVER empty, so
+    # a rejected value here means the row keeps a real title rather than gaining a blank one.
+    my ($id3) = $D->can('add')->($rec->(source=>'spotify', artist=>'X', album=>'Real Title'), 'later');
+    $D->can('updateAlbumTitle')->($id3, $_) for ('', undef);
+    is('junk titles are refused',        $D->can('get')->($id3)->{album_title}, 'Real Title');
+
+    # A track row's identity is its play url, not its name (the '|u:'/'|e:' rule) — _keyForRow
+    # must keep that tail rather than re-key it into a name key. Same guard updateArtist has.
+    my ($tr) = $D->can('add')->(
+        $rec->(source=>'spotify', kind=>'track', artist=>'A', album=>'Label Album', track=>'T'), 'later');
+    $D->can('updateAlbumTitle')->($tr, 'Real Album');
+    is('a track row keeps a TRACK key',
+       (($D->can('get')->($tr)->{dedupe_key} // '') =~ /\|t:/ ? 'track key' : 'REKEYED'), 'track key');
+
+    # The repaired title can land on the key of a NATIVE Spotty save of the same album —
+    # measured shape: PFR's "The Cure - Mixed Up" matched to 3huHRC…, whose Spotify name is the
+    # one a native add stores. The rows are the same album on the same list, so they must
+    # become ONE row (UNIQUE(source,dedupe_key) forbids two), the earlier save surviving.
+    my $full = 'Mixed Up (Remastered 2018 / Deluxe Edition)';
+    my ($native) = $D->can('add')->(
+        $rec->(source=>'spotify', artist=>'The Cure', album=>$full, year=>1990), 'later');
+    my ($pfr) = $D->can('add')->(
+        $rec->(source=>'spotify', artist=>'', album=>'The Cure - Mixed Up', year=>1990), 'later');
+    my $pid = $D->can('updateArtist')->($pfr, 'The Cure') || $pfr;
+    my $survivor = $D->can('updateAlbumTitle')->($pid, $full);
+    is('a label row meeting a native save merges into it', $survivor, $native);
+    is('...and the native row keeps its title',
+       $D->can('get')->($native)->{album_title}, $full);
+    is('...leaving one row, not two',
+       scalar(grep { ($_->{album_title} // '') eq $full }
+           @{ $D->can('dbh')->()->selectall_arrayref(
+               "SELECT album_title FROM albums WHERE source='spotify'", { Slice => {} }) }), 1);
+
+    # CONTROL — a native save on the OTHER list is not merged with, and blocks nothing it
+    # does not have to: same source + same key would violate UNIQUE, so the write is refused
+    # and the label row keeps its title rather than failing half-way.
+    my ($playedTwin) = $D->can('add')->(
+        $rec->(source=>'spotify', artist=>'Low', album=>'Double Negative', year=>2018), 'later');
+    # add() only accepts later|wishlist (anything else is filed as 'later'), so move it.
+    $D->can('markPlayed')->($playedTwin);
+    my ($pfr2) = $D->can('add')->(
+        $rec->(source=>'spotify', artist=>'Low', album=>'Low - Double Negative', year=>2018), 'later');
+    $D->can('updateAlbumTitle')->($pfr2, 'Double Negative');
+    is('a same-source twin on another list is not merged',
+       ($D->can('get')->($playedTwin) ? 'kept' : 'GONE'), 'kept');
+    is('...and the label row is left unchanged, not half-written',
+       $D->can('get')->($pfr2)->{album_title}, 'Low - Double Negative');
+}
+
+# ---------------------------------------------------------------------------
 section('migration — an old database file upgrades without losing rows');
 # Rebuilt from scratch each run: a pre-0.1.74 schema (no kind/track_title/rel_type/
 # track_count, user_version 0) with a row in it, exactly what an upgrading user has.

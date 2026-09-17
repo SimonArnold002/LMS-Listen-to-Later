@@ -1622,5 +1622,211 @@ section('0.1.136 — a Podcasts-app row now falls to the generic online-* Add');
 is('a built-in podcast row stores NOTHING through the generic action',
    podcast_row_add(), 'nothing stored');
 
+# ---------------------------------------------------------------------------
+section('2026-09-16 — a Spotify row shows the album it MATCHED TO, not the LABEL');
+# LAST IN THE FILE, and for the same reason the Spotty stubs are declared late: this is the
+# only block where getAPIHandler answers, so every test above still ran with the backfill
+# unable to fire. t_db.pl pins updateAlbumTitle itself; what this pins is the WIRING —
+# that _addCtxCommand decides provenance where $favAlbum is in scope and _finishAlbumAdd
+# acts on it — which no DB-layer test can reach.
+{
+    # A stub API shaped like Spotty's: ->album($cb, {uri=>...}) calls back the normalised
+    # album hash, whose title is `name` (the key PFR's _searchSpotify matches on).
+    # A real normalised album keeps its `id` (API::Cache::normalize strips only `type`), which
+    # is what _spottyAlbumAnswered checks. $RESPOND can be swapped to serve Spotty's ERROR
+    # shape instead: _gotError calls the same callback with { name => <text>, type => 'text' }.
+    package FakeSpottyAPI;
+    our $RESPOND = sub { { id => '5g9YhHW8tE7Tcslgxsk5u9', name => 'Heaux Tales',
+                           artist => 'Jazmine Sullivan' } };
+    our @CALLS;
+    sub can   { my ($s, $m) = @_; return $m eq 'album' ? sub { } : undef }
+    sub album { my ($s, $cb, $args) = @_; push @CALLS, $args->{uri}; $cb->($RESPOND->($args)); }
+}
+{
+    no warnings 'redefine';
+    no strict 'refs';
+    *{'Plugins::Spotty::Plugin::getAPIHandler'} = sub { bless {}, 'FakeSpottyAPI' };
+
+    # `_client` is REQUIRED, not decoration: FakeRequest->client is undef by default so
+    # background jobs no-op, and the backfill is one of them — without it both assertions
+    # below pass a build in which nothing was repaired. The now-playing fallback it also
+    # opens stays shut here, gated off by a populated `svc` and a real source.
+    #
+    # The real shape off plex:9000: PFR's year-end row label, and the bare Spotify favurl
+    # that cannot carry '&al=' because decorating it breaks Spotty's own replay.
+    my $y = add(_client => $playing, name => '3. Jazmine Sullivan - Heaux Tales', svc => 'spotty',
+                favurl => 'spotify:album:5g9YhHW8tE7Tcslgxsk5u9');
+    is('a labelled Spotify row stores the real album title',
+       ($y ? $y->{album_title} : undef), 'Heaux Tales');
+    is('...and the title lookup finds it',
+       (Plugins::ListenLater::DB::findByArtistAlbum('spotify', 'Jazmine Sullivan', 'Heaux Tales')
+            ? 'found' : 'MISSED'), 'found');
+
+    # CONTROL — the repair must be driven by PROVENANCE, not by the string. An add that DID
+    # carry '&al=' keeps its handshake title even though the service would answer differently:
+    # '&al=' is a sibling's considered answer (LBF sends MusicBrainz's release name on
+    # purpose), and overwriting it would undo the 0.1.92 decision svc_title exists to protect.
+    my $h = add(_client => $playing, name => '7. Low - Some Label', svc => 'spotty',
+                favurl => 'spotify:album:6S6jg2LuEwGdo9iYMSwCBS?al=HEY%20WHAT');
+    is('a handshake title is NOT overwritten by the service',
+       ($h ? $h->{album_title} : undef), 'HEY WHAT');
+}
+
+# ---------------------------------------------------------------------------
+section('2026-09-16 — a FAILED Spotify lookup never becomes the title, and is retried once');
+# Measured on plex:9000 at 13:07: Spotify answered the backfill's album call with 429. Spotty
+# reports that through the SAME callback as { name => <error text>, type => 'text' }, and
+# album() passes it on, so without a check the error message is stored as the album title.
+{
+    my $err = sub { { name => 'Spotify rate limit exceeded', type => 'text', tracks => [] } };
+    my $ok  = sub { { id => '4cogt2uqKoSyL61tzWaQei',
+                      name => "Heaux Tales, Mo' Tales: The Deluxe", artist => 'Jazmine Sullivan' } };
+    my $tick  = \&Plugins::ListenLater::Plugin::_backfillRetryTick;
+    my $retries = sub { grep { ($_->{cb} // 0) == $tick } Slim::Utils::Timers::armed() };
+
+    $FakeSpottyAPI::RESPOND = $err;
+    Slim::Utils::Timers::clear();
+    my $r1 = add(_client => $playing, name => 'Jazmine Sullivan - Heaux Tales', svc => '',
+                 favurl => 'spotify:album:4cogt2uqKoSyL61tzWaQei');
+    is('429: the row keeps its label title, not the error text',
+       ($r1 ? $r1->{album_title} : undef), 'Jazmine Sullivan - Heaux Tales');
+    is('...and gains no artist from the error object',
+       ($r1 ? ($r1->{artist} // '') : undef), '');
+    my @t = $retries->();
+    is('...and ONE retry is armed',            scalar @t, 1);
+    is('...as attempt 2',                      ($t[0] ? $t[0]{args}[0]{attempt} : undef), 2);
+    is('...remembering the label provenance',  ($t[0] ? $t[0]{args}[0]{titleFromLabel} : undef), 1);
+
+    # The retry succeeds: title and artist land from the real album.
+    $FakeSpottyAPI::RESPOND = $ok;
+    Slim::Utils::Timers::clear();
+    $tick->($t[0]{obj}, $t[0]{args}[0]);
+    my $got = Plugins::ListenLater::DB::get($r1->{id});
+    is('the retry stores the Spotify album title',
+       ($got ? $got->{album_title} : undef), "Heaux Tales, Mo' Tales: The Deluxe");
+    is('...and the artist',                    ($got ? $got->{artist} : undef), 'Jazmine Sullivan');
+    is('...and arms nothing further',          scalar($retries->()), 0);
+
+    # Two failures: give up after the second, loudly, with the row untouched.
+    $FakeSpottyAPI::RESPOND = $err;
+    Slim::Utils::Timers::clear();
+    Slim::Utils::Log::clear();
+    my $r2 = add(_client => $playing, name => 'Low - Double Negative', svc => '',
+                 favurl => 'spotify:album:1AAAAAAAAAAAAAAAAAAAAA');
+    my @t2 = $retries->();
+    is('(the first failure armed its retry)',  scalar @t2, 1);
+    Slim::Utils::Timers::clear();
+    $tick->($t2[0]{obj}, $t2[0]{args}[0]) if @t2;
+    is('a second failure arms NO third try',   scalar($retries->()), 0);
+    is('...keeps the label',
+       Plugins::ListenLater::DB::get($r2->{id})->{album_title}, 'Low - Double Negative');
+    is('...and says so in the log',
+       ((join ' ', Slim::Utils::Log::lines()) =~ /no spotify album details after 2 attempts/
+            ? 'logged' : 'SILENT'), 'logged');
+
+    # A row removed during the minute is left alone: no call is made for it.
+    Slim::Utils::Timers::clear();
+    my $r3 = add(_client => $playing, name => 'X - Gone', svc => '',
+                 favurl => 'spotify:album:1BBBBBBBBBBBBBBBBBBBBB');
+    my @t3 = $retries->();
+    is('(a retry was armed for it)',           scalar @t3, 1);
+    Plugins::ListenLater::DB::remove($r3->{id});
+    @FakeSpottyAPI::CALLS = ();
+    $tick->($t3[0]{obj}, $t3[0]{args}[0]) if @t3;
+    is('a removed row is not looked up again', scalar(@FakeSpottyAPI::CALLS), 0);
+
+    $FakeSpottyAPI::RESPOND = $ok;
+}
+
+# ---------------------------------------------------------------------------
+section('2026-09-16 — the Spotify title repair never renames ANOTHER row it merged into');
+# REPRODUCED on plex:9000 (1.0.3, 17:49): a library row "Jazmine Sullivan – Heaux Tales (2022)"
+# (362), then an LBF-shaped Spotify add of the Deluxe (363, label "Heaux Tales", no artist).
+# Classify gave 363 the year 2022, the artist backfill gave it the artist, and the key then
+# equalled 362's — so updateArtist merged 363 INTO 362, and updateAlbumTitle renamed the
+# LIBRARY row to "Heaux Tales, Mo' Tales: The Deluxe". A re-add of the library album then
+# stored a duplicate (364), its key no longer matching. The title is a fact about ONE Spotify
+# release; it may land only on a survivor that still replays that release.
+{
+    my $deluxe = sub { { id => '4cogt2uqKoSyL61tzWaQei',
+                         name => "Heaux Tales, Mo' Tales: The Deluxe", artist => 'Jazmine Sullivan',
+                         album_type => 'album', total_tracks => 20, release_date => '2022-02-11' } };
+    my $err = sub { { name => 'Spotify rate limit exceeded', type => 'text', tracks => [] } };
+    my $tick    = \&Plugins::ListenLater::Plugin::_backfillRetryTick;
+    my $retries = sub { grep { ($_->{cb} // 0) == $tick } Slim::Utils::Timers::armed() };
+    my $rows = sub {
+        grep { lc($_->{artist} // '') eq 'jazmine sullivan' }
+            @{ Plugins::ListenLater::DB::list('later', 'added') };
+    };
+    # $year must equal what the Spotify row will carry by the time its artist lands, or the
+    # keys never meet and the tests below pass without the merge ever happening — hence the
+    # '(merged)' assertions. A failed lookup also fails classify, so that row stays yearless.
+    my $seed = sub {
+        my ($year) = @_;
+        my ($id) = Plugins::ListenLater::DB::add({ source => 'library', artist => 'Jazmine Sullivan',
+            album_title => 'Heaux Tales', year => $year, ref_kind => 'album_id', ref => {} });
+        return $id;
+    };
+    my $clean = sub { Plugins::ListenLater::DB::remove($_->{id}) for $rows->() };
+
+    # FIRST-ATTEMPT path.
+    $clean->();
+    my $lib = $seed->(2022);
+    $FakeSpottyAPI::RESPOND = $deluxe;
+    Slim::Utils::Timers::clear();
+    Slim::Utils::Log::clear();
+    add(_client => $playing, name => 'Heaux Tales', svc => '',
+        favurl => 'spotify:album:4cogt2uqKoSyL61tzWaQei');
+    my @after = $rows->();
+    is('(the Spotify add merged into the library row)', scalar @after, 1);
+    is('(...and the library row is the survivor)', ($after[0] ? $after[0]{id} : undef), $lib);
+    is('the merged-into LIBRARY row keeps its own title',
+       ($after[0] ? $after[0]{album_title} : undef), 'Heaux Tales');
+    is('...and its own source',          ($after[0] ? $after[0]{source} : undef), 'library');
+    is('...and says why in the log',
+       ((join ' ', Slim::Utils::Log::lines()) =~ /not applying spotify album title/
+            ? 'logged' : 'SILENT'), 'logged');
+
+    # ...so a re-add of the library album is recognised, not duplicated (the live 364).
+    my ($again, $already) = Plugins::ListenLater::DB::add({ source => 'library',
+        artist => 'Jazmine Sullivan', album_title => 'Heaux Tales', year => 2022,
+        ref_kind => 'album_id', ref => {} });
+    is('a re-add of the library album is "already saved"', $already ? 1 : 0, 1);
+    is('...as the same row',                              $again, $lib);
+
+    # RETRY path — the merge happens inside the retry tick's own updateArtist.
+    $clean->();
+    $lib = $seed->(undef);
+    $FakeSpottyAPI::RESPOND = $err;
+    Slim::Utils::Timers::clear();
+    my $sp = add(_client => $playing, name => 'Heaux Tales', svc => '',
+                 favurl => 'spotify:album:4cogt2uqKoSyL61tzWaQei');
+    my @t = $retries->();
+    is('(the failed lookup armed a retry)', scalar @t, 1);
+    $FakeSpottyAPI::RESPOND = $deluxe;
+    Slim::Utils::Timers::clear();
+    $tick->($t[0]{obj}, $t[0]{args}[0]) if @t;
+    my $got = Plugins::ListenLater::DB::getCanonical($sp ? $sp->{id} : 0);
+    is('(the retry merged the Spotify row into the library row)',
+       ($got ? $got->{id} : undef), $lib);
+    is('the retry does not rename the library row either',
+       ($got ? $got->{album_title} : undef), 'Heaux Tales');
+
+    # CONTROL — the guard must not stop the repair on the row it is FOR. The same add with no
+    # twin on the list still shows the Spotify title (without it every assertion above passes
+    # against a build that simply never repairs anything).
+    $clean->();
+    Slim::Utils::Timers::clear();
+    my $own = add(_client => $playing, name => 'Heaux Tales', svc => '',
+                  favurl => 'spotify:album:4cogt2uqKoSyL61tzWaQei');
+    my $ownRow = Plugins::ListenLater::DB::get($own ? $own->{id} : 0);
+    is('CONTROL: an unmerged Spotify row still takes the Spotify title',
+       ($ownRow ? $ownRow->{album_title} : undef), "Heaux Tales, Mo' Tales: The Deluxe");
+
+    $clean->();
+    $FakeSpottyAPI::RESPOND = sub { { id => '4cogt2uqKoSyL61tzWaQei',
+        name => "Heaux Tales, Mo' Tales: The Deluxe", artist => 'Jazmine Sullivan' } };
+}
+
 printf "\n%d passed, %d failed\n", $pass, $fail;
 exit($fail ? 1 : 0);
