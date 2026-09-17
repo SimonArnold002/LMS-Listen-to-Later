@@ -45,6 +45,7 @@ numbers rot on the next edit; these do not.
 | `_norm` non-Latin fold, CJK/Cyrillic erasure | FIXED 0.1.143; the old generator is gone | `NO LONGER DELETES A NON-LATIN` |
 | `trackUrlKey`, `\|u:` key, nameless track, `_keyIsNamelessTrack` | DELIBERATE, owes no rung; needs a WRITER named | `THE \`\|u:\` KEY IS DELIBERATE` |
 | `_keyForRow`, dedupe key writers | one writer only, by design | `THE DEDUPE KEY HAS ONE WRITER` |
+| Default / Classic web skins, `isWeb`, old-skin dividers, info entries missing on web | **NOT SUPPORTED, by Simon 2026-09-16** — LL stays Material-only (LBF + PFR were ported; LL was not). Add and Remove/Move are Material custom actions and `menuMode` info providers, which `Slim/Menu/Base.pm:180` hides on web pages; not a gap, do not report | `LL DOES NOT SUPPORT THE OLD WEB SKINS` |
 | `_insertTrackRow`, track identity = play url | settled 0.1.129 | `IDENTITY IS ITS PLAY URL` |
 | `_migrateRefold` retry loop | cannot be trapped in one | `CANNOT be trapped` |
 | `_migrateRefold` NULL `added_at` sort | NULL sorts last, not a defect | `puts a NULL \`added_at\` LAST` |
@@ -387,6 +388,8 @@ subsystem.
   two rules above.
 
 ### A2. NOT FINDINGS — Listen Later specific
+
+- **LL DOES NOT SUPPORT THE OLD WEB SKINS (Default / Classic) — Simon, 2026-09-16.** The fleet's web-skin pass (LBF 1.0.12, PFR 0.9.44: styled textarea dividers, escaped text rows, web icons, bounce-backs, relative settings link) was deliberately NOT ported here. LL's whole job is Add and Remove/Move, and on those skins neither exists: Add and the saved row's "…" menu are Material custom actions, and the Add entries in the track/album info menus are `menuMode => 1` providers, which `Slim::Menu::Base` skips when `$tags->{menuMode}` is false (line 180 in 9.1) — verified live, a library track's Default Information page lists every other plugin's entries and none of LL's. A web-only provider plus in-drill Move/Remove rows was offered and declined: "we will not support old skins for this one". Not a gap; do not report old-skin rendering or the missing web entries. Re-open only on Simon's word.
 
 - **AN ARTIST-LESS MUSIC ROW DOES NOT EXIST, ON EITHER SIDE OF ANY COMPARE — DECLINED FOR THE
   THIRD TIME (Simon, 2026-09-10). Podcast episodes are the ONLY exception and they route
