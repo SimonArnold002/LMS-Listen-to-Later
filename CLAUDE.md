@@ -74,6 +74,7 @@ numbers rot on the next edit; these do not.
 | Spotify album TITLE never matching Played, `cleanupTags`, a Spotify row storing `"Artist - Album"`, `ref.svc_title` | **B, 1.0.5 BUILT (dev, suites green) 2026-09-16 — 1.0.3 is the last build INSTALLED + TESTED on the rig; live PLAYBACK test DEFERRED and classed OK until a user reports otherwise (Simon) — do not re-raise as unverified** — Spotify plays now match by release id (`_spotifyAlbumRecord`), title doors are the fallback; a label-titled Spotify row now DISPLAYS the Spotify album it matched to (`updateAlbumTitle`, Simon's call; verified live 1.0.1), with a failed/429 lookup refused and retried once (1.0.2). **The repair is gated on `!$already`, so a pre-existing row is repaired by DELETE-then-add, never by a plain re-add — accepted, not a defect (2026-09-16)** | `A SPOTIFY ROW'S STORED ALBUM TITLE CAN NEVER MATCH` |
 | `_updateIdentityField` / `updateAlbumTitle` guard ownership, `_titleFromLabel` provenance, "the caller owns the guard" | **C, FIXED 1.0.5 (prose only) 2026-09-16** — the DB.pm header wrongly named `updateAlbumTitle` as the guard's owner; the guard is the caller's `return unless $titleFromLabel`. Same round CLEARED `_spottyAlbumAnswered`, `_backfillRetryTick`'s stricter guard, `_mergeKeyRows`' title retention and the `_titleFromLabel` leak paths — reasons tabled in the entry, do not re-derive | `2026-09-16 review (1.0.5)` |
 | `_sameReleaseRow`, the Spotify title repair landing on a MERGED survivor, `updateAlbumTitle` after `updateArtist`, a library/Qobuz row renamed to a Spotify edition title | **C, FIXED 1.0.6 2026-09-16, REPRODUCED LIVE on 1.0.3 first, VERIFIED LIVE on 1.0.6 (installed)** — the title write (first attempt AND retry) now lands only on a canonical row that is still the same Spotify release; the retry tick shares the same helper. The trigger is an earlier same-list row with equal artist+title+YEAR from any source, NOT a yearless one (classify stamps Spotify's year before insert) | `2026-09-16 review (1.0.6)` |
+| `Browse::_extid`, `extid`, the service name gone from row line2 (`sourceLabel` no longer in any row) | **A2, Simon 2026-09-18** — the service is Material's badge on the artwork; the word came out of every row, podcasts included. Supersedes the 0.1.124/0.1.126 "keep the service on an episode" wording | `THE SERVICE IS A BADGE` |
 
 **Two standing rules that kill most repeat findings:**
 
@@ -388,6 +389,21 @@ subsystem.
   two rules above.
 
 ### A2. NOT FINDINGS — Listen Later specific
+
+- **THE SERVICE IS A BADGE — `Browse::_extid`, `%EMBLEM`, `extid` on `_albumRow` / `_playlistRow` / `_trackRow`
+  (Simon, 2026-09-18). BUILT 1.0.7, not installed.** Material (upstream `d3f1d9227`) draws a service emblem over a
+  SlimBrowse row's artwork from `extid`, reading only the part before the first `:` against its `misc/emblems.json`.
+  So the ` · Qobuz` tail came OUT of every row's line2 and the badge carries it. *"the badge goes over the artwork
+  its not in the naming at all so remove the service from the display."*
+  - Prefix = Material's key, not our source tag: `deezerpodcast` → `deezer`. Mapped: qobuz, tidal, wimp, deezer,
+    deezerpodcast, spotify, bandcamp, youtube, ytm. Library rows and any unmapped source get NO extid.
+  - Release rows carry `<svc>:album:<DB::refAlbumId>` when there is an id; tracks and playlists the bare `<svc>:`.
+  - **This supersedes the podcast wording in `_trackRow`'s old comment (0.1.124/0.1.126)** that a SERVICE episode keeps
+    "Podcast · <show> · Deezer". The badge says which service now; do not re-add the word.
+  - Accepted consequence: an unmapped service (none replayable today) and any Material without `d3f1d9227` show no
+    service at all. `Sources::sourceLabel` stays: `Plugin.pm`'s already-saved message still uses it.
+  Guard: `tools/t_resolve_count.pl` "the service is a BADGE" (10), anti-tested (no badge: 6 red; raw source tag
+  instead of Material's key: 3 red).
 
 - **LL DOES NOT SUPPORT THE OLD WEB SKINS (Default / Classic) — Simon, 2026-09-16.** The fleet's web-skin pass (LBF 1.0.12, PFR 0.9.44: styled textarea dividers, escaped text rows, web icons, bounce-backs, relative settings link) was deliberately NOT ported here. LL's whole job is Add and Remove/Move, and on those skins neither exists: Add and the saved row's "…" menu are Material custom actions, and the Add entries in the track/album info menus are `menuMode => 1` providers, which `Slim::Menu::Base` skips when `$tags->{menuMode}` is false (line 180 in 9.1) — verified live, a library track's Default Information page lists every other plugin's entries and none of LL's. A web-only provider plus in-drill Move/Remove rows was offered and declined: "we will not support old skins for this one". Not a gap; do not report old-skin rendering or the missing web entries. Re-open only on Simon's word.
 
@@ -1366,6 +1382,9 @@ subsystem.
   the repo builds a LIKE pattern from it (checked 2026-09-11; every LIKE lives in `DB.pm`).
 
 ### B. KNOWN-OPEN AND ACCEPTED — do not re-report as new
+
+- **The `extid` service badge is UNVERIFIED LIVE.** It needs a Material release containing `d3f1d9227`; until
+  then no badge renders, and (by the A2 decision) the rows show no service either. Check on the first such release.
 
 - **A SPOTIFY ROW'S STORED ALBUM TITLE CAN NEVER MATCH PLAYED FOR TWO MEASURED REASONS — FIXED IN
   DEV 1.0.2 (current dev build 1.0.3, comments only), 2026-09-16, UNCOMMITTED. INSTALLED AND

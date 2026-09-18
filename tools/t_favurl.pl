@@ -443,8 +443,9 @@ is('a date with nothing after it is untouched',
     $strip->('2026-01-05 - '), '2026-01-05 - ');
 is('undef survives',               $strip->(undef), undef);
 
-# The subtitle label. `ucfirst` was the whole rule until a source tag stopped being a service
-# name — 'deezerpodcast' would read "Deezerpodcast" in every row.
+# The source label, as the "already saved" message writes it (rows show a badge, not this).
+# `ucfirst` was the whole rule until a source tag stopped being a service name —
+# 'deezerpodcast' would read "Deezerpodcast".
 my $label = \&Plugins::ListenLater::Sources::sourceLabel;
 is('deezerpodcast reads Deezer', $label->('deezerpodcast'), 'Deezer');
 is('qobuz still ucfirsts',       $label->('qobuz'),         'Qobuz');

@@ -173,6 +173,23 @@ sub _glyphFor {
     return GLYPH_MULTI;
 }
 
+# Material's service badge over a row's artwork (Simon, 2026-09-18). Material reads only the
+# part of `extid` before the first ':' and looks it up in its misc/emblems.json, so the prefix
+# must be one of ITS keys, not our source tag (deezerpodcast -> deezer). The service name is
+# no longer written into line2: the badge replaces it. Library rows, and any source Material
+# has no badge for, get no extid. The album id rides along on release rows only, in the
+# '<svc>:album:<id>' shape Material's own streaming items use.
+my %EMBLEM = (
+    qobuz => 'qobuz', tidal => 'tidal', wimp => 'wimp', deezer => 'deezer', deezerpodcast => 'deezer',
+    spotify => 'spotify', bandcamp => 'bandcamp', youtube => 'youtube', ytm => 'ytm',
+);
+sub _extid {
+    my ($rec) = @_;
+    my $pfx = $EMBLEM{ $rec->{source} // '' } or return;
+    my $aid = ($rec->{kind} // 'album') eq 'album' ? Plugins::ListenLater::DB::refAlbumId($rec) : '';
+    return length $aid ? "$pfx:album:$aid" : "$pfx:";
+}
+
 # Dispatch a stored row to the right renderer.
 sub _row {
     my ($client, $rec) = @_;
@@ -200,10 +217,11 @@ sub _typeLabel {
 # the album's tracks gives Material the play button and Play/Play Next/Add in the
 # "…". itemActions→info adds the "…" → More context entry → our Remove/Move menu
 # (refreshes the list in place; see Plugin::_contextMenuQuery). The subtitle carries
-# the ♫ glyph + the type word ("Album"/"EP"/"Single" · source) and marks it a release;
-# the NAME line stays the plain "Artist – Album (Year)" it has always been.
+# the ♫ glyph + the type word ("Album"/"EP"/"Single") and marks it a release (the service
+# is Material's badge on the artwork, see _extid); the NAME line stays the plain "Artist – Album (Year)" it has always been.
 sub _albumRow {
     my ($client, $rec) = @_;
+    my $extid = _extid($rec);
 
     my $name = '';
     $name .= $rec->{artist} . " \x{2013} " if $rec->{artist};
@@ -219,9 +237,9 @@ sub _albumRow {
 
     return {
         name        => $name,
-        line2       => _glyphFor($rec) . ' ' . _typeLabel($client, $rec)
-                       . SEP . Plugins::ListenLater::Sources::sourceLabel($rec->{source}),
+        line2       => _glyphFor($rec) . ' ' . _typeLabel($client, $rec),
         image       => $rec->{artwork} || _iconFor($rec->{status}),
+        (defined $extid ? (extid => $extid) : ()),
         type        => 'playlist',
         url         => \&_albumTracks,
         passthrough => [ { id => $rec->{id} } ],
@@ -243,19 +261,20 @@ sub _albumRow {
 # (the precedent _trackRow set) instead of branching inside _albumRow, because that name
 # line is the whole difference and burying it in conditionals would obscure both.
 #
-# The curator, when the row supplied one, goes in the SUBTITLE — "≡ Playlist · Qobuz ·
-# Qobuz UK" — which is where a name that isn't the artist belongs.
+# The curator, when the row supplied one, goes in the SUBTITLE — "≡ Playlist · Qobuz UK"
+# — which is where a name that isn't the artist belongs.
 sub _playlistRow {
     my ($client, $rec) = @_;
+    my $extid = _extid($rec);
 
-    my $sub = _glyphFor($rec) . ' ' . _typeLabel($client, $rec)
-            . SEP . ucfirst($rec->{source} || '');
+    my $sub = _glyphFor($rec) . ' ' . _typeLabel($client, $rec);
     $sub .= SEP . $rec->{artist} if defined $rec->{artist} && length $rec->{artist};
 
     return {
         name        => $rec->{album_title} // cstring($client, 'PLUGIN_LL_UNKNOWN_ALBUM'),
         line2       => $sub,
         image       => $rec->{artwork} || _iconFor($rec->{status}),
+        (defined $extid ? (extid => $extid) : ()),
         type        => 'playlist',
         url         => \&_albumTracks,
         passthrough => [ { id => $rec->{id} } ],
@@ -270,10 +289,11 @@ sub _playlistRow {
 
 # A directly-playable single-track row. Unlike a release it plays on click (type =>
 # 'audio' with the stored play url) rather than drilling into a tracklist — a saved
-# track is one song. The "♪ Track · <album> · <source>" subtitle distinguishes it.
+# track is one song. The "♪ Track · <album>" subtitle distinguishes it.
 # Same itemActions→info "…" → More (Remove/Move) as a release row.
 sub _trackRow {
     my ($client, $rec) = @_;
+    my $extid = _extid($rec);
 
     my $ref = (ref $rec->{ref} eq 'HASH') ? $rec->{ref} : {};
 
@@ -283,21 +303,14 @@ sub _trackRow {
 
     my $sub = _glyphFor($rec) . ' ' . _typeLabel($client, $rec);
     $sub .= SEP . $rec->{album_title} if defined $rec->{album_title} && length $rec->{album_title};
-    # The source segment is dropped for the BUILT-IN podcast source only: its type word
-    # already reads "Podcast", so appending it again would give "Podcast · <show> · Podcast".
-    # A SERVICE's episode keeps it — "Podcast · <show> · Deezer", and equally
-    # "Podcast · <show> · Spotify" — because that says something the type word does not,
-    # namely which service you will be streaming it from (0.1.124, 0.1.126). This one really
-    # IS a source test rather than a podcast test, which is why it does not ask _isPodcast:
-    # the question here is "would the label repeat the type word", and only the built-in
-    # source's label does.
-    $sub .= SEP . Plugins::ListenLater::Sources::sourceLabel($rec->{source})
-        if $rec->{source} && $rec->{source} ne 'podcast';
+    # No source segment: the service is Material's badge on the artwork (_extid), which
+    # replaced the " · Qobuz" / " · Deezer" tail (Simon, 2026-09-18).
 
     return {
         name        => $name,
         line2       => $sub,
         image       => $rec->{artwork} || _iconFor($rec->{status}),
+        (defined $extid ? (extid => $extid) : ()),
         type        => 'audio',
         url         => $ref->{url},
         passthrough => [ { id => $rec->{id} } ],

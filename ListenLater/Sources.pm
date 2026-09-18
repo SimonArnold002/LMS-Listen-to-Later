@@ -1502,8 +1502,10 @@ sub stripEpisodeDatePrefix {
     return $t;
 }
 
-# How a source is written in a row's subtitle. `ucfirst` was the whole rule until a source
-# tag stopped being a service name: 'deezerpodcast' would render "Deezerpodcast". Only the
+# How a source is written in the "already saved" message (Plugin.pm `_addedMsg`, its only
+# caller). Rows do not use it: the service is a badge (`extid`), never subtitle text — see
+# §A2 "THE SERVICE IS A BADGE". `ucfirst` was the whole rule until a source tag stopped
+# being a service name: 'deezerpodcast' would render "Deezerpodcast". Only the
 # exceptions are listed; everything else keeps ucfirst, so adding a service needs no entry.
 my %SOURCE_LABEL = (
     deezerpodcast => 'Deezer',
