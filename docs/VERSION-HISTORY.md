@@ -3243,5 +3243,4 @@ Per-release user-facing notes live in `CHANGELOG.md`. Append new entries at the 
   display"). Release rows with an album id carry `<svc>:album:<id>`; `deezerpodcast` wears the
   Deezer badge; library rows get none.
   - t_resolve_count 72 → 82 (two subtitle assertions updated, 10 new), anti-tested. All 15 suites green.
-  - BUILT (sha `847c91b3…`), NOT INSTALLED. The badge is UNVERIFIED LIVE until a Material release
-    carries `d3f1d9227`. Ledger: `CLAUDE.md` §A2 `THE SERVICE IS A BADGE`.
+  - BUILT (sha `847c91b3…`). The badge is VERIFIED LIVE (Simon, 2026-09-18). Ledger: `CLAUDE.md` §A2 `THE SERVICE IS A BADGE`.
