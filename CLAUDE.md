@@ -391,7 +391,7 @@ subsystem.
 ### A2. NOT FINDINGS — Listen Later specific
 
 - **THE SERVICE IS A BADGE — `Browse::_extid`, `%EMBLEM`, `extid` on `_albumRow` / `_playlistRow` / `_trackRow`
-  (Simon, 2026-09-18). BUILT 1.0.7, INSTALLED, badge VERIFIED LIVE 2026-09-18.** Needs a Material with upstream `d3f1d9227`: tested on a 6.4.9.1 build made from upstream `master` (`mkrel.py 6.4.9.1 --nocheck`), since no official release has it yet. Material (upstream `d3f1d9227`) draws a service emblem over a
+  (Simon, 2026-09-18). BUILT 1.0.7, INSTALLED, badge VERIFIED LIVE 2026-09-18.** Needs **Material 6.4.10 or later**, the first official release carrying upstream `d3f1d9227` (Simon, 2026-09-20); it was first tested on a 6.4.9.1 build made from upstream `master` (`mkrel.py 6.4.9.1 --nocheck`), before any release had it. Material (upstream `d3f1d9227`) draws a service emblem over a
   SlimBrowse row's artwork from `extid`, reading only the part before the first `:` against its `misc/emblems.json`.
   So the ` · Qobuz` tail came OUT of every row's line2 and the badge carries it. *"the badge goes over the artwork
   its not in the naming at all so remove the service from the display."*
