@@ -256,14 +256,44 @@ my $line2 = sub { Plugins::ListenLater::Browse::_albumRow(undef, $_[0])->{line2}
 my $rel   = { artist=>'aksfx', album_title=>'Radio: Fourth Space', year=>2026,
               source=>'qobuz', rel_type=>'album', track_count=>9 };
 is('title carries NO glyph',    $row->($rel),   "aksfx \x{2013} Radio: Fourth Space (2026)");
-is('subtitle LEADS with it',    $line2->($rel), "$MANY PLUGIN_LL_TYPE_ALBUM \x{00b7} Qobuz");
+is('subtitle LEADS with it',    $line2->($rel), "$MANY PLUGIN_LL_TYPE_ALBUM");
 
 my $trk    = sub { Plugins::ListenLater::Browse::_trackRow(undef, $_[0]) };
 my $trkRec = { artist=>'Four Tet', track_title=>'Into Dust', album_title=>'Three Drums',
                source=>'qobuz', kind=>'track' };
 is('track title carries NO glyph', $trk->($trkRec)->{name}, "Four Tet \x{2013} Into Dust");
 is('track subtitle LEADS with it', $trk->($trkRec)->{line2},
-   "$ONE PLUGIN_LL_TYPE_TRACK \x{00b7} Three Drums \x{00b7} Qobuz");
+   "$ONE PLUGIN_LL_TYPE_TRACK \x{00b7} Three Drums");
+
+# ---------------------------------------------------------------------------
+section('the service is a BADGE on the artwork, not a word in the subtitle');
+# Material draws a service emblem over a row's artwork from `extid`, reading only the part
+# before the first ':' against its misc/emblems.json (Simon, 2026-09-18). So the service name
+# came OUT of line2 and every row carries extid instead. The prefix must be MATERIAL's key,
+# not our source tag — deezerpodcast has no emblem of its own and must read as deezer.
+my $alb = sub { Plugins::ListenLater::Browse::_albumRow(undef, $_[0]) };
+my $pl  = sub { Plugins::ListenLater::Browse::_playlistRow(undef, $_[0]) };
+is('album row: service + album id',
+   $alb->({ %$rel, kind => 'album', ref => { album_id => 'q123' } })->{extid}, 'qobuz:album:q123');
+is('album row: id read from passthrough too',
+   $alb->({ %$rel, source => 'deezer', kind => 'album', ref => { passthrough => { album_id => '99' } } })->{extid},
+   'deezer:album:99');
+is('album row with no id: the bare service',
+   $alb->({ %$rel, source => 'bandcamp', kind => 'album', ref => {} })->{extid}, 'bandcamp:');
+is('track row: the bare service, never an album id',
+   $trk->({ %$trkRec, ref => { url => 'qobuz://1.flac', album_id => 'q9' } })->{extid}, 'qobuz:');
+is('a Deezer podcast episode wears the DEEZER badge',
+   $trk->({ %$trkRec, source => 'deezerpodcast', ref => { url => 'deezerpodcast://5' } })->{extid}, 'deezer:');
+is('playlist row: the bare service',
+   $pl->({ source => 'tidal', kind => 'playlist', album_title => 'Mix', ref => { playlist_id => 'p1' } })->{extid}, 'tidal:');
+is('CONTROL: a library row has NO extid',
+   $alb->({ %$rel, source => 'library', kind => 'album', ref => { album_id => 7 } })->{extid}, undef);
+is('CONTROL: a source Material has no badge for has NO extid',
+   $alb->({ %$rel, source => 'soundcloud', kind => 'album', ref => {} })->{extid}, undef);
+my $pline = $pl->({ source => 'qobuz', kind => 'playlist', album_title => 'Mix', artist => 'Qobuz UK', ref => {} })->{line2};
+is('playlist subtitle keeps the curator, drops the service', $pline, "\x{2261} PLUGIN_LL_TYPE_PLAYLIST \x{00b7} Qobuz UK");
+my $ep = $trk->({ %$trkRec, source => 'deezerpodcast', album_title => 'The Show', ref => { url => 'deezerpodcast://5' } })->{line2};
+is('an episode subtitle no longer ends in the service', $ep, "\x{275d} PLUGIN_LL_TYPE_PODCAST \x{00b7} The Show");
 
 # ---------------------------------------------------------------------------
 section('hasDirectAlbumRef — is a tracklist CHEAP to fetch for this row?');

@@ -1,5 +1,18 @@
 # Changelog
 
+## 1.0.7 — 2026-09-20
+
+The service a saved row came from is now a badge on its artwork instead of words on the line beneath it.
+
+### Improvements
+
+- **The source shows as a badge.** A row saved from **Qobuz**, **TIDAL**, **Deezer**, **Spotify** or
+  **Bandcamp** now carries that service's emblem on its cover, in the same place Material puts it on
+  the service's own albums. The line beneath the title keeps its glyph and type — *♫ Album*, *♪ Track*,
+  *≡ Playlist*, *❝ Podcast* — but no longer repeats the service name, so it reads shorter. Library
+  rows are unbadged, as they have nothing to badge. Needs an up-to-date Material Skin; on an older
+  one no badge is drawn and nothing else changes.
+
 ## 1.0.6 — 2026-09-17
 
 Spotify albums now reliably move to *Played* when you hear them, and show their real album name in your list.

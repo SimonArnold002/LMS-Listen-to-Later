@@ -116,7 +116,7 @@
   <h1>Listen Later — LMS Plugin</h1>
   <p class="tagline">A plugin for <strong>Lyrion Music Server (LMS)</strong> that lets you save an album, an individual track, a curated playlist or a streaming-service podcast episode — from your <strong>local library</strong> or a <strong>streaming service</strong> (Qobuz, Tidal, Bandcamp, Deezer, Spotify) — into a curated list, browse it like a playlist, and have things move to a <strong>Played</strong> section once you've heard them. A separate <strong>Wish List</strong> sits alongside for things you mean to buy, and items move freely between the three lists.</p>
   <div class="badges">
-    <span class="badge accent">v1.0.6</span>
+    <span class="badge accent">v1.0.7</span>
     <span class="badge">LMS 9.0.0+</span>
     <span class="badge">Material Skin</span>
     <span class="badge">Library + Streaming</span>
@@ -182,7 +182,7 @@ sudo systemctl restart lyrionmusicserver</code></pre>
 <p><em>Add to Listen Later</em> and <em>Add to Wish List</em> appear in the <strong>"…"</strong> context menu of albums and tracks — local library and streaming alike. Adding something that's already saved (in any list) does nothing, so an accidental tap can't disturb your lists or bounce a Played item back.</p>
 <p>The menu wording is the same everywhere, because the row you're on already tells you what you're saving: an album row saves the album, a track row saves that track. The one exception is Material's <strong>Now Playing</strong> screen, where there's no surrounding list to make it obvious — there the menu says <strong>Add track to Listen Later</strong>, and <strong>Add album to Listen Later</strong> sits in <strong>"… → More"</strong> if you want the whole release instead.</p>
 <h3>Albums, tracks, playlists and podcasts</h3>
-<p>Each saved row is labelled with what it is on the line beneath the title, which carries a small glyph — <strong>♫</strong> for a multi-track release, <strong>♪</strong> for a single track, <strong>≡</strong> for a playlist, <strong>❝</strong> for a podcast episode — followed by the type and the source, e.g. <em>♫ Album · Qobuz</em>. The title line stays a plain <em>Artist – Album (Year)</em>:</p>
+<p>Each saved row is labelled with what it is on the line beneath the title, which carries a small glyph — <strong>♫</strong> for a multi-track release, <strong>♪</strong> for a single track, <strong>≡</strong> for a playlist, <strong>❝</strong> for a podcast episode — followed by the type, e.g. <em>♫ Album</em>. The service it came from is shown as a small badge on the row's artwork rather than written out, so the line stays short; the title line stays a plain <em>Artist – Album (Year)</em>:</p>
 <ul>
 <li><strong>Album</strong> / <strong>EP</strong> / <strong>Single</strong> — a whole release. The wording is the one MusicBrainz or the streaming service gives it, so it's shown as they have it. It isn't always literal — a release called an <em>EP</em> can hold a single track — so the <strong>glyph</strong> goes by the real track listing once the release has been counted, and only falls back to the label until then.
 </li>
@@ -211,8 +211,8 @@ sudo systemctl restart lyrionmusicserver</code></pre>
 <th>Shown in your list as</th>
 </tr></thead>
 <tbody>
-<tr><td><strong>Deezer</strong></td><td>Saved directly from its own play link</td><td><strong>Podcast</strong> · <strong>Deezer</strong></td></tr>
-<tr><td><strong>Spotify</strong> (via Spotty)</td><td>Saved directly from its own play link</td><td><strong>Podcast</strong> · <strong>Spotify</strong></td></tr>
+<tr><td><strong>Deezer</strong></td><td>Saved directly from its own play link</td><td><strong>Podcast</strong>, with the Deezer badge</td></tr>
+<tr><td><strong>Spotify</strong> (via Spotty)</td><td>Saved directly from its own play link</td><td><strong>Podcast</strong>, with the Spotify badge</td></tr>
 </tbody></table>
 <p>A Deezer or Spotify episode shows its <strong>show name</strong> only <em>sometimes</em>: the browse row those services hand over carries just the episode title and a description, so the show has to come from the service's own metadata cache — which is filled if you reached the episode by browsing its show, and empty if you didn't. Either way the episode saves, plays and marks itself Played exactly the same; it's only the subtitle that may be shorter.</p>
 <p>Qobuz, Tidal and Bandcamp have no podcasts, so there's nothing to save there.</p>

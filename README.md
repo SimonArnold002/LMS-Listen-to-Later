@@ -71,7 +71,7 @@ sudo systemctl restart lyrionmusicserver
 The menu wording is the same everywhere, because the row you're on already tells you what you're saving: an album row saves the album, a track row saves that track. The one exception is Material's **Now Playing** screen, where there's no surrounding list to make it obvious — there the menu says **Add track to Listen Later**, and **Add album to Listen Later** sits in **"… → More"** if you want the whole release instead.
 
 ### Albums, tracks, playlists and podcasts
-Each saved row is labelled with what it is on the line beneath the title, which carries a small glyph — **♫** for a multi-track release, **♪** for a single track, **≡** for a playlist, **❝** for a podcast episode — followed by the type and the source, e.g. *♫ Album · Qobuz*. The title line stays a plain *Artist – Album (Year)*:
+Each saved row is labelled with what it is on the line beneath the title, which carries a small glyph — **♫** for a multi-track release, **♪** for a single track, **≡** for a playlist, **❝** for a podcast episode — followed by the type, e.g. *♫ Album*. The service it came from is shown as a small badge on the row's artwork rather than written out, so the line stays short; the title line stays a plain *Artist – Album (Year)*:
 
 - **Album** / **EP** / **Single** — a whole release. The wording is the one MusicBrainz or the streaming service gives it, so it's shown as they have it. It isn't always literal — a release called an *EP* can hold a single track — so the **glyph** goes by the real track listing once the release has been counted, and only falls back to the label until then.
 - **Track** — one song, saved from a track row. It plays on tap rather than opening a tracklist.
@@ -95,8 +95,8 @@ Podcast **episodes** from Deezer and Spotify can be saved to *Listen Later*. Add
 
 | Source | How an episode is saved | Shown in your list as |
 |---|---|---|
-| **Deezer** | Saved directly from its own play link | **Podcast** · **Deezer** |
-| **Spotify** (via Spotty) | Saved directly from its own play link | **Podcast** · **Spotify** |
+| **Deezer** | Saved directly from its own play link | **Podcast**, with the Deezer badge |
+| **Spotify** (via Spotty) | Saved directly from its own play link | **Podcast**, with the Spotify badge |
 
 A Deezer or Spotify episode shows its **show name** only *sometimes*: the browse row those services hand over carries just the episode title and a description, so the show has to come from the service's own metadata cache — which is filled if you reached the episode by browsing its show, and empty if you didn't. Either way the episode saves, plays and marks itself Played exactly the same; it's only the subtitle that may be shorter.
 
