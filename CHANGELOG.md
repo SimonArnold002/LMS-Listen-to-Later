@@ -10,8 +10,8 @@ The service a saved row came from is now a badge on its artwork instead of words
   **Bandcamp** now carries that service's emblem on its cover, in the same place Material puts it on
   the service's own albums. The line beneath the title keeps its glyph and type — *♫ Album*, *♪ Track*,
   *≡ Playlist*, *❝ Podcast* — but no longer repeats the service name, so it reads shorter. Library
-  rows are unbadged, as they have nothing to badge. Needs an up-to-date Material Skin; on an older
-  one no badge is drawn and nothing else changes.
+  rows are unbadged, as they have nothing to badge. Needs **Material Skin 6.4.10** or later; on an
+  older one no badge is drawn and nothing else changes.
 
 ## 1.0.6 — 2026-09-17
 
